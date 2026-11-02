@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T21:29:04Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T21:54:57Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -357,6 +357,43 @@ given: the gates are the schedule.
 - **Gate**: Sly 1 function boundaries agree with the decompilation's for ≥ 99%
   of functions, every disagreement explained; < 0.1% of `.text` unexplained;
   the same reports produced for Sly 2 and 3.
+
+- **Status, 2026-11-02: gate passed** (details:
+  [research/function-discovery.md](research/function-discovery.md)).
+  - What was built: `ps2-analysis`, with the memory image, VU overlays
+    (moved from `sly-verify`), jump tables, blind function discovery, control
+    flow graphs, syscall stubs and fingerprints. Two new commands, `sly-rs
+    analyze` and `sly-rs disasm`. Sly 1's decompilation symbols are imported
+    as `games/sly1/symbols.tsv` (CC0, `cargo xtask import-sly1-symbols`).
+  - Discovery runs without symbols.
+    - It finds 3,947 of the decompilation's 3,949 Sly 1 function starts
+      (99.95%).
+    - The 2 misses are `switch` case blocks that the decompilation's Ghidra
+      pass split off as functions. They are asserted as such.
+    - Every byte of `.text` is accounted for: 16 bytes of data per game, the
+      rest functions and padding.
+  - Independent read-only checks against the other decompilations' lists
+    (not stored in the repository):
+    - Sly 1 against OpenThievius: 4,769 of 4,770 starts agree. The one
+      difference is leading padding.
+    - Sly 2 against Komasia: 6,811 of 6,816 agree.
+  - Jump tables: 196, 266 and 379 recovered, almost all bounded by their
+    range checks. Each game has 3 indirect `jr`s left, all in C-library
+    `longjmp`/unwind code.
+  - Every function gets a control-flow graph whose edges stay inside it:
+    54k, 73k and 97k blocks.
+  - Classification of calls, returns and jump-table jumps matches
+    rabbitizer's on every valid word.
+  - Deviations from the plan:
+    - No Ghidra export (O3). Discovery from the code alone agrees with two
+      independent decompilations, so the tool-time Java dependency is not
+      needed yet.
+    - Naming SDK functions in Sly 2 and 3 by exact fingerprint carries only
+      64 and 47 of Sly 1's names, because the SDK (2.4 to 3.0) and the
+      engine changed. Fuzzier matching is deferred to when hooks need the
+      names (phase 3 onwards).
+    - Kernel stubs are named by syscall number: 77 of 80 in Sly 1, 141 of
+      151 in Sly 2 and 3.
 
 ### Phase 3 - Machine model and interpreter
 

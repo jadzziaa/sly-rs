@@ -26,7 +26,7 @@ fn every_overlay_pair_is_valid() {
                 section.name
             );
         }
-        let overlays = exe.vu_overlays().unwrap();
+        let overlays = ps2_analysis::vu_overlays(&exe.image().unwrap()).unwrap();
         let (mut pairs, mut zero, mut ends) = (0, 0, 0);
         for overlay in &overlays {
             assert_eq!(

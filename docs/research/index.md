@@ -1,5 +1,9 @@
 <!-- okf index: generated; edit freely, or rerun `okf index` -->
 
+# Finding
+
+* [Function discovery in the three executables](function-discovery.md) - How ps2-analysis finds functions, jump tables and kernel stubs in the Sly executables from the code alone, measured against the Sly 1 decompilation (the phase 2 gate), two other decompilations' function lists, and rabbitizer - with every remaining disagreement explained.
+
 # Research Note
 
 * [What the three discs contain: a survey](disc-survey.md) - Measured facts about the user's three Sly Cooper USA disc images - files, executables, sections, instruction mix, VU microcode overlays, IOP modules and where the game data hides - that size and shape the recompilation plan.

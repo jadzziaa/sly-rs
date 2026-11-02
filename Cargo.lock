@@ -351,6 +351,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ps2-analysis"
+version = "0.1.0"
+dependencies = [
+ "object",
+ "ps2-isa",
+ "thiserror",
+]
+
+[[package]]
 name = "ps2-disc"
 version = "0.1.0"
 dependencies = [
@@ -500,7 +509,9 @@ dependencies = [
  "anyhow",
  "clap",
  "object",
+ "ps2-analysis",
  "ps2-disc",
+ "ps2-isa",
  "sly-common",
  "tracing",
  "tracing-subscriber",
@@ -522,6 +533,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "object",
+ "ps2-analysis",
  "ps2-disc",
  "ps2-isa",
  "rabbitizer",

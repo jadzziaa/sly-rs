@@ -137,3 +137,19 @@ pub(crate) fn for_all_words(check: impl Fn(u32) + Sync) {
         }
     });
 }
+
+#[test]
+fn destination_registers() {
+    let dest = |word| Insn::decode(word).gpr_dest();
+    assert_eq!(dest(0x27BD_FFE0), Some(29)); // addiu $sp
+    assert_eq!(dest(0x8C44_0000), Some(4)); // lw $a0
+    assert_eq!(dest(0xAFA2_0020), None); // sw
+    assert_eq!(dest(0x0080_E02D), Some(28)); // daddu $gp
+    assert_eq!(dest(0x0C07_E7AA), Some(31)); // jal
+    assert_eq!(dest(0x0060_2009), Some(4)); // jalr $a0, $v1
+    assert_eq!(dest(0x4405_0000), Some(5)); // mfc1 $a1
+    assert_eq!(dest(0x4481_0800), None); // mtc1
+    assert_eq!(dest(0x4822_0800), Some(2)); // qmfc2.ni $v0
+    assert_eq!(dest(0x0000_0000), None); // nop
+    assert_eq!(dest(0x0043_001A), None); // div
+}

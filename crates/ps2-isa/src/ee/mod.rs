@@ -159,6 +159,51 @@ impl Insn {
         (pc.wrapping_add(4) & 0xF000_0000) | (self.target() << 2)
     }
 
+    /// The general-purpose register the instruction writes, if any (never
+    /// `$zero`). Conditional moves count as writes; HI/LO, FPU and VU
+    /// registers do not.
+    #[must_use]
+    pub const fn gpr_dest(self) -> Option<u8> {
+        let reg = match self.op.format() {
+            Format::RdRsRt
+            | Format::RdRtRs
+            | Format::RdRtSa
+            | Format::Rd
+            | Format::RdRs
+            | Format::RdRt
+            | Format::MulRd
+            | Format::Jalr => self.rd(),
+            Format::RtRsImm | Format::RtRsUimm | Format::RtUimm => self.rt(),
+            Format::RtMem if !self.is_store() => self.rt(),
+            Format::RtCop0 | Format::RtFs | Format::RtCop1Ctl | Format::RtVf | Format::RtVi
+                if self.moves_to_gpr() =>
+            {
+                self.rt()
+            }
+            _ if self.op.flow().links() && !matches!(self.op, Op::Jalr) => 31,
+            _ => return None,
+        };
+        if reg == 0 { None } else { Some(reg) }
+    }
+
+    /// Whether this is a GPR store (`sb` … `sq`).
+    #[must_use]
+    pub const fn is_store(self) -> bool {
+        matches!(
+            self.op,
+            Op::Sb | Op::Sh | Op::Sw | Op::Swl | Op::Swr | Op::Sd | Op::Sdl | Op::Sdr | Op::Sq
+        )
+    }
+
+    /// Whether a coprocessor move goes to the GPR (`mfc0`, `mfc1`, `cfc1`,
+    /// `qmfc2`, `cfc2`).
+    const fn moves_to_gpr(self) -> bool {
+        matches!(
+            self.op,
+            Op::Mfc0 | Op::Mfc1 | Op::Cfc1 | Op::Qmfc2Ni | Op::Qmfc2I | Op::Cfc2Ni | Op::Cfc2I
+        )
+    }
+
     /// What the instruction does to control flow.
     #[must_use]
     pub const fn flow(self) -> Flow {

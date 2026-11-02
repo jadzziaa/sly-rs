@@ -101,3 +101,43 @@ fn text_matches_rabbitizer_in_all_three_executables() {
         report.join("\n")
     );
 }
+
+/// ps2-isa's control-flow kinds against rabbitizer's own classification of
+/// calls, returns and jump-table jumps, on every valid word of the three
+/// executables.
+#[test]
+#[ignore = "needs the user's discs: cargo xtask test-full"]
+fn control_flow_kinds_match_rabbitizer() {
+    use ps2_isa::ee::{Flow, Op};
+    let flags = InstructionFlags::new_extension(IsaExtension::R5900EE).with_enable_pseudos(false);
+    let mut mismatches = BTreeMap::new();
+    for game in Game::ALL {
+        let exe = Executable::load(game).unwrap();
+        for (pc, word) in Executable::words(exe.section(".text").expect(".text")) {
+            let insn = Insn::decode(word);
+            if !insn.is_valid() {
+                continue;
+            }
+            let theirs = Instruction::new(word, Vram::new(pc), flags);
+            let ours = (
+                matches!(insn.flow(), Flow::JumpLink | Flow::JumpRegLink),
+                insn.op() == Op::Jr && insn.rs() == 31,
+                insn.op() == Op::Jr && insn.rs() != 31,
+            );
+            let theirs = (
+                theirs.is_function_call(),
+                theirs.is_return(),
+                theirs.is_jumptable_jump(),
+            );
+            if ours != theirs {
+                *mismatches
+                    .entry(format!(
+                        "{}: ours {ours:?} rabbitizer {theirs:?}",
+                        insn.op().mnemonic()
+                    ))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}

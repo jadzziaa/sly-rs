@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 # Our crates.
+ps2-analysis = { path = "crates/ps2-analysis" }
 ps2-disc = { path = "crates/ps2-disc" }
 ps2-isa = { path = "crates/ps2-isa" }
 sly-common = { path = "crates/sly-common" }

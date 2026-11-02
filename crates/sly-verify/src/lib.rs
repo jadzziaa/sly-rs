@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSection};
+use ps2_analysis::Image;
 use ps2_disc::Disc;
 use sly_common::{Build, Config, Game, identify};
 
@@ -22,26 +23,14 @@ pub struct Section {
     pub data: Vec<u8>,
 }
 
-/// A VU microcode overlay: code `dvp-ld` placed in `.vutext` for upload to
-/// VU micro memory. The `.DVP.overlay.*` sections themselves hold only
-/// zeros; `.DVP.ovlytab` gives each overlay's load address in `.vutext`.
-pub struct Overlay {
-    /// The overlay section's name (`.DVP.overlay..<vu address>.<id>.<seq>.<n>`).
-    pub name: String,
-    /// Byte address in VU micro memory.
-    pub vu_address: u32,
-    /// Address of the code in EE memory (inside `.vutext`).
-    pub ee_address: u32,
-    /// The microcode: little-endian 64-bit instruction pairs.
-    pub code: Vec<u8>,
-}
-
 /// A game's boot executable, read from the configured disc.
 pub struct Executable {
     /// Which game.
     pub game: Game,
     /// Its sections with contents, in file order.
     pub sections: Vec<Section>,
+    /// The ELF file.
+    pub elf: Vec<u8>,
 }
 
 impl Executable {
@@ -79,7 +68,11 @@ impl Executable {
                 })
             })
             .collect();
-        Ok(Self { game, sections })
+        Ok(Self {
+            game,
+            sections,
+            elf: id.elf,
+        })
     }
 
     /// The section called `name`.
@@ -88,54 +81,13 @@ impl Executable {
         self.sections.iter().find(|section| section.name == name)
     }
 
-    /// The VU microcode overlays listed in `.DVP.ovlytab`: 12-byte entries of
-    /// (name offset in `.DVP.ovlystrtab`, EE load address, VU address).
+    /// The executable loaded as the EE sees it.
     ///
     /// # Errors
     ///
-    /// If a table, a named section or the code is missing or out of range.
-    pub fn vu_overlays(&self) -> Result<Vec<Overlay>> {
-        let table = self.section(".DVP.ovlytab").context(".DVP.ovlytab")?;
-        let names = self.section(".DVP.ovlystrtab").context(".DVP.ovlystrtab")?;
-        let vutext = self.section(".vutext").context(".vutext")?;
-        let word = |bytes: &[u8], at: usize| {
-            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-        };
-        table
-            .data
-            .as_chunks::<12>()
-            .0
-            .iter()
-            .map(|entry| {
-                let name_at = word(entry, 0) as usize;
-                let name_end = names.data[name_at..]
-                    .iter()
-                    .position(|&b| b == 0)
-                    .context("overlay name")?
-                    + name_at;
-                let name = String::from_utf8_lossy(&names.data[name_at..name_end]).into_owned();
-                let (ee_address, vu_address) = (word(entry, 4), word(entry, 8));
-                let size = self
-                    .section(&name)
-                    .with_context(|| format!("section {name}"))?
-                    .data
-                    .len();
-                let start = ee_address
-                    .checked_sub(vutext.address)
-                    .context("overlay before .vutext")? as usize;
-                let code = vutext
-                    .data
-                    .get(start..start + size)
-                    .context("overlay beyond .vutext")?
-                    .to_vec();
-                Ok(Overlay {
-                    name,
-                    vu_address,
-                    ee_address,
-                    code,
-                })
-            })
-            .collect()
+    /// If the ELF cannot be loaded.
+    pub fn image(&self) -> Result<Image> {
+        Ok(Image::from_elf(&self.elf)?)
     }
 
     /// The little-endian 32-bit words of a section with their addresses.

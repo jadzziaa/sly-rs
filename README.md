@@ -11,7 +11,7 @@ The game's own code is translated into Rust ahead of time. A Rust runtime
 stands in for the PS2's kernel, IOP, graphics, sound and movie hardware, and
 all game data is read from your disc at run time.
 
-**Status: phase 1 of 12 (instruction set) done.** Nothing playable yet. The plan,
+**Status: phase 2 of 12 (analysis) done.** Nothing playable yet. The plan,
 its phases and the research behind it are in [docs/](docs/index.md), starting
 with [docs/plan.md](docs/plan.md).
 
@@ -32,9 +32,14 @@ cp sly-rs.example.toml sly-rs.toml   # then point it at your disc images
 cargo run --release -p sly-app -- info
 ```
 
-`sly-rs info` identifies each disc against the supported builds. It then
-prints the disc's files, the executable's sections, its VU microcode overlays
-and its IOP modules. `--verify` also hashes the whole image.
+Commands so far:
+- `sly-rs info` identifies each disc against the supported builds and prints
+  its files, the executable's sections, VU microcode overlays and IOP modules.
+  `--verify` also hashes the whole image.
+- `sly-rs analyze` reports the functions, jump tables, kernel call stubs and
+  VU overlays found in each executable. `--functions` lists the functions.
+- `sly-rs disasm sly1 1f6c90 40` disassembles from an address, marking the
+  functions found and their known names.
 
 ## Development
 

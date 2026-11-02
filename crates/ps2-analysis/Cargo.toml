@@ -1,0 +1,16 @@
+[package]
+name = "ps2-analysis"
+description = "Analysis of PS2 executables: memory image, VU overlays, functions, control flow, jump tables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+object.workspace = true
+ps2-isa.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
