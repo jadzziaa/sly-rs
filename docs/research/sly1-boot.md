@@ -1,24 +1,24 @@
 ---
 type: Finding
-title: "How Sly 1 boots in the interpreter"
+title: How Sly 1 boots in the interpreter
 description: The start-up sequence of Sly 1 (SCUS-97198) as the EE interpreter, kernel HLE and IOP side run it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, IOP modules - and where it stops in phase 3 (the 989snd sound driver).
 tags: [finding, boot, sly1, kernel, sif, rpc, phase-3]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T22:48:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T22:49:03Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-02T22:48:00Z }
 sources:
   - id: run
-    resource: "sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02"
-    title: "Runs of Sly 1 in the interpreter"
+    resource: sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02
+    title: Runs of Sly 1 in the interpreter
   - id: gate
     resource: crates/sly-verify/tests/interpreter.rs
-    title: "The phase 3 gate test"
+    title: The phase 3 gate test
   - id: ps2sdk
     resource: https://github.com/ps2dev/ps2sdk
-    title: "ps2sdk: ee/kernel/src/sifcmd.c, sifrpc.c; iop/system/sifcmd; ee/rpc/cdvd (read for the protocol, not copied)"
+    title: 'ps2sdk: ee/kernel/src/sifcmd.c, sifrpc.c; iop/system/sifcmd; ee/rpc/cdvd (read for the protocol, not copied)'
   - id: symbols
     resource: games/sly1/symbols.tsv
-    title: "Sly 1 function names (TheOnlyZac/sly1, CC0)"
+    title: Sly 1 function names (TheOnlyZac/sly1, CC0)
 ---
 
 # How Sly 1 boots in the interpreter
@@ -70,6 +70,13 @@ instructions per second, about 0.6 times real time.
    The reply is zeros, and the driver's EE side then loops forever printing
    `989snd.c: Sif says RPC isn't busy, but we still don't have returns from
    the IOP!`
+
+## Graphics, in passing
+
+Start-up kicks the GIF DMA channel five times. Phase 3 completes each kick at
+once without moving data. A packet that sets GS state a later wait depends on
+(`SIGNAL`/`FINISH` bits in the CSR, polled by `sceGsSyncV` and the like)
+would go unnoticed until phase 6 replays these transfers.
 
 ## Where phase 3 stops
 

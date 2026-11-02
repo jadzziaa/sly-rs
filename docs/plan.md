@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T22:47:42Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T22:49:03Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -446,6 +446,14 @@ given: the gates are the schedule.
     - Comparisons with `ps2-float` and `ps2-oracle`.
     - Until those exist, FPU, MMI and VU0 semantics are checked only by unit
       tests and by the game booting.
+  - What "two runs agree" shows: nothing yet reads host time or randomness,
+    so it guards against future nondeterminism rather than proving much
+    today. The real determinism test is phase 4's lockstep of interpreter
+    and recompiled code.
+  - For phase 4: the kernel's thread context is a saved register set, which
+    only works while code is interpreted. Recompiled code keeps guest calls
+    on the host stack, so a blocked thread must be able to be a parked host
+    thread instead (O4). `Context` must hold either.
 
 ### Phase 4 - Recompiler
 

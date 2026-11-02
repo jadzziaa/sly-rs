@@ -693,7 +693,16 @@ impl Kernel {
             // chain to it; nothing runs there in the HLE kernel.
             0x5B => ret(cpu, i64::from(0x8000_2000 + 16 * (a0 & 0xFF))),
             0x5A => {
-                // Copy(dest, src, size): the patch's code into kernel memory.
+                // Copy(dest, src, size): the patch's code into kernel memory,
+                // never over the HLE kernel's own (interrupt stack, argv).
+                let physical = |a: u32| a & 0x1FFF_FFFF;
+                let reserved = (INTERRUPT_STACK - 0x4000)..(ARGS + 0x400);
+                let range = physical(a0)..physical(a0).saturating_add(a2);
+                if range.start < reserved.end && reserved.start < range.end {
+                    tracing::warn!(target: "ee::kernel", "Copy over the HLE kernel's memory refused: {a0:#x}+{a2:#x}");
+                    ret(cpu, -1);
+                    return Effect::Continue;
+                }
                 for i in 0..a2 {
                     let byte = mem.read8(a1 + i);
                     mem.write8(a0 + i, byte);
