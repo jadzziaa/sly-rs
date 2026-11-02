@@ -188,6 +188,20 @@ impl Image {
             .ok_or(AnalysisError::Layout("no .text section"))
     }
 
+    /// A hash (FNV-1a, 64-bit) of `.text`: generated code records the one it
+    /// was made from, and is used only with an executable that has the same.
+    #[must_use]
+    pub fn code_hash(&self) -> u64 {
+        let bytes = self
+            .text()
+            .ok()
+            .and_then(|range| self.bytes(range))
+            .unwrap_or_default();
+        bytes.iter().fold(0xCBF2_9CE4_8422_2325, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3)
+        })
+    }
+
     /// An unloaded section's contents.
     #[must_use]
     pub fn unloaded(&self, name: &str) -> Option<&[u8]> {

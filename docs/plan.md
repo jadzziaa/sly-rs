@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T23:23:50Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T23:57:09Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -243,8 +243,8 @@ Rules:
 | Floating point | PCSX2's semantics (round toward zero, no denormals, Inf/NaN as ±FLT_MAX, missing guard bits) implemented with ordinary SSE arithmetic, no MXCSR switching; `ps2-float` evaluated as implementation or oracle | physics must match the console; Sly 3's VU0 code is known to be sensitive; MXCSR switching stalled rac-rs |
 | Transcendentals | a pinned pure-Rust `libm` everywhere | last-bit differences broke rac-rs's cross-OS replays |
 | Control flow | per-function Rust `fn`; structured loops and blocks from dominators; dispatch-loop fallback for irreducible graphs; `jalr` and unknown targets through a PC table | rac-rs's proven design |
-| Guest stack | the host stack (deep recursion allowed), one host stack per guest thread | needed for direct Rust calls between generated functions |
-| EE threads | an HLE kernel with a **real scheduler**: strict priorities and the EE kernel's rotation rules; each guest thread runs on its own host stack (a host thread handing over a baton, or a stackful coroutine behind the same trait); only one runs at a time; switches only at syscalls and interrupt points | Sly's executables carry kernel thread and semaphore machinery; rac-rs's "no scheduler" shortcut cannot be assumed |
+| Guest stack | guest calls are Rust calls on the host stack, but host frames hold no guest state: compiled code returns to the machine for every system call, interrupt and thread switch, and resumes at any block (decided in phase 4, [finding](research/recompiled-control.md)) | direct Rust calls between generated functions, with one host stack and no `unsafe` |
+| EE threads | an HLE kernel with a **real scheduler**: strict priorities and the EE kernel's rotation rules; a thread switch is the kernel's saved-register swap, always on an empty host stack (see Guest stack); switches only at syscalls and interrupt points | Sly's executables carry kernel thread and semaphore machinery; rac-rs's "no scheduler" shortcut cannot be assumed |
 | Idle | a thread waiting on a semaphore that only an interrupt can signal lets the clock jump to the next event | no busy-waiting on the host; VSync waits cost nothing |
 | IOP, system side | Sony's system and driver modules (`cdvdman`, `fileio`, `sifcmd`, `sio2man`, `padman`, `mcman`/`mcserv`) answered at the RPC level in Rust; `usbd` and `lgaud` answer "no device" | known interfaces; their work is hardware access the host does differently (sectors from the image, host pads, card files) |
 | IOP, sound side | the modules the game ships for sound and streaming (`libsd`, `989snd`, `spiop`) **recompiled** from their IRX (R3000, MIPS I) like the EE code, running on an IOP kernel HLE over a SPU2 register model, on the same instruction clock (1 IOP cycle per 8 EE cycles) | exact by construction; no need to reverse-engineer `spiop`; Sly-2-Recomp does the same, rac-rs instead hand-ported 989snd |
@@ -460,10 +460,10 @@ given: the gates are the schedule.
     so it guards against future nondeterminism rather than proving much
     today. The real determinism test is phase 4's lockstep of interpreter
     and recompiled code.
-  - For phase 4: the kernel's thread context is a saved register set, which
-    only works while code is interpreted. Recompiled code keeps guest calls
-    on the host stack, so a blocked thread must be able to be a parked host
-    thread instead (O4). `Context` must hold either.
+  - For phase 4 (superseded): the concern was that a saved register set
+    works only while code is interpreted. Phase 4's generated code hands
+    control back before any switch, so the register set is all a thread
+    needs ([finding](research/recompiled-control.md)).
 
 ### Phase 4 - Recompiler
 
@@ -482,6 +482,53 @@ given: the gates are the schedule.
 - **Gate**: Sly 1 reaches the same point as phase 3 with identical RAM hashes
   at every checkpoint; ≥ 99.9% of executed instructions run in recompiled
   code; full regeneration and build time recorded (§9).
+
+- **Status, 2026-11-03: gate passed** (design:
+  [research/recompiled-control.md](research/recompiled-control.md)).
+  - What was built:
+    - `ps2-core::rec`: `Ctx`, the state generated code runs on; the PC
+      table; exits with reasons.
+    - `ps2-codegen`: each function becomes a loop over a `match` on its
+      blocks. ALU, shifts, loads and stores, branches and common FPU
+      operations are written out; the rest call the shared semantics.
+    - The dispatcher in `ps2-ee::Machine::run`: generated code where the
+      table has it, the interpreter elsewhere, with statistics.
+    - `cargo xtask recomp <game> [--build | --check]`: writes a separate
+      Cargo workspace under `generated/<game>/`, with crates of about 12,000
+      instructions and a binary that is `sly-app`'s command line plus the
+      generated code (`run`, `lockstep`).
+  - Gate (`cargo xtask recomp sly1 --check`):
+    - Sly 1 runs 300 fields recompiled and interpreted side by side.
+      Registers, RAM and the scratchpad are equal at every field, so it
+      reaches the same point as phase 3.
+    - 99.958% of instructions run compiled. The rest are almost all the
+      system call instructions of the sound driver's wait loop
+      (`FlushCache`, `Deci2Call`, `sceSifGetReg`).
+  - Measurements (§9):
+    - Generation: 4,806 functions, 24 crates, 641,509 lines, 0.6 s.
+    - Full release build of the generated workspace: 48 s on the reference
+      machine. A regeneration that changes nothing writes no files and
+      rebuilds nothing. After a change to `sly-app`, the rebuild takes
+      29.7 s and rebuilds no generated crate (target: 30 s).
+    - The recompiled machine runs about 2.4 billion instructions a second
+      in this wait loop (0.6 s for 300 fields; the interpreter takes 10.8 s).
+  - In CI, without a disc: the conformance program is recompiled at build
+    time (`conformance/rec`, an exception to the no-`build.rs` rule for our
+    own test program). It must print the expected output, stay in lockstep
+    with the interpreter (registers and RAM every 10,000 cycles) and run at
+    least 99.9% compiled. A snapshot test pins the shape of generated code.
+  - Deviations:
+    - The plan's per-function replay tests (record entry states, replay
+      through the generated function) are not built. Whole-machine
+      lockstep, which narrows a difference to a window of a few cycles,
+      covers the same ground for now.
+    - Hooks are not built yet: no function needs one before phase 5.
+  - Open:
+    - Generated code assumes the executable's code never changes in RAM.
+      Nothing checks that at run time yet (rac-rs re-validates on
+      `FlushCache`). Lockstep would show it as a difference.
+    - Recompiled code may run differently once more of the game runs. Run
+      the gate again whenever the game gets further.
 
 ### Phase 5 - IOP, disc, pad and memory card
 
@@ -704,7 +751,7 @@ on 2026-11-02: **O0 (a)**, build sly-rs; **O1 GPL-3.0-or-later**.
 | O1 | Licence | GPL-3.0-or-later; MIT OR Apache-2.0 | **GPL-3.0-or-later**: it may take code from rac-rs (GPL-3.0) and PCSX2 (GPL-3.0-or-later) as well as from the MIT, Apache-2.0 and CC0 sources; a permissive licence would rule out copying from the GPL projects |
 | O2 | How much rac-rs code to reuse | fork its `ee-core` and interpreter; reimplement using it as the design reference, porting selected pieces | **reimplement**, in the crate boundaries of §5.2 and with tests at each gate; port its float emulation, SPU2 reverb and MPEG-2 decoder where that saves weeks (needs O1 = GPL) |
 | O3 | Function bounds for Sly 2 and 3 | own discovery pass only; plus a headless Ghidra export | **both**: Ghidra (a tool-time dependency only) cross-checked by our pass |
-| O4 | Host mechanism for guest threads | host threads handing over a baton; stackful coroutines (`corosensei`) | **host threads** first, behind a trait; coroutines if switch cost shows up in profiles |
+| O4 | Host mechanism for guest threads | host threads handing over a baton; stackful coroutines (`corosensei`) | **neither**, decided in phase 4: generated code hands control back to the machine instead ([finding](research/recompiled-control.md)) |
 | O5 | Platforms | Linux; Linux then Windows; plus macOS | **Linux, then Windows** from phase 9; macOS untested |
 | O6 | Order after Sly 1 | Sly 2 then 3; Sly 3 then 2 | **Sly 2 then 3**: Sly 3's engine descends from Sly 2's, and Sly 2 has public notes to check against |
 | O7 | Repository hosting | private until a gate; public from phase 0 | **private until phase 4's gate**, then public, with the ground rules of §3 audited before the first push |

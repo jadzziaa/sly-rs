@@ -1,4 +1,5 @@
-//! `sly-rs run`: boot a game in the interpreter and report how far it gets.
+//! `sly-rs run`: boot a game and report how far it gets, and where its
+//! instructions ran.
 
 use std::io::{self, Write};
 use std::time::Instant;
@@ -8,15 +9,25 @@ use ps2_analysis::syscall_name;
 use ps2_ee::FIELD_CYCLES;
 use sly_common::Game;
 
+use crate::Recompiled;
+
 #[allow(
     clippy::too_many_lines,
     clippy::cast_precision_loss,
     reason = "a report, read top to bottom"
 )]
-pub(crate) fn run(game: &str, fields: u64, watch: &[String]) -> Result<()> {
+pub(crate) fn run(
+    game: &str,
+    fields: u64,
+    watch: &[String],
+    recompiled: Option<&Recompiled>,
+) -> Result<()> {
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
-    let (mut machine, image) = sly_common::machine::boot(game)?;
-    machine.samples = Some(std::collections::BTreeMap::new());
+    let recompiled = recompiled.filter(|_| watch.is_empty());
+    let (mut machine, image) = crate::boot(game, recompiled)?;
+    if recompiled.is_none() {
+        machine.samples = Some(std::collections::BTreeMap::new());
+    }
     for address in watch {
         let address =
             u32::from_str_radix(address.trim_start_matches("0x"), 16).context("watch address")?;
@@ -82,6 +93,27 @@ pub(crate) fn run(game: &str, fields: u64, watch: &[String]) -> Result<()> {
         machine.kernel.sif_regs, hw.sbus
     )?;
     writeln!(out, "  not built yet: {:?}", machine.skipped)?;
+    let stats = &machine.stats;
+    if stats.entries > 0 {
+        let total = stats.compiled + stats.interpreted;
+        writeln!(
+            out,
+            "  recompiled: {} of {total} instructions ({:.4}%), {} entries; exits {:?}",
+            stats.compiled,
+            100.0 * stats.compiled as f64 / total.max(1) as f64,
+            stats.entries,
+            stats.exits
+        )?;
+        let mut interpreted: Vec<(u32, u64)> =
+            stats.interpreted_at.iter().map(|(&a, &n)| (a, n)).collect();
+        interpreted.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        let top: Vec<String> = interpreted
+            .iter()
+            .take(12)
+            .map(|(a, n)| format!("{a:08x}×{n}"))
+            .collect();
+        writeln!(out, "  interpreted most at: {}", top.join(" "))?;
+    }
     let watches = machine.watches.clone();
     for (address, hits) in &watches {
         writeln!(out, "  watch {address:08x}: {} hits", hits.len())?;

@@ -4,6 +4,7 @@
 
 * [The conformance program against PCSX2](conformance.md) - Our own PS2 test program (FPU, integer, MMI, unaligned loads and stores, VU0 macro mode) run in the interpreter and in PCSX2's recompiler and interpreter - which differences were our bugs and fixed, which are PCSX2's, and why PCSX2 cannot settle the float and VU0 questions.
 * [Function discovery in the three executables](function-discovery.md) - How ps2-analysis finds functions, jump tables and kernel stubs in the Sly executables from the code alone, measured against the Sly 1 decompilation (the phase 2 gate), two other decompilations' function lists, and rabbitizer - with every remaining disagreement explained.
+* [Recompiled code hands control back instead of switching stacks](recompiled-control.md) - Why sly-rs's generated code needs neither host threads nor coroutines for EE threads - the guest's stack lives in guest memory, so compiled code can always return to the machine and resume at any block - and the invariants that keep recompiled execution identical to the interpreter's, to the cycle.
 * [How Sly 1 boots in the interpreter](sly1-boot.md) - The start-up sequence of Sly 1 (SCUS-97198) as the EE interpreter, kernel HLE and IOP side run it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, IOP modules - and where it stops in phase 3 (the 989snd sound driver).
 
 # Research Note

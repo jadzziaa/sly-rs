@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Project automation: cargo xtask ci | test-discs | check-deps"
+description = "Project automation: cargo xtask ci | test-full | check-deps | recomp | conformance-*"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,10 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+ps2-analysis.workspace = true
+ps2-codegen.workspace = true
 serde_json.workspace = true
+sly-common.workspace = true
 
 [lints]
 workspace = true

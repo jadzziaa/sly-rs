@@ -555,6 +555,7 @@ dependencies = [
  "clap",
  "object",
  "ps2-analysis",
+ "ps2-core",
  "ps2-disc",
  "ps2-ee",
  "ps2-iop",
@@ -814,7 +815,10 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ps2-analysis",
+ "ps2-codegen",
  "serde_json",
+ "sly-common",
 ]
 
 [[package]]

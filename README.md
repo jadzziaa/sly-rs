@@ -43,12 +43,18 @@ Commands so far:
 - `sly-rs run sly1 --fields 600` boots the game in the interpreter, headless,
   and reports kernel calls, threads, IOP traffic and the hottest functions;
   `--watch 1e1db8` records the arguments at an address.
+- `cargo xtask recomp sly1 --build` recompiles Sly 1 into Rust and builds
+  `generated/sly1/target/release/sly1`: the same command line with the game's
+  code compiled. Its `run` uses the generated code (`--interpret` for the
+  interpreter alone), and `lockstep` runs both side by side and compares
+  them at every field.
 
 ## Development
 
 ```bash
 cargo xtask ci           # format, clippy, rustdoc, tests, cargo deny, dependency rules
 cargo xtask test-full    # the tests that need your discs, and the exhaustive ones
+cargo xtask recomp sly1 --check  # recompile Sly 1, build it, run it in lockstep with the interpreter
 cargo xtask conformance-build   # rebuild conformance/conformance.elf (podman, ps2dev image)
 cargo xtask conformance-record  # PCSX2's output for it, headless in gamescope
 ```

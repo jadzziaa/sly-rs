@@ -6,6 +6,10 @@
 //!   user's discs and the exhaustive ones (every 32-bit word).
 //! - `check-deps`: no `ps2-*` crate may depend on a `sly-*` crate (goal G5
 //!   of docs/plan.md).
+//! - `recomp <game> [--build | --check]`: recompiles a game's executable
+//!   into crates under `generated/<game>/`; `--build` builds its binary,
+//!   `--check` also runs it in lockstep with the interpreter (the phase 4
+//!   gate).
 //! - `conformance-build`: builds `conformance/conformance.elf` with the
 //!   ps2dev toolchain (the `ps2dev/ps2dev` image, run with podman).
 //! - `conformance-record`: records PCSX2's output for it, recompiler and
@@ -23,6 +27,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+mod recomp;
+
 fn main() -> Result<()> {
     let root = workspace_root();
     let task = std::env::args().nth(1).unwrap_or_default();
@@ -30,6 +36,10 @@ fn main() -> Result<()> {
         "ci" => ci(&root),
         "test-full" => test_full(&root),
         "check-deps" => check_deps(&root),
+        "recomp" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            recomp::run(&root, &args)
+        }
         "conformance-build" => conformance_build(&root),
         "conformance-record" => conformance_record(&root),
         "import-sly1-symbols" => {
@@ -40,8 +50,8 @@ fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci | test-full | check-deps | conformance-build | \
-                 conformance-record | import-sly1-symbols FILE>"
+                "usage: cargo xtask <ci | test-full | check-deps | recomp GAME [--build|--check] | \
+                 conformance-build | conformance-record | import-sly1-symbols FILE>"
             );
             bail!("unknown task {task:?}")
         }
