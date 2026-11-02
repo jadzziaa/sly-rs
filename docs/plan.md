@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T22:49:03Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T23:23:50Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -420,8 +420,9 @@ given: the gates are the schedule.
   syscall and RPC on the way is logged and named; two runs give identical RAM
   hashes.
 
-- **Status, 2026-11-02: gate passed, two items outstanding** (details:
-  [research/sly1-boot.md](research/sly1-boot.md)).
+- **Status, 2026-11-02: gate passed; conformance done; float rules
+  unverified** (details: [research/sly1-boot.md](research/sly1-boot.md),
+  [research/conformance.md](research/conformance.md)).
   - What was built:
     - `ps2-core`: CPU state, the memory map, every R5900 operation, PS2
       float rules, MMI, and VU0 macro mode with its flags.
@@ -439,13 +440,22 @@ given: the gates are the schedule.
   - Deviation: no sectors are read before that wait. Sly 1 reads its data
     only after sound start-up, so the CD/DVD read server is written but not
     yet exercised by the game.
-  - Outstanding:
-    - The conformance programs (our own PS2 test ELFs, run on PCSX2 for
-      reference results). They need the ps2sdk toolchain, which is a
-      container image download.
-    - Comparisons with `ps2-float` and `ps2-oracle`.
-    - Until those exist, FPU, MMI and VU0 semantics are checked only by unit
-      tests and by the game booting.
+  - Conformance: our own test program (`conformance/`, 7,290 cases: FPU,
+    integer, MMI, unaligned loads and stores, VU0) runs in the interpreter
+    and in PCSX2. PCSX2 runs headless, in its recompiler and interpreter
+    modes.
+    - It found three MMI bugs (`plzcw`, `phmadh`/`phmsbh`, `pdivbw`), now
+      fixed. Every integer, MMI and load/store line now matches PCSX2 in at
+      least one mode.
+    - `cargo xtask ci` holds the output to the committed transcript.
+  - PCSX2 is not a float or VU0 reference: it uses x86 SSE arithmetic.
+    Differences remain on guard bits (add, sub, msub and the VU adds) and on
+    VU div/sqrt rounding. The float rules in `ps2-core` are unverified until
+    results from a real console exist.
+    - Contrary to the floating-point row of section 5.3, our rules are not
+      PCSX2's: PCSX2's default mode has no guard-bit model and chops VU
+      division.
+  - Outstanding: comparisons with `ps2-float` and `ps2-oracle`.
   - What "two runs agree" shows: nothing yet reads host time or randomness,
     so it guards against future nondeterminism rather than proving much
     today. The real determinism test is phase 4's lockstep of interpreter

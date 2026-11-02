@@ -6,6 +6,10 @@
 //!   user's discs and the exhaustive ones (every 32-bit word).
 //! - `check-deps`: no `ps2-*` crate may depend on a `sly-*` crate (goal G5
 //!   of docs/plan.md).
+//! - `conformance-build`: builds `conformance/conformance.elf` with the
+//!   ps2dev toolchain (the `ps2dev/ps2dev` image, run with podman).
+//! - `conformance-record`: records PCSX2's output for it, recompiler and
+//!   interpreter, into `conformance/pcsx2-*.txt` (headless, in gamescope).
 //! - `import-sly1-symbols <symbol_addrs.txt>`: converts the function symbols
 //!   of the Sly 1 decompilation (github.com/TheOnlyZac/sly1, CC0) into
 //!   `games/sly1/symbols.tsv`.
@@ -26,6 +30,8 @@ fn main() -> Result<()> {
         "ci" => ci(&root),
         "test-full" => test_full(&root),
         "check-deps" => check_deps(&root),
+        "conformance-build" => conformance_build(&root),
+        "conformance-record" => conformance_record(&root),
         "import-sly1-symbols" => {
             let source = std::env::args()
                 .nth(2)
@@ -34,7 +40,8 @@ fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci | test-full | check-deps | import-sly1-symbols FILE>"
+                "usage: cargo xtask <ci | test-full | check-deps | conformance-build | \
+                 conformance-record | import-sly1-symbols FILE>"
             );
             bail!("unknown task {task:?}")
         }
@@ -145,6 +152,45 @@ fn check_deps(root: &Path) -> Result<()> {
             "game-agnostic crates depend on Sly crates: {}",
             violations.join(", ")
         );
+    }
+    Ok(())
+}
+
+/// The ps2dev toolchain image the conformance program is built with.
+const PS2DEV_IMAGE: &str = "docker.io/ps2dev/ps2dev:v2.0.0";
+
+fn conformance_build(root: &Path) -> Result<()> {
+    let dir = root.join("conformance");
+    eprintln!("== conformance.elf ({PS2DEV_IMAGE})");
+    let volume = format!("{}:/w:Z", dir.display());
+    run(
+        Command::new("podman")
+            .args(["run", "--rm", "-v", &volume, "-w", "/w", PS2DEV_IMAGE])
+            .args(["sh", "./build.sh"]),
+        "podman",
+    )
+}
+
+fn conformance_record(root: &Path) -> Result<()> {
+    let dir = root.join("conformance");
+    for mode in ["recompiler", "interpreter"] {
+        eprintln!("== PCSX2 ({mode})");
+        run(
+            Command::new(dir.join("record-pcsx2.sh"))
+                .arg(dir.join(format!("pcsx2-{mode}.txt")))
+                .arg(mode),
+            "record-pcsx2.sh",
+        )?;
+    }
+    Ok(())
+}
+
+fn run(command: &mut Command, name: &str) -> Result<()> {
+    let status = command
+        .status()
+        .with_context(|| format!("running {name}"))?;
+    if !status.success() {
+        bail!("{name} failed");
     }
     Ok(())
 }

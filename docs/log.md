@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-02
+* **Update**: Conformance: [our test program](research/conformance.md) run in the interpreter and, headless, in PCSX2's recompiler and interpreter; three MMI bugs fixed; PCSX2 found to be no reference for float and VU0 rules, which stay unverified. [Plan](plan.md) phase 3 status updated.
 * **Update**: [Phase 3](plan.md) gate passed: the interpreter, kernel HLE and IOP side boot Sly 1 to its sound driver deterministically; [the boot sequence](research/sly1-boot.md) recorded. Conformance programs outstanding.
 * **Update**: [Phase 2](plan.md) built and its gate passed: ps2-analysis finds 99.95% of the Sly 1 decompilation's function starts blind, every miss explained; [function discovery](research/function-discovery.md) records the method and the measurements.
 * **Update**: [Phase 1](plan.md) built and its gate passed: ps2-isa (R5900 and VU micro decoding, disassembly), checked exhaustively against rabbitizer and against PCSX2's VU tables; [disc survey](research/disc-survey.md) corrected: the VU microcode is in .vutext, not in the .DVP.overlay sections.

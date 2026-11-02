@@ -68,6 +68,8 @@ pub struct Hardware {
     seen: BTreeSet<u32>,
     /// DMA kicks: channel name and count.
     pub dma_kicks: BTreeMap<&'static str, u64>,
+    /// Bytes written to the EE's debug console port (`0x1000F180`).
+    pub console: Vec<u8>,
 }
 
 impl Hardware {
@@ -87,6 +89,7 @@ impl Hardware {
             regs: BTreeMap::new(),
             seen: BTreeSet::new(),
             dma_kicks: BTreeMap::new(),
+            console: Vec::new(),
         }
     }
 
@@ -234,7 +237,9 @@ impl Mmio for HardwareHandle {
 
     fn write(&mut self, _: &mut Regions, address: u32, bytes: u32, value: u128) {
         let mut hw = self.0.borrow_mut();
-        hw.note(address, Some(value), bytes);
+        if address != 0x1000_F180 {
+            hw.note(address, Some(value), bytes);
+        }
         let value32 = value as u32;
         match address {
             0x1000_F000 => hw.intc_stat &= !value32,
@@ -244,6 +249,7 @@ impl Mmio for HardwareHandle {
                 let toggle = value32 & 0xFFFF_0000;
                 hw.d_stat = (hw.d_stat & !clear) ^ toggle;
             }
+            0x1000_F180 => hw.console.push(value as u8),
             0x1000_F200 => hw.sbus[0] = value32,
             0x1000_F220 => hw.sbus[2] |= value32,
             0x1000_F230 => hw.sbus[3] &= !value32,

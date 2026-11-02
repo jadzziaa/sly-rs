@@ -4,6 +4,7 @@
 mod analyze;
 mod disasm;
 mod elf;
+mod elf_run;
 mod info;
 mod run;
 
@@ -59,6 +60,15 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         watch: Vec<String>,
     },
+    /// Run any PS2 executable in the interpreter (a test program) and print
+    /// what it writes to the EE's debug console.
+    Elf {
+        /// The ELF file.
+        path: PathBuf,
+        /// Fields (1/59.94 s) to run at most.
+        #[arg(long, default_value_t = 600)]
+        fields: u64,
+    },
     /// Disassemble a game's executable around an address, marking the
     /// functions discovery finds (blind) and the known symbols.
     Disasm {
@@ -91,6 +101,7 @@ fn main() -> ExitCode {
             count,
         } => disasm::run(&game, &address, count),
         Command::Analyze { games, functions } => analyze::run(&games, functions),
+        Command::Elf { path, fields } => elf_run::run(&path, fields),
         Command::Run {
             game,
             fields,

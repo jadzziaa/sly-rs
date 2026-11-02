@@ -49,7 +49,14 @@ Commands so far:
 ```bash
 cargo xtask ci           # format, clippy, rustdoc, tests, cargo deny, dependency rules
 cargo xtask test-full    # the tests that need your discs, and the exhaustive ones
+cargo xtask conformance-build   # rebuild conformance/conformance.elf (podman, ps2dev image)
+cargo xtask conformance-record  # PCSX2's output for it, headless in gamescope
 ```
+
+The conformance program is our own PS2 test executable. After changing it,
+rebuild and re-record it, then review `sly-rs elf conformance/conformance.elf`
+before writing that output to `conformance/expected.txt`. The test holds the
+interpreter to that file ([docs/research/conformance.md](docs/research/conformance.md)).
 
 `cargo xtask ci` runs `cargo-nextest` and `cargo-deny` when they are
 installed, and skips them otherwise.

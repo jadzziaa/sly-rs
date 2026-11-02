@@ -176,7 +176,10 @@ pub(crate) fn execute(cpu: &mut Cpu, insn: Insn) {
                 };
                 n - 1
             };
-            u128::from(count(sw[0])) | u128::from(count(sw[1])) << 32 | (s & !u128::from(u64::MAX))
+            // The upper half of rd is left alone.
+            u128::from(count(sw[0]))
+                | u128::from(count(sw[1])) << 32
+                | (cpu.gpr[rd as usize] & !u128::from(u64::MAX))
         }
 
         // Word, halfword and byte arithmetic.
@@ -392,9 +395,10 @@ pub(crate) fn execute(cpu: &mut Cpu, insn: Insn) {
         Pdivbw => {
             let divisor = i32::from(th[0].cast_signed());
             let (mut q, mut r) = ([0u32; 4], [0u32; 4]);
+            // A remainder fits in 16 bits except after division by zero,
+            // which leaves the whole dividend in HI.
             for i in 0..4 {
                 (q[i], r[i]) = div_signed(sw[i].cast_signed(), divisor);
-                r[i] = sx32(i32::from(r[i] as i16).cast_unsigned()) as u32;
             }
             cpu.lo = from_words(q);
             cpu.hi = from_words(r);
@@ -438,10 +442,14 @@ pub(crate) fn execute(cpu: &mut Cpu, insn: Insn) {
                         }
                         .cast_unsigned()
                     };
-                    lw[0] = pair(p[1], p[0]);
-                    hw[0] = pair(p[3], p[2]);
-                    lw[2] = pair(p[5], p[4]);
-                    hw[2] = pair(p[7], p[6]);
+                    // The odd words keep each pair's first product,
+                    // inverted by phmsbh.
+                    let first = |a: i32| {
+                        let a = a.cast_unsigned();
+                        if insn.op() == Phmadh { a } else { !a }
+                    };
+                    lw = [pair(p[1], p[0]), first(p[1]), pair(p[5], p[4]), first(p[5])];
+                    hw = [pair(p[3], p[2]), first(p[3]), pair(p[7], p[6]), first(p[7])];
                 }
             }
             cpu.lo = from_words(lw);
