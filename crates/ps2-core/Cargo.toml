@@ -1,0 +1,16 @@
+[package]
+name = "ps2-core"
+description = "The EE's state and instruction semantics, shared by the interpreter and generated code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Generated code depends on this crate alone; it depends only on ps2-isa (no
+# dependencies of its own) for the decoded instruction the interpreter runs.
+[dependencies]
+ps2-isa.workspace = true
+
+[lints]
+workspace = true

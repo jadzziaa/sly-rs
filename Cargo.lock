@@ -360,6 +360,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ps2-core"
+version = "0.1.0"
+dependencies = [
+ "ps2-isa",
+]
+
+[[package]]
 name = "ps2-disc"
 version = "0.1.0"
 dependencies = [
