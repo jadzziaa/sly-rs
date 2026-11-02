@@ -209,6 +209,10 @@ pub fn name(address: u32) -> String {
 pub struct HardwareHandle(pub Rc<std::cell::RefCell<Hardware>>);
 
 impl Mmio for HardwareHandle {
+    fn set_clock(&mut self, cycles: u64) {
+        self.0.borrow().clock.set(cycles);
+    }
+
     fn read(&mut self, _: &mut Regions, address: u32, bytes: u32) -> u128 {
         let mut hw = self.0.borrow_mut();
         hw.note(address, None, bytes);
@@ -235,7 +239,7 @@ impl Mmio for HardwareHandle {
         }
     }
 
-    fn write(&mut self, _: &mut Regions, address: u32, bytes: u32, value: u128) {
+    fn write(&mut self, _: &mut Regions, address: u32, bytes: u32, value: u128) -> bool {
         let mut hw = self.0.borrow_mut();
         if address != 0x1000_F180 {
             hw.note(address, Some(value), bytes);
@@ -285,5 +289,6 @@ impl Mmio for HardwareHandle {
                 hw.regs.insert(address, value);
             }
         }
+        hw.intc_pending() != 0 || hw.dmac_pending() != 0
     }
 }

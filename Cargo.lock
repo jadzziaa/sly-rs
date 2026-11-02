@@ -148,6 +148,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 
 [[package]]
+name = "conformance-rec"
+version = "0.1.0"
+dependencies = [
+ "ps2-analysis",
+ "ps2-codegen",
+ "ps2-core",
+ "ps2-ee",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -357,6 +367,14 @@ dependencies = [
  "object",
  "ps2-isa",
  "thiserror",
+]
+
+[[package]]
+name = "ps2-codegen"
+version = "0.1.0"
+dependencies = [
+ "ps2-analysis",
+ "ps2-isa",
 ]
 
 [[package]]

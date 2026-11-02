@@ -1,11 +1,12 @@
 //! The Emotion Engine's state and the semantics of its instructions, shared
-//! by the interpreter (`ps2-ee`) and, later, recompiled code.
+//! by the interpreter (`ps2-ee`) and recompiled code.
 //!
 //! - [`Cpu`]: registers of the R5900 core, its FPU and VU0.
 //! - [`Memory`]: the EE's address space; hardware registers go to an
 //!   [`Mmio`] handler the machine provides.
 //! - [`execute`]: one instruction's effect, and what the machine must do
 //!   next ([`Outcome`]).
+//! - [`rec`]: what recompiled code runs on.
 //! - [`float`]: PS2 single-precision arithmetic (no Inf/NaN, no denormals,
 //!   round toward zero, no guard bits).
 
@@ -27,11 +28,13 @@ mod exec;
 pub mod float;
 pub mod mem;
 mod mmi;
+pub mod rec;
 pub mod vu0;
 
 pub use cpu::{Cpu, Vu0};
 pub use exec::{Outcome, execute};
 pub use mem::{Memory, Mmio, NoMmio, Regions};
+pub use ps2_isa::ee::Insn;
 
 #[cfg(test)]
 mod tests;

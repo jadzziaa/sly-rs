@@ -1,0 +1,24 @@
+[package]
+name = "conformance-rec"
+description = "The conformance program recompiled at build time, to test ps2-codegen without a disc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ps2-core.workspace = true
+
+# Generating at build time is the exception to the plan's rule (§5.2): this
+# is our own small test program, not a game.
+[build-dependencies]
+ps2-analysis.workspace = true
+ps2-codegen.workspace = true
+
+[dev-dependencies]
+ps2-analysis.workspace = true
+ps2-ee.workspace = true
+
+[lints]
+workspace = true

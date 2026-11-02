@@ -24,5 +24,6 @@ void test_fpu(void);
 void test_alu(void);
 void test_mmi(void);
 void test_vu0(void);
+void test_flow(void);
 
 #endif

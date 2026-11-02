@@ -2,7 +2,7 @@
 
 /// The register file and control state of the R5900 core, its FPU (COP1)
 /// and VU0 as COP2.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cpu {
     /// General-purpose registers, 128 bits wide (MMI uses all of them;
     /// ordinary instructions use the low 64).
@@ -51,7 +51,7 @@ pub mod cop0 {
 
 /// VU0's registers as COP2 sees them. Vector registers hold raw bits;
 /// `vf[0]` reads as (0, 0, 0, 1.0) and `vi[0]` as 0.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Vu0 {
     /// Floating-point vector registers: x, y, z, w.
     pub vf: [[u32; 4]; 32],

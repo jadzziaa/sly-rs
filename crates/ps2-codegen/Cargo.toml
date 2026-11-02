@@ -1,0 +1,15 @@
+[package]
+name = "ps2-codegen"
+description = "Lowers R5900 functions to Rust source over ps2-core's recompiled-code interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ps2-analysis.workspace = true
+ps2-isa.workspace = true
+
+[lints]
+workspace = true

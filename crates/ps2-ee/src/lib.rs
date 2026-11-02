@@ -26,6 +26,7 @@ use std::rc::Rc;
 
 use ps2_analysis::Image;
 use ps2_core::cpu::cop0;
+use ps2_core::rec::{Ctx, Exit, Table};
 use ps2_core::{Cpu, Memory, Outcome, execute};
 use ps2_iop::{Action, IOP_PACKET_BUFFER, Iop, Transfer};
 use ps2_isa::ee::Insn;
@@ -59,6 +60,21 @@ pub enum Stop {
     Fault(String),
 }
 
+/// Where the machine's instructions ran.
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    /// Instructions run by generated code.
+    pub compiled: u64,
+    /// Instructions run by the interpreter.
+    pub interpreted: u64,
+    /// Calls into generated code.
+    pub entries: u64,
+    /// Why generated code gave control back, by reason.
+    pub exits: BTreeMap<Exit, u64>,
+    /// Instructions interpreted, by address (the first 4096 addresses).
+    pub interpreted_at: BTreeMap<u32, u64>,
+}
+
 /// A booted machine.
 pub struct Machine {
     /// The EE core.
@@ -85,6 +101,10 @@ pub struct Machine {
     /// Watched addresses: each time the PC reaches one, `$a0`–`$a3` and
     /// `$ra` are recorded (the first 16 times).
     pub watches: BTreeMap<u32, Vec<[u32; 5]>>,
+    /// Generated code, by the addresses it can start at.
+    table: Table,
+    /// Where instructions ran.
+    pub stats: Stats,
 }
 
 impl Machine {
@@ -132,7 +152,45 @@ impl Machine {
             skipped: BTreeMap::new(),
             samples: None,
             watches: BTreeMap::new(),
+            table: Table::empty(),
+            stats: Stats::default(),
         })
+    }
+
+    /// Runs `table`'s generated code wherever it has some, the interpreter
+    /// elsewhere. Execution is the same either way, to the cycle.
+    pub fn attach(&mut self, table: Table) {
+        self.table = table;
+    }
+
+    /// Runs generated code from the current PC, if there is some and the
+    /// machine has nothing to do before `deadline`. True if it ran at least
+    /// one instruction.
+    fn run_compiled(&mut self, deadline: u64) -> bool {
+        let Some(f) = self.table.get(self.cpu.pc) else {
+            return false;
+        };
+        if !self.watches.is_empty() || self.samples.is_some() {
+            return false;
+        }
+        let before = self.cpu.cycles;
+        let mut ctx = Ctx {
+            cpu: &mut self.cpu,
+            mem: &mut self.mem,
+            deadline,
+            exiting: false,
+            exit: Exit::Return,
+            depth: 0,
+            table: &self.table,
+        };
+        f(&mut ctx);
+        let exit = if ctx.exiting { ctx.exit } else { Exit::Return };
+        let ran = self.cpu.cycles - before;
+        self.clock.set(self.cpu.cycles);
+        self.stats.entries += 1;
+        self.stats.compiled += ran;
+        *self.stats.exits.entry(exit).or_default() += 1;
+        ran > 0
     }
 
     /// The next cycle at which an event is due.
@@ -254,8 +312,17 @@ impl Machine {
                 }
                 _ => {}
             }
+            if self.run_compiled(next_event.min(end)) {
+                continue;
+            }
+            let before = self.cpu.cycles;
             if let Some(stop) = self.step() {
                 return stop;
+            }
+            let ran = self.cpu.cycles - before;
+            self.stats.interpreted += ran;
+            if !self.table.is_empty() && self.stats.interpreted_at.len() < 4096 {
+                *self.stats.interpreted_at.entry(self.cpu.pc).or_default() += ran;
             }
             next_event = next_event.min(self.next_event());
         }

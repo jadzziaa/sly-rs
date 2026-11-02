@@ -95,8 +95,15 @@ impl Regions {
 pub trait Mmio {
     /// A read of `bytes` (1, 2, 4, 8 or 16) at `address`.
     fn read(&mut self, regions: &mut Regions, address: u32, bytes: u32) -> u128;
-    /// A write of `bytes` at `address`.
-    fn write(&mut self, regions: &mut Regions, address: u32, bytes: u32, value: u128);
+    /// A write of `bytes` at `address`. True if an interrupt may be taken
+    /// after it (an enabled cause is pending): recompiled code then hands
+    /// control back to the machine at the next instruction boundary.
+    fn write(&mut self, regions: &mut Regions, address: u32, bytes: u32, value: u128) -> bool;
+    /// The clock at the instruction about to access a register. The
+    /// interpreter keeps the machine's clock current itself; recompiled code
+    /// counts a block's instructions in advance and says here what the clock
+    /// would read.
+    fn set_clock(&mut self, _cycles: u64) {}
 }
 
 /// An [`Mmio`] handler that reads zeros and ignores writes.
@@ -107,7 +114,9 @@ impl Mmio for NoMmio {
         0
     }
 
-    fn write(&mut self, _: &mut Regions, _: u32, _: u32, _: u128) {}
+    fn write(&mut self, _: &mut Regions, _: u32, _: u32, _: u128) -> bool {
+        false
+    }
 }
 
 /// The EE's view of memory.
@@ -116,6 +125,9 @@ pub struct Memory {
     pub regions: Regions,
     /// Hardware registers.
     pub mmio: Box<dyn Mmio>,
+    /// Set by a write after which the [`Mmio`] handler says an interrupt
+    /// may be taken; recompiled code clears it and exits.
+    pub attention: bool,
 }
 
 macro_rules! access {
@@ -140,9 +152,11 @@ macro_rules! access {
             const N: usize = size_of::<$ty>();
             match self.regions.slice_mut(address, N as u32) {
                 Some(bytes) => bytes.copy_from_slice(&value.to_le_bytes()),
-                None => self
-                    .mmio
-                    .write(&mut self.regions, address, N as u32, u128::from(value)),
+                None => {
+                    self.attention |=
+                        self.mmio
+                            .write(&mut self.regions, address, N as u32, u128::from(value));
+                }
             }
         }
     };
@@ -155,6 +169,7 @@ impl Memory {
         Self {
             regions: Regions::default(),
             mmio,
+            attention: false,
         }
     }
 
