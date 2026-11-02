@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T21:25:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T21:29:04Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -348,6 +348,12 @@ given: the gates are the schedule.
   with the public Sly 2 function lists as a read-only check.
 - Reports: coverage of `.text` by functions, unexplained bytes, indirect-jump
   sites without known targets.
+- Move the VU overlay extraction (`.DVP.ovlytab` → `.vutext`), written in
+  `sly-verify` during phase 1, into `ps2-analysis`: it is generic `dvp-ld`
+  layout knowledge that phase 6 feeds to the VU translator.
+- Second opinion on discovery: rabbitizer's `is_function_call`,
+  `is_return` and `is_jumptable_jump` heuristics, compared on the same 1.09 M
+  words as phase 1's disassembly check.
 - **Gate**: Sly 1 function boundaries agree with the decompilation's for ≥ 99%
   of functions, every disagreement explained; < 0.1% of `.text` unexplained;
   the same reports produced for Sly 2 and 3.
