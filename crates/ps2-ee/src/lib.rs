@@ -292,7 +292,10 @@ impl Machine {
                 } else {
                     let slot = pc.wrapping_add(4);
                     let delay = Insn::decode(self.mem.read32(slot));
+                    // The clock counts the instruction running, the delay
+                    // slot included, for hardware and `mfc0 Count` alike.
                     self.cpu.cycles += 1;
+                    self.clock.set(self.cpu.cycles);
                     match execute(&mut self.cpu, &mut self.mem, delay, slot) {
                         Outcome::Next | Outcome::InterruptsEnabled => {}
                         other => {
