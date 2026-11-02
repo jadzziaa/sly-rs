@@ -15,8 +15,16 @@ fn every_overlay_pair_is_valid() {
     for game in Game::ALL {
         let exe = Executable::load(game).unwrap();
         // The .DVP.overlay sections are dvp-ld placeholders: all zero.
-        for section in exe.sections.iter().filter(|s| s.name.starts_with(".DVP.overlay")) {
-            assert!(section.data.iter().all(|&b| b == 0), "{game} {}: not all zero", section.name);
+        for section in exe
+            .sections
+            .iter()
+            .filter(|s| s.name.starts_with(".DVP.overlay"))
+        {
+            assert!(
+                section.data.iter().all(|&b| b == 0),
+                "{game} {}: not all zero",
+                section.name
+            );
         }
         let overlays = exe.vu_overlays().unwrap();
         let (mut pairs, mut zero, mut ends) = (0, 0, 0);
