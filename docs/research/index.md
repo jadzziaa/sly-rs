@@ -1,0 +1,7 @@
+<!-- okf index: generated; edit freely, or rerun `okf index` -->
+
+# Research Note
+
+* [What the three discs contain: a survey](disc-survey.md) - Measured facts about the user's three Sly Cooper USA disc images - files, executables, sections, instruction mix, VU microcode overlays, IOP modules and where the game data hides - that size and shape the recompilation plan.
+* [The Sly and PS2 recompilation landscape](landscape.md) - Prior art for porting the Sly trilogy (decompilations, a hand-written Sly 1 port, an existing C++ static recompilation of Sly 2), what is known about the Sly engine (disc layout, compression, scripting, rendering, audio, anticrack), PCSX2's quirks for these games, the PS2 recompilation ecosystem and Rust building blocks, and hardware references - as of 2026-11-02.
+* [How rac-rs is built, and what carries over to Sly](rac-rs.md) - The architecture of rac-rs (Rust static recompilation of PS2 Ratchet & Clank, v0.4.3) - workspace, the recompilation pipeline, runtime and HLE, function replacement, verification, asset handling and hard-won lessons - with an assessment of which parts are generic PS2 infrastructure and which are Ratchet-specific.

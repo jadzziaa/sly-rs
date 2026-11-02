@@ -1,0 +1,8 @@
+# Copy to sly-rs.toml (ignored by git) and point it at your own discs.
+# Relative paths are resolved against this file's directory.
+# SLY_RS_DISC_SLY1 / _SLY2 / _SLY3 override single entries.
+
+[discs]
+sly1 = "oracle/Sly Cooper and the Thievius Raccoonus (USA)/Sly Cooper and the Thievius Raccoonus (USA).iso"
+sly2 = "oracle/Sly 2 - Band of Thieves (USA)/Sly 2 - Band of Thieves (USA).iso"
+sly3 = "oracle/Sly 3 - Honor Among Thieves (USA)/Sly 3 - Honor Among Thieves (USA).iso"

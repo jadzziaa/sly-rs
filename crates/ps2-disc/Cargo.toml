@@ -1,0 +1,15 @@
+[package]
+name = "ps2-disc"
+description = "PlayStation 2 disc images: raw sectors by LBA, ISO 9660, SYSTEM.CNF, SHA-1 identification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha1.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

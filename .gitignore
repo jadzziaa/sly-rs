@@ -1,0 +1,9 @@
+# The user's discs and BIOS dumps: copyrighted, never committed.
+/oracle/
+# Rust code generated from the user's executables: derived from them, never committed.
+/generated/
+/target/
+# Local configuration (paths to the user's discs); sly-rs.example.toml is the template.
+/sly-rs.toml
+# Caches of local tools.
+/graft/
