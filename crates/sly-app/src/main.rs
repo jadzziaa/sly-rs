@@ -5,6 +5,7 @@ mod analyze;
 mod disasm;
 mod elf;
 mod info;
+mod run;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -45,6 +46,19 @@ enum Command {
         #[arg(long)]
         functions: bool,
     },
+    /// Boot a game in the interpreter, headless, and report how far it gets:
+    /// kernel calls, threads, hardware touched, subsystems not built yet.
+    Run {
+        /// Game key (sly1, sly2, sly3).
+        game: String,
+        /// Fields (1/59.94 s) to run.
+        #[arg(long, default_value_t = 60)]
+        fields: u64,
+        /// Addresses (hex) to watch: each hit's arguments and return address
+        /// are reported, with any string the arguments point to.
+        #[arg(long, value_delimiter = ',')]
+        watch: Vec<String>,
+    },
     /// Disassemble a game's executable around an address, marking the
     /// functions discovery finds (blind) and the known symbols.
     Disasm {
@@ -77,6 +91,11 @@ fn main() -> ExitCode {
             count,
         } => disasm::run(&game, &address, count),
         Command::Analyze { games, functions } => analyze::run(&games, functions),
+        Command::Run {
+            game,
+            fields,
+            watch,
+        } => run::run(&game, fields, &watch),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

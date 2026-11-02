@@ -3,6 +3,7 @@
 # Finding
 
 * [Function discovery in the three executables](function-discovery.md) - How ps2-analysis finds functions, jump tables and kernel stubs in the Sly executables from the code alone, measured against the Sly 1 decompilation (the phase 2 gate), two other decompilations' function lists, and rabbitizer - with every remaining disagreement explained.
+* [How Sly 1 boots in the interpreter](sly1-boot.md) - The start-up sequence of Sly 1 (SCUS-97198) as the EE interpreter, kernel HLE and IOP side run it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, IOP modules - and where it stops in phase 3 (the 989snd sound driver).
 
 # Research Note
 

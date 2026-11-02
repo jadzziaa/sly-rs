@@ -66,6 +66,9 @@ pub struct Build {
     pub image_size: u64,
     /// SHA-1 of the whole disc image.
     pub image_sha1: Sha1Digest,
+    /// The version the IOP's module loader reports, from the IOP image the
+    /// game boots (`IOPRP243.IMG`: 2430).
+    pub iop_version: [u8; 4],
 }
 
 /// The supported builds: the USA 1.00 releases, measured from the user's
@@ -80,6 +83,7 @@ pub const BUILDS: [Build; 3] = [
         elf_sha1: Sha1Digest::from_hex("57dc305db57932ad3f1122966cdb695d2e62a47a"),
         image_size: 2_802_319_360,
         image_sha1: Sha1Digest::from_hex("347b54b4a0d8b2c2e6c18cdbde5f1cabcc45b5da"),
+        iop_version: *b"2430",
     },
     Build {
         game: Game::Sly2,
@@ -89,6 +93,7 @@ pub const BUILDS: [Build; 3] = [
         elf_sha1: Sha1Digest::from_hex("de2af92a54de71e33edc8a160c31c0337a95e6f5"),
         image_size: 2_884_141_056,
         image_sha1: Sha1Digest::from_hex("7241cd566c9ee94ae1ba294ea31ed8f63fd56999"),
+        iop_version: *b"3000",
     },
     Build {
         game: Game::Sly3,
@@ -98,6 +103,7 @@ pub const BUILDS: [Build; 3] = [
         elf_sha1: Sha1Digest::from_hex("5941b7877e6bf5dfb8acb2d04a3c5059367f385b"),
         image_size: 3_553_755_136,
         image_sha1: Sha1Digest::from_hex("9f89eba20011bda2ea8e839c96b9100cf7762fc6"),
+        iop_version: *b"3000",
     },
 ];
 

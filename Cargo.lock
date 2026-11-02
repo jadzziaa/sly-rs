@@ -375,6 +375,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ps2-ee"
+version = "0.1.0"
+dependencies = [
+ "ps2-analysis",
+ "ps2-core",
+ "ps2-iop",
+ "ps2-isa",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "ps2-iop"
+version = "0.1.0"
+dependencies = [
+ "ps2-core",
+ "tracing",
+]
+
+[[package]]
 name = "ps2-isa"
 version = "0.1.0"
 dependencies = [
@@ -518,6 +538,8 @@ dependencies = [
  "object",
  "ps2-analysis",
  "ps2-disc",
+ "ps2-ee",
+ "ps2-iop",
  "ps2-isa",
  "sly-common",
  "tracing",
@@ -528,7 +550,10 @@ dependencies = [
 name = "sly-common"
 version = "0.1.0"
 dependencies = [
+ "ps2-analysis",
  "ps2-disc",
+ "ps2-ee",
+ "ps2-iop",
  "serde",
  "thiserror",
  "toml",
@@ -542,6 +567,7 @@ dependencies = [
  "object",
  "ps2-analysis",
  "ps2-disc",
+ "ps2-ee",
  "ps2-isa",
  "rabbitizer",
  "sly-common",

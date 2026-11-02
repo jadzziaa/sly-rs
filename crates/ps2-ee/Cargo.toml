@@ -1,0 +1,19 @@
+[package]
+name = "ps2-ee"
+description = "The EE machine: interpreter, hardware registers, EE kernel HLE, BIOS-free boot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ps2-analysis.workspace = true
+ps2-core.workspace = true
+ps2-iop.workspace = true
+ps2-isa.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

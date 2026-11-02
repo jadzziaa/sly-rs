@@ -15,6 +15,7 @@ ps2-disc.workspace = true
 sly-common.workspace = true
 
 [dev-dependencies]
+ps2-ee.workspace = true
 ps2-isa.workspace = true
 rabbitizer.workspace = true
 

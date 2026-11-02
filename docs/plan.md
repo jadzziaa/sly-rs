@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T21:54:57Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T22:47:42Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -419,6 +419,33 @@ given: the gates are the schedule.
   as far as its first wait on a subsystem not yet built (documented); every
   syscall and RPC on the way is logged and named; two runs give identical RAM
   hashes.
+
+- **Status, 2026-11-02: gate passed, two items outstanding** (details:
+  [research/sly1-boot.md](research/sly1-boot.md)).
+  - What was built:
+    - `ps2-core`: CPU state, the memory map, every R5900 operation, PS2
+      float rules, MMI, and VU0 macro mode with its flags.
+    - `ps2-ee`: the interpreter at 160-180 M instructions/s, V-blank events,
+      INTC/DMAC/GS CSR/timer/SBUS registers, and the kernel HLE (threads,
+      semaphores, interrupt handlers, alarms, kernel patches, SIF calls).
+    - `ps2-iop`: SIF commands and RPC, the CD/DVD servers (reads by LBA)
+      and the module loader.
+    - `sly-rs run`, with hot-function sampling and PC watchpoints.
+  - Gate: Sly 1 boots through crt0, the kernel patches, threads, the SIF
+    handshake, the IOP reboot, CD/DVD and loader RPC and the loading of six
+    modules. It stops at the 989snd sound driver's first call: its first
+    wait on a subsystem not yet built. Two 300-field runs give the same
+    state hash. Every syscall is named; RPC servers are named by module.
+  - Deviation: no sectors are read before that wait. Sly 1 reads its data
+    only after sound start-up, so the CD/DVD read server is written but not
+    yet exercised by the game.
+  - Outstanding:
+    - The conformance programs (our own PS2 test ELFs, run on PCSX2 for
+      reference results). They need the ps2sdk toolchain, which is a
+      container image download.
+    - Comparisons with `ps2-float` and `ps2-oracle`.
+    - Until those exist, FPU, MMI and VU0 semantics are checked only by unit
+      tests and by the game booting.
 
 ### Phase 4 - Recompiler
 

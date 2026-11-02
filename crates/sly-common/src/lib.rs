@@ -6,6 +6,7 @@
 
 pub mod builds;
 pub mod config;
+pub mod machine;
 pub mod symbols;
 
 pub use builds::{BUILDS, Build, Game, Identification, identify};

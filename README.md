@@ -11,7 +11,7 @@ The game's own code is translated into Rust ahead of time. A Rust runtime
 stands in for the PS2's kernel, IOP, graphics, sound and movie hardware, and
 all game data is read from your disc at run time.
 
-**Status: phase 2 of 12 (analysis) done.** Nothing playable yet. The plan,
+**Status: phase 3 of 12 (interpreter) at its gate: Sly 1 boots to its sound driver.** Nothing playable yet. The plan,
 its phases and the research behind it are in [docs/](docs/index.md), starting
 with [docs/plan.md](docs/plan.md).
 
@@ -40,6 +40,9 @@ Commands so far:
   VU overlays found in each executable. `--functions` lists the functions.
 - `sly-rs disasm sly1 1f6c90 40` disassembles from an address, marking the
   functions found and their known names.
+- `sly-rs run sly1 --fields 600` boots the game in the interpreter, headless,
+  and reports kernel calls, threads, IOP traffic and the hottest functions;
+  `--watch 1e1db8` records the arguments at an address.
 
 ## Development
 
