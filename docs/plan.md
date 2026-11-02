@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T20:54:34Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T21:25:08Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -164,7 +164,7 @@ user's ISO ──► ps2-disc (sector reader, SHA-1 gate)
                  ├─► sly-recomp (offline, once per disc):
                  │     ELF ─► ps2-analysis (functions, CFG, jump tables)
                  │         ─► ps2-codegen ─► generated/<game>/rec-NN crates (Rust)
-                 │     .DVP overlays ─► VU1 codegen ─► generated/<game>/vu crate
+                 │     VU microcode (.vutext, via .DVP.ovlytab) ─► VU1 codegen ─► generated/<game>/vu crate
                  │     IRX (libsd, 989snd, spiop) ─► R3000 codegen ─► generated/<game>/iop crate
                  │
                  └─► sly (the game binary, at run time):
@@ -207,7 +207,7 @@ sly-rs/
 │  ├─ sly-common      what the three games share: hooks, RPC servers, patches
 │  ├─ sly1  sly2  sly3   per game: hashes, bounds, hooks, configuration
 │  └─ sly-app         the binary: window, presentation, audio, input, config, CLI
-├─ xtask/             cargo xtask recomp | ci | test-discs | bench | dist
+├─ xtask/             cargo xtask recomp | ci | test-full | bench | dist
 ├─ games/sly1/…       committed data: functions.tsv, symbols.toml, hooks.toml (addresses only)
 ├─ generated/         gitignored: generated crates per game, with a stamp file
 ├─ docs/              this bundle (OKF)
@@ -277,7 +277,7 @@ given: the gates are the schedule.
   - What was built: `ps2-disc`, `sly-common` (the known-builds table, kept
     there until the per-game crates have more to hold), `sly-app` with
     `sly-rs info`, and `xtask`.
-  - Results: `info` reproduces the disc survey. `cargo xtask test-discs`
+  - Results: `info` reproduces the disc survey. `cargo xtask test-full`
     confirms all three executables and full-image SHA-1s (9 GB hashed in
     5 s). 13 unit tests pass.
   - Gaps: `cargo deny` is wired into `cargo xtask ci` but skipped until
@@ -297,6 +297,36 @@ given: the gates are the schedule.
   disassembler output on the `.DVP` overlays.
 - **Gate**: zero unexplained disagreements with the references over the three
   executables; decode throughput benchmarked.
+- **Status, 2026-11-02: gate passed.**
+  - What was built: `ps2-isa` (no dependencies, `no_std`) with 403 R5900
+    operations (base, MMI, COP0, the single-precision FPU, COP2 macro mode)
+    and VU micro mode (95 upper, 70 lower operations). The disc-dependent
+    checks live in a new crate, `sly-verify`.
+  - EE against rabbitizer, exhaustively over all 2^32 words (3 s): validity
+    and mnemonic agree. The explained differences:
+    - rabbitizer accepts base-MIPS instructions the R5900 lacks: doubles,
+      `ll`/`sc`, 64-bit multiply and divide, the extra FPU compares.
+    - It lacks the R5900's three-operand `multu`.
+    - It rejects `syscall` codes.
+    - It ignores `sync`'s stype bits.
+    - It names `sqrt.s` `c1`.
+  - Full text against rabbitizer on every word of the three executables'
+    `.text`: 1,093,523 words, 12 invalid for both, the rest identical. The
+    explained differences: rabbitizer swaps `vadda`/`vmsuba`'s sources, and
+    the `sqrt.s` name.
+  - VU against PCSX2's opcode tables, slot by slot. Two slips in PCSX2's
+    disassembler are noted: `SUBx` for `SUBAx`, `CLIP` for `CLIPw`. All
+    13,176 microcode pairs of the three games decode as valid.
+  - Throughput on random words, one core: 100 M EE decodes/s, 20 M
+    disassembled lines/s, 105 M VU pairs/s.
+  - Deviations from the plan:
+    - The VU reference is PCSX2's tables, because its disassembler has no
+      headless mode.
+    - No `insta` snapshots: unit tests compare strings directly, and the
+      1.09 M-word comparison with rabbitizer serves as the snapshot.
+  - Finding: the microcode is not in the `.DVP.overlay` sections, which
+    are zero placeholders, but in `.vutext`
+    ([disc survey §3](research/disc-survey.md)).
 
 ### Phase 2 - Analysis
 
@@ -516,7 +546,8 @@ given: the gates are the schedule.
 - **Tests**: unit tests next to code; integration tests per crate;
   property tests for instruction semantics; snapshot tests for disassembly and
   generated code shape; fuzzing for every parser that sees disc data; tests that
-  need a disc behind an `#[ignore]` tag run by `cargo xtask test-discs`.
+  need a disc, and exhaustive ones, behind an `#[ignore]` tag run by
+  `cargo xtask test-full`.
 - **Documentation**: rustdoc on every public item of `ps2-*`; design
   decisions and findings as concepts in this bundle; one finding per surprise.
 - **Commits**: small, each passing `cargo xtask ci`; conventional prefixes by

@@ -11,7 +11,7 @@ The game's own code is translated into Rust ahead of time. A Rust runtime
 stands in for the PS2's kernel, IOP, graphics, sound and movie hardware, and
 all game data is read from your disc at run time.
 
-**Status: phase 0 of 12 (foundations).** Nothing playable yet. The plan,
+**Status: phase 1 of 12 (instruction set) done.** Nothing playable yet. The plan,
 its phases and the research behind it are in [docs/](docs/index.md), starting
 with [docs/plan.md](docs/plan.md).
 
@@ -40,7 +40,7 @@ and its IOP modules. `--verify` also hashes the whole image.
 
 ```bash
 cargo xtask ci           # format, clippy, rustdoc, tests, cargo deny, dependency rules
-cargo xtask test-discs   # the tests that need your discs
+cargo xtask test-full    # the tests that need your discs, and the exhaustive ones
 ```
 
 `cargo xtask ci` runs `cargo-nextest` and `cargo-deny` when they are

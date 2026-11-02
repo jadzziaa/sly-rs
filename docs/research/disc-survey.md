@@ -3,7 +3,7 @@ type: Research Note
 title: 'What the three discs contain: a survey'
 description: Measured facts about the user's three Sly Cooper USA disc images - files, executables, sections, instruction mix, VU microcode overlays, IOP modules and where the game data hides - that size and shape the recompilation plan.
 tags: [research, disc, elf, r5900, vu1, iop, data-layout]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T20:15:07Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T21:25:08Z }
 sources:
   - id: isos
     resource: oracle/*/*.iso (the user's own discs, read-only)
@@ -74,13 +74,24 @@ built by GCC.[^readelf]
 | `.bss` | 3,871,492 B | 1,527,424 B | 1,474,720 B |
 | `.irx` (IOP modules linked into the ELF) | none (on disc) | 474,176 B | 475,072 B |
 
-`.text` starts at `0x100000` in all three. The `.DVP.overlay` sections and
-`.DVP.ovlytab` are the VU microprogram overlay table emitted by Sony's `dvp-as`:
-each entry names a VU address (`0x0`, `0x800`, ...) and a chunk of microcode
-uploaded there at run time. *Interpretation:* these are the game's VU1
-renderers, and a port must translate or reimplement every one. Unconfirmed:
-that no further microcode is loaded from disc data (to check by logging VIF1
-`MPG` uploads in PCSX2 across several levels).
+`.text` starts at `0x100000` in all three. The VU microcode is laid out by
+Sony's `dvp-ld` (measured while building phase 1, 2026-11-02):
+
+- The `.DVP.overlay..<vu address>.<id>.<seq>.<n>` sections hold **only
+  zeros**; their sizes are the sizes of the overlays.
+- The code itself lives in `.vutext`, inside DMA packets (a DMA tag, VIF
+  codes, `MPG` uploads). `.DVP.ovlytab` locates it: one 12-byte entry per
+  overlay, (name offset in `.DVP.ovlystrtab`, EE address in `.vutext`, VU
+  micro-memory address).
+- Through that table: Sly 1 has 2,702 pairs in 13 overlays, Sly 2 4,220 in
+  21, Sly 3 6,254 in 29; every pair decodes as a valid instruction (ps2-isa,
+  checked by `sly-verify`), and each game has 38-39 program ends (E flag).
+
+*Interpretation:* the large overlay groups (8 and 3 chunks of 0x800 bytes
+in Sly 1, matching the decompilation's `VU1_GlobMpg` and `VU1_BlipMpg`) are
+the VU1 renderers, and a port must translate or reimplement every one.
+Unconfirmed: that no further microcode is loaded from disc data (to check
+by logging VIF1 `MPG` uploads in PCSX2 across several levels).
 
 ## 4. Instruction mix
 

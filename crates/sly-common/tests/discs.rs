@@ -1,5 +1,5 @@
 //! Tests against the user's own discs. Ignored by default (the repository
-//! holds no game data); `cargo xtask test-discs` runs them with the discs
+//! holds no game data); `cargo xtask test-full` runs them with the discs
 //! named in `sly-rs.toml` or `SLY_RS_DISC_*`.
 
 #![allow(
@@ -24,7 +24,7 @@ fn disc_path(game: Game) -> PathBuf {
 }
 
 #[test]
-#[ignore = "needs the user's discs: cargo xtask test-discs"]
+#[ignore = "needs the user's discs: cargo xtask test-full"]
 fn each_disc_is_its_known_build() {
     for game in Game::ALL {
         let disc = Disc::open(disc_path(game)).unwrap();
@@ -42,7 +42,7 @@ fn each_disc_is_its_known_build() {
 }
 
 #[test]
-#[ignore = "needs the user's discs: cargo xtask test-discs"]
+#[ignore = "needs the user's discs: cargo xtask test-full"]
 fn each_image_hash_is_known() {
     for game in Game::ALL {
         let disc = Disc::open(disc_path(game)).unwrap();

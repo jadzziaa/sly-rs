@@ -1,0 +1,21 @@
+[package]
+name = "sly-verify"
+description = "Checks of sly-rs's layers against independent references on the user's discs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+object.workspace = true
+ps2-disc.workspace = true
+sly-common.workspace = true
+
+[dev-dependencies]
+ps2-isa.workspace = true
+rabbitizer.workspace = true
+
+[lints]
+workspace = true

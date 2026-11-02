@@ -2,7 +2,8 @@
 //!
 //! - `ci`: everything a change must pass: formatting, clippy, rustdoc, tests,
 //!   `cargo deny` (when installed) and `check-deps`.
-//! - `test-discs`: the tests that need the user's discs (ignored otherwise).
+//! - `test-full`: the ignored tests, in release mode: those that need the
+//!   user's discs and the exhaustive ones (every 32-bit word).
 //! - `check-deps`: no `ps2-*` crate may depend on a `sly-*` crate (goal G5
 //!   of docs/plan.md).
 
@@ -19,10 +20,10 @@ fn main() -> Result<()> {
     let task = std::env::args().nth(1).unwrap_or_default();
     match task.as_str() {
         "ci" => ci(&root),
-        "test-discs" => test_discs(&root),
+        "test-full" => test_full(&root),
         "check-deps" => check_deps(&root),
         _ => {
-            eprintln!("usage: cargo xtask <ci | test-discs | check-deps>");
+            eprintln!("usage: cargo xtask <ci | test-full | check-deps>");
             bail!("unknown task {task:?}")
         }
     }
@@ -82,10 +83,10 @@ fn ci(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn test_discs(root: &Path) -> Result<()> {
+fn test_full(root: &Path) -> Result<()> {
     cargo(
         root,
-        "tests that need the discs",
+        "ignored tests (discs, exhaustive)",
         &[
             "test",
             "--workspace",

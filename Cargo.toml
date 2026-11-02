@@ -13,12 +13,17 @@ publish = false
 [workspace.dependencies]
 # Our crates.
 ps2-disc = { path = "crates/ps2-disc" }
+ps2-isa = { path = "crates/ps2-isa" }
 sly-common = { path = "crates/sly-common" }
 
 # Third-party crates: few, mainstream, audited by `cargo deny` (deny.toml).
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+# Benchmarks only.
+divan = "0.1.21"
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+# Reference R5900 decoder, for tests only (ps2-isa is checked against it).
+rabbitizer = { version = "=2.0.0-alpha.9", default-features = false, features = ["R5900EE", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
