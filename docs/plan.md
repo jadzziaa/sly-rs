@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:10:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:42:15Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -194,6 +194,8 @@ sly-rs/
 │  │                  scheduler, BIOS-free boot, recompiled-code dispatcher, hooks
 │  ├─ ps2-iop         SIF and SIF RPC; HLE servers for cdvd, pad, memory card; IOP kernel
 │  │                  HLE (threads, semaphores, timers, interrupts) for recompiled IRX
+│  ├─ ps2-memcard     8 MB memory card images as PCSX2 keeps them (`.ps2`, with ECC):
+│  │                  formatting, superblock, FAT, directories
 │  ├─ ps2-dma         DMAC channels, VIF0/VIF1, GIF path arbitration
 │  ├─ ps2-vu          VU0 micro mode and VU1: interpreter, runtime for translated programs
 │  ├─ ps2-gs          GS registers, local memory and swizzling, CRTC, software rasteriser

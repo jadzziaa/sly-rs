@@ -23,6 +23,7 @@ ps2-gs = { path = "crates/ps2-gs" }
 ps2-vu = { path = "crates/ps2-vu" }
 ps2-iop = { path = "crates/ps2-iop" }
 ps2-isa = { path = "crates/ps2-isa" }
+ps2-memcard = { path = "crates/ps2-memcard" }
 sly-common = { path = "crates/sly-common" }
 
 # Third-party crates: few, mainstream, audited by `cargo deny` (deny.toml).

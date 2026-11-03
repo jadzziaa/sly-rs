@@ -1470,6 +1470,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ps2-memcard"
+version = "0.1.0"
+
+[[package]]
 name = "ps2-vu"
 version = "0.1.0"
 dependencies = [
@@ -1772,6 +1776,7 @@ dependencies = [
  "ps2-gs",
  "ps2-iop",
  "ps2-isa",
+ "ps2-memcard",
  "ps2-vu",
  "sly-common",
  "softbuffer",

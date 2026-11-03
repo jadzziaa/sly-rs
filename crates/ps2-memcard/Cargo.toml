@@ -1,0 +1,13 @@
+[package]
+name = "ps2-memcard"
+description = "PlayStation 2 memory card images (8 MB, with ECC, as PCSX2 keeps them): formatting, the superblock, the FAT and directories"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

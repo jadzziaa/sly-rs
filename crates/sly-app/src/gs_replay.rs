@@ -16,6 +16,9 @@ pub(crate) fn run(
     frames: Option<&Path>,
 ) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if let Some(dir) = frames {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
     let mut out = io::stdout().lock();
     let mut best = Duration::MAX;
     for _ in 0..repeat.max(1) {

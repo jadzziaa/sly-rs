@@ -59,6 +59,8 @@ Commands so far:
   pauses while the window is not focused. Keys and the window's size can be
   changed under `[play]` in `sly-rs.toml` (see `sly-rs.example.toml`). The
   recompiled binary below plays faster in busy scenes.
+- `sly-rs format-card card.ps2` writes a freshly formatted 8 MB memory
+  card image as PCSX2 keeps them (`--check` reads one and reports on it).
 - `cargo xtask recomp sly1 --build` recompiles Sly 1 into Rust and builds
   `generated/sly1/target/release/sly1`: the same command line with the game's
   code compiled. Its `run` uses the generated code (`--interpret` for the

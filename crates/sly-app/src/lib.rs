@@ -213,6 +213,15 @@ enum Command {
         #[arg(long)]
         interpret: bool,
     },
+    /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
+    /// as PCSX2 keeps them), or check an existing one with --check.
+    FormatCard {
+        /// The image.
+        path: PathBuf,
+        /// Read the image and report on it instead of writing one.
+        #[arg(long)]
+        check: bool,
+    },
     /// Run any PS2 executable in the interpreter (a test program) and print
     /// what it writes to the EE's debug console.
     Elf {
@@ -314,6 +323,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                     recompiled.filter(|_| !interpret),
                 )
             }),
+        Command::FormatCard { path, check } => format_card(&path, check),
         Command::GsReplay {
             path,
             repeat,
@@ -335,4 +345,27 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn format_card(path: &std::path::Path, check: bool) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    if check {
+        let image = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let card = ps2_memcard::Card::new(image).with_context(|| path.display().to_string())?;
+        let names: Vec<_> = card.root().into_iter().map(|e| e.name).collect();
+        println!(
+            "{}: formatted, {} KB free; root: {}",
+            path.display(),
+            card.free_clusters(),
+            names.join(" ")
+        );
+        return Ok(());
+    }
+    if path.exists() {
+        anyhow::bail!("{} exists: not overwriting a memory card", path.display());
+    }
+    std::fs::write(path, ps2_memcard::Card::formatted().image())
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!("{}: a formatted 8 MB memory card", path.display());
+    Ok(())
 }
