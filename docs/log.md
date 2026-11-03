@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: Cheaper GS pixels: addressing and wrapping per primitive, flat sprites written directly; measurements in [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: Interpreted EE: decode cache, direct fetch, hook filter, instructions back to back between hand-back points; PCSX2's interpreter read for comparison. Figures and what limits the interpreted build now in [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: VU float operations on four lanes (ps2_core::float::x4): figures in [research/vu-translation.md](research/vu-translation.md) and [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: GS drawing queued to a drawer thread, with uploads coalesced in order: [research/sly1-graphics.md](research/sly1-graphics.md) records the measurements (no gain with one batch in flight; upload waits; 13 million upload pieces) and the small final gain.

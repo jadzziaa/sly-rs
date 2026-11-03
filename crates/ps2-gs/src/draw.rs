@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use crate::regs::{Tex0, bits};
-use crate::{Gs, Memory, Psm, Vertex, clut_color, expand16, expand24};
+use crate::{Gs, Layout, Memory, Psm, Vertex, clut_color, expand16, expand24};
 
 /// Everything a primitive's fragments need, decoded once.
 #[allow(clippy::struct_excessive_bools, reason = "PRIM's attribute bits")]
@@ -45,6 +45,12 @@ pub(crate) struct Pipe {
     fba: bool,
     pub(crate) tex: Tex0,
     pub(crate) tex_psm: Option<Psm>,
+    /// Where the frame's, the depth buffer's and the texture's pixels live.
+    frame_layout: Layout,
+    depth_layout: Option<Layout>,
+    tex_layout: Option<Layout>,
+    /// CLAMP for U and V.
+    wrap: [Wrap; 2],
     clamp: u64,
     linear: bool,
     texa: u64,
@@ -67,6 +73,38 @@ impl Pipe {
         let ztst = bits(self.test, 17, 2);
         let on = self.zbuf.is_some() && ztst != 0;
         (on && ztst >= 2, on && !self.zmsk)
+    }
+}
+
+/// How CLAMP wraps texture coordinates on one axis.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Wrap {
+    mode: u32,
+    size: i32,
+    min: i32,
+    max: i32,
+}
+
+impl Wrap {
+    fn new(clamp: u64, axis: u32, size: i32) -> Self {
+        let (min, max) = if axis == 0 { (4, 14) } else { (24, 34) };
+        Self {
+            mode: bits(clamp, 2 * axis, 2),
+            size,
+            min: bits(clamp, min, 10) as i32,
+            max: bits(clamp, max, 10) as i32,
+        }
+    }
+
+    /// Coordinate `c` wrapped.
+    #[inline]
+    fn apply(self, c: i32) -> i32 {
+        match self.mode {
+            0 => c & (self.size - 1),
+            1 => c.clamp(0, self.size - 1),
+            2 => c.clamp(self.min, self.max),
+            _ => (c & self.min) | self.max,
+        }
     }
 }
 
@@ -236,6 +274,11 @@ impl Gs {
                 bits(c.xyoffset, 32, 16) as i32,
             ),
             frame: (fpsm, bits(c.frame, 0, 9) * 32, bits(c.frame, 16, 6)),
+            frame_layout: Layout::new(fpsm, bits(c.frame, 0, 9) * 32, bits(c.frame, 16, 6)),
+            depth_layout: (bits(c.test, 16, 1) != 0)
+                .then(|| Layout::new(zpsm, bits(c.zbuf, 0, 9) * 32, bits(c.frame, 16, 6))),
+            tex_layout: Psm::from_bits(u64::from(tex.psm))
+                .map(|psm| Layout::new(psm, tex.tbp, tex.tbw)),
             fbmsk: (c.frame >> 32) as u32,
             // ZTE off (which the manual forbids) leaves depth alone.
             zbuf: (bits(c.test, 16, 1) != 0).then_some((zpsm, bits(c.zbuf, 0, 9) * 32)),
@@ -246,6 +289,10 @@ impl Gs {
             tex,
             tex_psm: Psm::from_bits(u64::from(tex.psm)),
             clamp: c.clamp,
+            wrap: [
+                Wrap::new(c.clamp, 0, 1 << tex.tw.min(10)),
+                Wrap::new(c.clamp, 1, 1 << tex.th.min(10)),
+            ],
             linear,
             texa: self.texa,
             fogcol: self.fogcol,
@@ -384,11 +431,23 @@ impl Raster<'_> {
         let px1 = ((x1 + 15) >> 4).min(cx1 + 1);
         let py0 = ((y0 + 15) >> 4).max(cy0);
         let py1 = ((y1 + 15) >> 4).min(cy1 + 1);
+        if let Some(fill) = Fill::of(p, &fb) {
+            for y in py0..py1 {
+                if y < 0 || matches!((p.scanmsk, y & 1), (2, 0) | (3, 1)) {
+                    continue;
+                }
+                for x in px0.max(0)..px1 {
+                    self.fill(p, &fill, x as u32, y as u32);
+                }
+            }
+            return;
+        }
         let at = |c0, c1, s0, s1, s| sprite_coord(p.fst, c0, c1, s0, s1, s);
+        // U depends on the column alone: once per column, not per pixel.
+        let us: Vec<f32> = (px0..px1).map(|x| at(u0, u1, x0, x1, x * 16)).collect();
         for y in py0..py1 {
             let v = at(v0, v1, y0, y1, y * 16);
-            for x in px0..px1 {
-                let u = at(u0, u1, x0, x1, x * 16);
+            for (x, &u) in (px0..px1).zip(&us) {
                 self.fragment(p, x, y, Frag { uv: (u, v), ..fb });
             }
         }
@@ -540,40 +599,14 @@ impl Raster<'_> {
         }
     }
 
-    /// A texel of the current texture as RGBA8888, wrapped as CLAMP says.
+    /// The texel at (`u`, `v`), already wrapped, as RGBA8888.
     fn texel(&self, p: &Pipe, u: i32, v: i32) -> u32 {
-        let Some(psm) = p.tex_psm else {
+        let (Some(psm), Some(layout)) = (p.tex_psm, &p.tex_layout) else {
             return 0;
         };
-        let (w, h) = (1i32 << p.tex.tw.min(10), 1i32 << p.tex.th.min(10));
-        let wrap = |c: i32, mode: u32, size: i32, min: i32, max: i32| match mode {
-            0 => c & (size - 1),
-            1 => c.clamp(0, size - 1),
-            2 => c.clamp(min, max),
-            _ => (c & min) | max,
-        };
-        let cl = p.clamp;
-        let u = wrap(
-            u,
-            bits(cl, 0, 2),
-            w,
-            bits(cl, 4, 10) as i32,
-            bits(cl, 14, 10) as i32,
-        );
-        let v = wrap(
-            v,
-            bits(cl, 2, 2),
-            h,
-            bits(cl, 24, 10) as i32,
-            bits(cl, 34, 10) as i32,
-        );
-        let raw = self.mem.read(
-            psm,
-            p.tex.tbp,
-            p.tex.tbw,
-            (u & 0x7FF) as u32,
-            (v & 0x7FF) as u32,
-        );
+        let raw = self
+            .mem
+            .get(layout.locate((u & 0x7FF) as u32, (v & 0x7FF) as u32));
         match psm {
             Psm::Ct32 | Psm::Z32 => raw,
             Psm::Ct24 | Psm::Z24 => expand24(p.texa, raw),
@@ -585,29 +618,38 @@ impl Raster<'_> {
     fn sample(&self, p: &Pipe, (u, v): (f32, f32)) -> [i32; 4] {
         let channels =
             |c: u32| [c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, c >> 24].map(|x| x as i32);
+        let [wu, wv] = &p.wrap;
         if !p.linear {
-            return channels(self.texel(p, u.floor() as i32, v.floor() as i32));
+            let (u, v) = (wu.apply(u.floor() as i32), wv.apply(v.floor() as i32));
+            return channels(self.texel(p, u, v));
         }
         // Bilinear, with 4-bit weights: across, then down, each step
         // truncated (as PCSX2's software renderer does).
         let (u, v) = ((u * 16.0) as i32 - 8, (v * 16.0) as i32 - 8);
         let (iu, iv, fu, fv) = (u >> 4, v >> 4, u & 15, v & 15);
+        // Each column and row wrapped once.
+        let (u0, u1, v0, v1) = (
+            wu.apply(iu),
+            wu.apply(iu + 1),
+            wv.apply(iv),
+            wv.apply(iv + 1),
+        );
         // A zero weight takes nothing from the texel it weighs (`lerp(a, b,
         // 0)` is `a`), so that texel is not fetched.
-        let t00 = channels(self.texel(p, iu, iv));
+        let t00 = channels(self.texel(p, u0, v0));
         let t10 = if fu == 0 {
             t00
         } else {
-            channels(self.texel(p, iu + 1, iv))
+            channels(self.texel(p, u1, v0))
         };
         let (t01, t11) = if fv == 0 {
             (t00, t10)
         } else {
-            let t01 = channels(self.texel(p, iu, iv + 1));
+            let t01 = channels(self.texel(p, u0, v1));
             let t11 = if fu == 0 {
                 t01
             } else {
-                channels(self.texel(p, iu + 1, iv + 1))
+                channels(self.texel(p, u1, v1))
             };
             (t01, t11)
         };
@@ -618,6 +660,22 @@ impl Raster<'_> {
             let bottom = lerp(t[2][k], t[3][k], fu);
             lerp(top, bottom, fv)
         })
+    }
+
+    /// A pixel of a [`Fill`]: what [`Raster::fragment`] writes there.
+    #[inline]
+    fn fill(&self, p: &Pipe, fill: &Fill, x: u32, y: u32) {
+        if let (Some(z), Some(layout)) = (fill.depth, &p.depth_layout) {
+            self.mem.set(layout.locate(x, y), z);
+        }
+        let at = p.frame_layout.locate(x, y);
+        if fill.mask == 0 {
+            self.mem.set(at, fill.value);
+        } else {
+            let dst = self.mem.get(at);
+            self.mem
+                .set(at, (fill.value & !fill.mask) | (dst & fill.mask));
+        }
     }
 
     /// One fragment through the pixel pipeline.
@@ -635,8 +693,8 @@ impl Raster<'_> {
         // The tests that need no texture first, so a fragment they reject
         // costs no sampling; the result is the same in either order.
         let t = p.test;
-        let (fpsm, fbp, fbw) = p.frame;
-        let at = Memory::locate(fpsm, fbp, fbw, x, y);
+        let (fpsm, _, _) = p.frame;
+        let at = p.frame_layout.locate(x, y);
         let dst = self.mem.get(at);
         // Destination alpha test.
         if bits(t, 14, 1) != 0 {
@@ -651,14 +709,14 @@ impl Raster<'_> {
         }
         // Depth test; the depth is written once the alpha test allows.
         let mut depth = None;
-        if let Some((zpsm, zbp)) = p.zbuf {
+        if let (Some((zpsm, _)), Some(layout)) = (p.zbuf, &p.depth_layout) {
             let max = match zpsm {
                 Psm::Z24 => 0x00FF_FFFF,
                 Psm::Z16 | Psm::Z16s => 0xFFFF,
                 _ => u32::MAX,
             };
             let z = frag.z.min(max);
-            let z_at = Memory::locate(zpsm, zbp, fbw, x, y);
+            let z_at = layout.locate(x, y);
             let old = self.mem.get(z_at);
             let pass = match bits(t, 17, 2) {
                 0 => false,
@@ -794,6 +852,62 @@ impl Raster<'_> {
     }
 }
 
+/// A primitive whose every pixel the pipeline writes alike: no texture,
+/// fog, blending, alpha or destination-alpha test, and a depth test that
+/// passes everything (or none), so each pixel gets the same frame value
+/// (merged under FBMSK) and the same depth.
+struct Fill {
+    value: u32,
+    mask: u32,
+    /// The depth written, if it is.
+    depth: Option<u32>,
+}
+
+impl Fill {
+    /// The fill `frag`'s pixels make, if they make one.
+    fn of(p: &Pipe, frag: &Frag) -> Option<Self> {
+        let t = p.test;
+        let ztst = bits(t, 17, 2);
+        if p.tme
+            || p.fge
+            || p.abe
+            || bits(t, 0, 1) != 0
+            || bits(t, 14, 1) != 0
+            || (p.zbuf.is_some() && ztst != 1)
+        {
+            return None;
+        }
+        let (fpsm, _, _) = p.frame;
+        let depth = p.zbuf.filter(|_| !p.zmsk).map(|(zpsm, _)| {
+            let max = match zpsm {
+                Psm::Z24 => 0x00FF_FFFF,
+                Psm::Z16 | Psm::Z16s => 0xFFFF,
+                _ => u32::MAX,
+            };
+            frag.z.min(max)
+        });
+        // As `fragment` with every stage off: COLCLAMP or wrapping, FBA.
+        let c = frag.rgba.map(|v| {
+            if p.colclamp {
+                v.clamp(0, 255)
+            } else {
+                v & 0xFF
+            }
+        });
+        let mut a = frag.rgba[3] as u32 & 0xFF;
+        if p.fba {
+            a |= 0x80;
+        }
+        let rgba = c[0] as u32 | (c[1] as u32) << 8 | (c[2] as u32) << 16 | a << 24;
+        let (value, mask) = match fpsm {
+            Psm::Ct16 | Psm::Ct16s => (pack16(rgba), pack16(p.fbmsk)),
+            Psm::Ct24 => (rgba & 0x00FF_FFFF, p.fbmsk | 0xFF00_0000),
+            _ => (rgba, p.fbmsk),
+        };
+        Some(Self { value, mask, depth })
+    }
+}
+
 /// A sprite's texture coordinate at sample position `s` (1/16 pixel),
 /// between corners at `s0` and `s1` (`s0 < s1`) with coordinates `c0` and
 /// `c1`. UV (FST) is fixed point, 1/16 texel, and interpolates exactly;
@@ -876,6 +990,65 @@ mod tests {
     use crate::Gs;
     use crate::Psm;
     use crate::regs::addr;
+
+    /// A [`super::Fill`] writes, pixel for pixel, what the pipeline does:
+    /// frames of 32, 24 and 16 bits, FBMSK, FBA, COLCLAMP, depth of 32 and
+    /// 16 bits written or masked, over memory full of other values.
+    #[test]
+    fn fills_write_what_the_pipeline_writes() {
+        use super::{Fill, Frag, Raster};
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for frame_psm in [0x00u64, 0x01, 0x02, 0x0A] {
+            for zbuf in [
+                None,
+                Some((0x00u64, false)),
+                Some((0x02, true)),
+                Some((0x02, false)),
+            ] {
+                for (fbmsk, fba, colclamp) in [(0, false, true), (0x00F0_F00F, true, false)] {
+                    let mut gs = Gs::default();
+                    let random: Vec<u8> = (0..crate::mem::SIZE).map(|_| next() as u8).collect();
+                    gs.mem.load_bytes(&random);
+                    gs.write(addr::FRAME_1, 4 | 2 << 16 | frame_psm << 24 | fbmsk << 32);
+                    if let Some((zpsm, zmsk)) = zbuf {
+                        gs.write(addr::ZBUF_1, 0x28 | zpsm << 24 | u64::from(zmsk) << 32);
+                        gs.write(addr::TEST_1, 1 << 16 | 1 << 17);
+                    }
+                    gs.write(addr::FBA_1, u64::from(fba));
+                    gs.write(addr::COLCLAMP, u64::from(colclamp));
+                    let p = gs.pipe();
+                    let frag = Frag {
+                        z: next() as u32,
+                        rgba: [0x12, 0xF0, 0x7F, 0x81],
+                        uv: (0.0, 0.0),
+                        stq: [0.0; 3],
+                        f: 0,
+                    };
+                    let fill = Fill::of(&p, &frag).expect("a fill");
+                    let reference = Gs::default();
+                    reference.mem.load_bytes(&random);
+                    for _ in 0..200 {
+                        let (x, y) = ((next() % 128) as u32, (next() % 64) as u32);
+                        Raster { mem: &gs.mem }.fill(&p, &fill, x, y);
+                        Raster {
+                            mem: &reference.mem,
+                        }
+                        .fragment(&p, x as i32, y as i32, frag);
+                    }
+                    assert!(
+                        gs.mem.to_bytes() == reference.mem.to_bytes(),
+                        "frame {frame_psm:#x} zbuf {zbuf:?} fbmsk {fbmsk:#x} fba {fba}"
+                    );
+                }
+            }
+        }
+    }
 
     /// A GS drawing to a 64-pixel-wide CT32 frame at block 0, scissor wide
     /// open, no depth test.

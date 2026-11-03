@@ -30,7 +30,7 @@ pub mod thread;
 mod transfer;
 
 pub use display::{Frame, Privileged};
-pub use mem::{Memory, Psm};
+pub use mem::{Layout, Memory, Psm};
 
 use regs::{Context, Tex0, addr, bits};
 

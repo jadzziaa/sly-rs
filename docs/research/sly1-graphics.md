@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:45:28Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:05:18Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:45:28Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:05:18Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -124,6 +124,8 @@ through our GS alone, a repeatable benchmark of drawing.
 | Recompiled, four-lane VU float operations | 16.1 s | 15 ms a field | 17 ms a field |
 | Interpreted, four-lane VU float operations | 26.8 s | 32 ms a field | 31 ms a field |
 | Interpreted, faster EE | 23.4 s | | |
+| Recompiled, cheaper pixels | 15.0 s | | |
+| Interpreted, cheaper pixels | 22.5 s | | |
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals
@@ -264,13 +266,38 @@ build with translated microcode gives the same values.) The changes:
   its idle-loop skip is a speed hack that changes timing. It is a
   reference for meaning, not a model for speed.
 
+- **Cheaper pixels.** Over the first 600 fields the machine finished in
+  1.3 s and the GS 2.8 s later. A GS dump of 100 fields of the "no
+  memory card" dialog (`run --gs-dump`, replayed with `gs-replay`, which
+  now prints a hash of all of local memory) gave a repeatable benchmark:
+  about 380,000 pixels a field, nearly all sprites. Two 32 × 224 strips
+  clear each of two buffers, two more copy one buffer over the other with
+  blending, then the dialog box (8-bit texture) and the text (4-bit).
+  Profiled, a third of the time went to working out pixel addresses.
+  Changes, each leaving local memory the same:
+  - a buffer's addressing (page table, page shape, base, width) is worked
+    out once per primitive for its frame, depth buffer and texture;
+  - CLAMP's wrapping is worked out once per primitive, and bilinear
+    filtering wraps its two columns and rows once rather than per texel;
+  - a sprite's U is computed once per column, not per pixel;
+  - a sprite with no texture, fog, blending or alpha tests and a depth
+    test that passes everything writes the same value to every pixel, so
+    it is written directly; a test checks it against the pipeline pixel
+    for pixel over random memory (frames of 32, 24 and 16 bits, FBMSK,
+    FBA, COLCLAMP, depth written or masked).
+
+  The dialog replay went from 1.37 s to 0.95 s on one thread and from
+  0.61 s to 0.48 s on eight; 30 fields of the level from 0.69 s to 0.56 s
+  and 0.25 s to 0.24 s. In the game the GS now finishes the first 600
+  fields 2.0 s after the machine instead of 2.8 s.
+
 Where the time is now:
-- **The GS in the title stretch.** Over the first 600 fields the machine
-  finishes in 1.4 s and the GS 2.8 s after it: about 30 µs of GS time a
-  primitive (130,000 of them), against about 9 µs over the 1300 fields
-  with the 3D. Not examined yet.
 - **VU1** bounds the interpreted build in 3D: about 1 million pairs a
   field at 15.5 ns a pair; about 10 translated.
+- **The GS's pixels**, at about 25 ns each on one thread: every pixel
+  still goes through the whole pipeline, addresses computed one by one.
+  Pipelines specialised to the primitive's state, as PCSX2's software
+  renderer generates, would be the next step there.
 - **Drawing in order** in the recompiled build: the primitives that
   texture from what they draw, and the small batches, about 3 s of the
   drawer's 6.5 s.

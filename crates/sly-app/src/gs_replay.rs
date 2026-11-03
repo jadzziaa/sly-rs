@@ -39,6 +39,14 @@ pub(crate) fn run(
             gs.drawn,
             elapsed.as_secs_f64()
         )?;
+        let hash = gs
+            .mem
+            .to_bytes()
+            .iter()
+            .fold(0xCBF2_9CE4_8422_2325u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x100_0000_01B3)
+            });
+        writeln!(out, "GS memory hash {hash:016x}")?;
         if let Some(png) = screenshot {
             let frame = gs.display(&Privileged::from_block(&privileged[..]));
             std::fs::write(png, frame.png())

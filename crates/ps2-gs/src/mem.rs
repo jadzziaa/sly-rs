@@ -231,46 +231,82 @@ fn page_tables() -> &'static PageTables {
     })
 }
 
+/// A buffer's addressing, worked out once: its format's page table and
+/// shape, its base and its width.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    table: &'static [u16],
+    psm: Psm,
+    w_shift: u32,
+    h_shift: u32,
+    pages_per_row: u32,
+    bp: u32,
+}
+
+impl Layout {
+    /// The `psm` buffer at block `bp`, `bw` × 64 pixels wide.
+    #[must_use]
+    pub fn new(psm: Psm, bp: u32, bw: u32) -> Self {
+        let t = page_tables();
+        let (table, w_shift, h_shift, pages_per_row): (&'static [u16], u32, u32, u32) = match psm {
+            Psm::Ct32 | Psm::Ct24 | Psm::T8h | Psm::T4hl | Psm::T4hh => (&t.ct32, 6, 5, bw),
+            Psm::Z32 | Psm::Z24 => (&t.z32, 6, 5, bw),
+            Psm::Ct16 => (&t.ct16, 6, 6, bw),
+            Psm::Ct16s => (&t.ct16s, 6, 6, bw),
+            Psm::Z16 => (&t.z16, 6, 6, bw),
+            Psm::Z16s => (&t.z16s, 6, 6, bw),
+            Psm::T8 => (&t.t8, 7, 6, bw >> 1),
+            Psm::T4 => (&t.t4, 7, 7, bw >> 1),
+        };
+        Self {
+            table,
+            psm,
+            w_shift,
+            h_shift,
+            pages_per_row,
+            bp,
+        }
+    }
+
+    /// Where pixel (`x`, `y`) lives: its page's base, then the page
+    /// table's offset.
+    #[inline]
+    #[must_use]
+    pub fn locate(&self, x: u32, y: u32) -> Pixel {
+        let (w_shift, h_shift) = (self.w_shift, self.h_shift);
+        let page = (y >> h_shift) * self.pages_per_row + (x >> w_shift);
+        let (px, py) = (x & ((1 << w_shift) - 1), y & ((1 << h_shift) - 1));
+        let offset = u32::from(self.table[((py << w_shift) | px) as usize]);
+        let base = (self.bp + page * 32) * 256;
+        let (byte, nibble) = if self.psm == Psm::T4 {
+            (offset >> 1, offset & 1)
+        } else {
+            (offset, 0)
+        };
+        let byte = ((base + byte) & 0x3F_FFFF) as usize;
+        let (shift, mask) = match self.psm {
+            Psm::Ct32 | Psm::Z32 => (0, u32::MAX),
+            Psm::Ct24 | Psm::Z24 => (0, 0x00FF_FFFF),
+            Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (8 * (byte as u32 & 2), 0xFFFF),
+            Psm::T8 => (8 * (byte as u32 & 3), 0xFF),
+            Psm::T4 => (8 * (byte as u32 & 3) + 4 * nibble, 0xF),
+            Psm::T8h => (24, 0xFF),
+            Psm::T4hl => (24, 0xF),
+            Psm::T4hh => (28, 0xF),
+        };
+        Pixel {
+            word: byte / 4,
+            shift,
+            mask,
+        }
+    }
+}
+
 /// The address of pixel (`x`, `y`) of a `psm` buffer at `bp` with width
-/// `bw`: its page's base, then the page table's offset.
+/// `bw`.
 #[inline]
 fn place(psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> Pixel {
-    let t = page_tables();
-    let (table, w_shift, h_shift, pages_per_row): (&[u16], u32, u32, u32) = match psm {
-        Psm::Ct32 | Psm::Ct24 | Psm::T8h | Psm::T4hl | Psm::T4hh => (&t.ct32, 6, 5, bw),
-        Psm::Z32 | Psm::Z24 => (&t.z32, 6, 5, bw),
-        Psm::Ct16 => (&t.ct16, 6, 6, bw),
-        Psm::Ct16s => (&t.ct16s, 6, 6, bw),
-        Psm::Z16 => (&t.z16, 6, 6, bw),
-        Psm::Z16s => (&t.z16s, 6, 6, bw),
-        Psm::T8 => (&t.t8, 7, 6, bw >> 1),
-        Psm::T4 => (&t.t4, 7, 7, bw >> 1),
-    };
-    let page = (y >> h_shift) * pages_per_row + (x >> w_shift);
-    let (px, py) = (x & ((1 << w_shift) - 1), y & ((1 << h_shift) - 1));
-    let offset = u32::from(table[((py << w_shift) | px) as usize]);
-    let base = (bp + page * 32) * 256;
-    let (byte, nibble) = if psm == Psm::T4 {
-        (offset >> 1, offset & 1)
-    } else {
-        (offset, 0)
-    };
-    let byte = ((base + byte) & 0x3F_FFFF) as usize;
-    let (shift, mask) = match psm {
-        Psm::Ct32 | Psm::Z32 => (0, u32::MAX),
-        Psm::Ct24 | Psm::Z24 => (0, 0x00FF_FFFF),
-        Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (8 * (byte as u32 & 2), 0xFFFF),
-        Psm::T8 => (8 * (byte as u32 & 3), 0xFF),
-        Psm::T4 => (8 * (byte as u32 & 3) + 4 * nibble, 0xF),
-        Psm::T8h => (24, 0xFF),
-        Psm::T4hl => (24, 0xF),
-        Psm::T4hh => (28, 0xF),
-    };
-    Pixel {
-        word: byte / 4,
-        shift,
-        mask,
-    }
+    Layout::new(psm, bp, bw).locate(x, y)
 }
 
 /// GS local memory, as 32-bit words.
