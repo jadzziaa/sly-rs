@@ -307,6 +307,9 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                         game,
                         record,
                         replay,
+                        settings: sly_common::config::Config::load()
+                            .map(|c| c.play().clone())
+                            .unwrap_or_default(),
                     },
                     recompiled.filter(|_| !interpret),
                 )

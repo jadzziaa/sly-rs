@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:07:52Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:10:00Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -759,7 +759,9 @@ given: the gates are the schedule.
     included), which `play --record` writes. A recorded session of 2,088
     fields, with the dialog dismissed and Start pressed at the title,
     replays to the same state hash.
-  - Next: memory card saves, a settings file (key bindings, window size).
+  - Settings under `[play]` in `sly-rs.toml`: pause on focus loss, the
+    window's size, key bindings.
+  - Next: memory card saves.
 
 ### Phase 8 - Sound and movies
 

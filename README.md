@@ -56,8 +56,9 @@ Commands so far:
   then hands over. Keys: WASD left stick, IJKL right stick, arrows D-pad,
   Space Cross, E Circle, Q Square, F Triangle, 2/3 L1/R1, 1/4 L2/R2, G/H
   L3/R3, Enter Start, Backspace Select; P pauses, Escape quits. The game
-  pauses while the window is not focused. The recompiled binary below plays
-  faster in busy scenes.
+  pauses while the window is not focused. Keys and the window's size can be
+  changed under `[play]` in `sly-rs.toml` (see `sly-rs.example.toml`). The
+  recompiled binary below plays faster in busy scenes.
 - `cargo xtask recomp sly1 --build` recompiles Sly 1 into Rust and builds
   `generated/sly1/target/release/sly1`: the same command line with the game's
   code compiled. Its `run` uses the generated code (`--interpret` for the

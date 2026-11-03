@@ -6,3 +6,15 @@
 sly1 = "oracle/Sly Cooper and the Thievius Raccoonus (USA)/Sly Cooper and the Thievius Raccoonus (USA).iso"
 sly2 = "oracle/Sly 2 - Band of Thieves (USA)/Sly 2 - Band of Thieves (USA).iso"
 sly3 = "oracle/Sly 3 - Honor Among Thieves (USA)/Sly 3 - Honor Among Thieves (USA).iso"
+
+# How `sly-rs play` behaves (all optional; these are the defaults).
+[play]
+pause_on_focus_loss = true
+window = [1280, 896]
+
+# Key bindings replace the defaults one by one: a DualShock button (as in a
+# replay's presses) or a stick direction (left-up, right-down, ...) = a key
+# as winit names it (KeyW, Space, ArrowUp, Digit1, ShiftLeft, F1, ...).
+[play.keys]
+# cross = "Space"
+# left-up = "KeyW"

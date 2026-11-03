@@ -42,6 +42,8 @@ pub(crate) struct Options {
     pub(crate) record: Option<PathBuf>,
     /// A replay to play through first, at full speed, before handing over.
     pub(crate) replay: Option<PathBuf>,
+    /// The `[play]` settings.
+    pub(crate) settings: sly_common::config::Play,
 }
 
 /// What the window and the machine's thread share.
@@ -69,6 +71,11 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
         .context("opening the window system")?;
     let shared = Arc::new(Shared::default());
     let proxy = event_loop.create_proxy();
+    let bindings = Bindings::new(&options.settings.keys)?;
+    let (window_size, pause_on_focus_loss) = (
+        options.settings.window,
+        options.settings.pause_on_focus_loss,
+    );
     let machine = {
         let shared = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -87,6 +94,9 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
         surface: None,
         frame: None,
         keys: Vec::new(),
+        bindings,
+        window_size,
+        pause_on_focus_loss,
         error: None,
     };
     let result = event_loop.run_app(&mut app);
@@ -263,52 +273,134 @@ fn gamepad(gilrs: &mut gilrs::Gilrs) -> PadInput {
     }
 }
 
-/// The keyboard's default layout: buttons.
-const KEY_BUTTONS: [(KeyCode, u16); 16] = [
-    (KeyCode::Backspace, 0),
-    (KeyCode::KeyG, 1),
-    (KeyCode::KeyH, 2),
-    (KeyCode::Enter, 3),
-    (KeyCode::ArrowUp, 4),
-    (KeyCode::ArrowRight, 5),
-    (KeyCode::ArrowDown, 6),
-    (KeyCode::ArrowLeft, 7),
-    (KeyCode::Digit1, 8),
-    (KeyCode::Digit4, 9),
-    (KeyCode::Digit2, 10),
-    (KeyCode::Digit3, 11),
-    (KeyCode::KeyF, 12),
-    (KeyCode::KeyE, 13),
-    (KeyCode::Space, 14),
-    (KeyCode::KeyQ, 15),
+/// The keyboard's default layout: each part of the pad, named as in the
+/// settings (`[play.keys]`), and its key.
+const DEFAULT_KEYS: [(&str, KeyCode); 24] = [
+    ("select", KeyCode::Backspace),
+    ("l3", KeyCode::KeyG),
+    ("r3", KeyCode::KeyH),
+    ("start", KeyCode::Enter),
+    ("up", KeyCode::ArrowUp),
+    ("right", KeyCode::ArrowRight),
+    ("down", KeyCode::ArrowDown),
+    ("left", KeyCode::ArrowLeft),
+    ("l2", KeyCode::Digit1),
+    ("r2", KeyCode::Digit4),
+    ("l1", KeyCode::Digit2),
+    ("r1", KeyCode::Digit3),
+    ("triangle", KeyCode::KeyF),
+    ("circle", KeyCode::KeyE),
+    ("cross", KeyCode::Space),
+    ("square", KeyCode::KeyQ),
+    ("left-left", KeyCode::KeyA),
+    ("left-right", KeyCode::KeyD),
+    ("left-up", KeyCode::KeyW),
+    ("left-down", KeyCode::KeyS),
+    ("right-left", KeyCode::KeyJ),
+    ("right-right", KeyCode::KeyL),
+    ("right-up", KeyCode::KeyI),
+    ("right-down", KeyCode::KeyK),
 ];
 
-/// The keyboard's default layout: the left stick on WASD, the right on
-/// IJKL.
-const KEY_STICKS: [(KeyCode, usize, u8); 8] = [
-    (KeyCode::KeyA, 2, 0x00),
-    (KeyCode::KeyD, 2, 0xFF),
-    (KeyCode::KeyW, 3, 0x00),
-    (KeyCode::KeyS, 3, 0xFF),
-    (KeyCode::KeyJ, 0, 0x00),
-    (KeyCode::KeyL, 0, 0xFF),
-    (KeyCode::KeyI, 1, 0x00),
-    (KeyCode::KeyK, 1, 0xFF),
-];
+/// What a key does to the pad: a button (its bit), or a stick axis (right
+/// x, y, left x, y) pushed to a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Part {
+    Button(u16),
+    Stick(usize, u8),
+}
 
-/// The pad the held keys make.
-fn keyboard(keys: &[KeyCode]) -> PadInput {
-    let buttons = KEY_BUTTONS
-        .iter()
-        .filter(|(k, _)| keys.contains(k))
-        .fold(0u16, |m, &(_, bit)| m | 1 << bit);
-    let mut sticks = [0x80u8; 4];
-    for &(k, axis, value) in &KEY_STICKS {
-        if keys.contains(&k) {
-            sticks[axis] = value;
-        }
+/// The part of the pad a settings name means.
+fn part(name: &str) -> Option<Part> {
+    if let Some(bit) = replay::BUTTONS.iter().position(|b| *b == name) {
+        return Some(Part::Button(1 << bit));
     }
-    PadInput { buttons, sticks }
+    let (stick, direction) = name.split_once('-')?;
+    let base = match stick {
+        "right" => 0,
+        "left" => 2,
+        _ => return None,
+    };
+    Some(match direction {
+        "left" => Part::Stick(base, 0x00),
+        "right" => Part::Stick(base, 0xFF),
+        "up" => Part::Stick(base + 1, 0x00),
+        "down" => Part::Stick(base + 1, 0xFF),
+        _ => return None,
+    })
+}
+
+/// Keys a binding may name, by winit's names for them.
+fn key(name: &str) -> Option<KeyCode> {
+    macro_rules! keys {
+        ($($k:ident)*) => {
+            match name {
+                $(stringify!($k) => Some(KeyCode::$k),)*
+                _ => None,
+            }
+        };
+    }
+    keys!(
+        KeyA KeyB KeyC KeyD KeyE KeyF KeyG KeyH KeyI KeyJ KeyK KeyL KeyM KeyN KeyO KeyP KeyQ
+        KeyR KeyS KeyT KeyU KeyV KeyW KeyX KeyY KeyZ Digit0 Digit1 Digit2 Digit3 Digit4 Digit5
+        Digit6 Digit7 Digit8 Digit9 ArrowUp ArrowDown ArrowLeft ArrowRight Space Enter Backspace
+        Tab ShiftLeft ShiftRight ControlLeft ControlRight AltLeft AltRight CapsLock Comma Period
+        Slash Semicolon Quote BracketLeft BracketRight Minus Equal Backquote Backslash F1 F2 F3
+        F4 F5 F6 F7 F8 F9 F10 F11 F12 Numpad0 Numpad1 Numpad2 Numpad3 Numpad4 Numpad5 Numpad6
+        Numpad7 Numpad8 Numpad9 NumpadEnter NumpadAdd NumpadSubtract Insert Delete Home End
+        PageUp PageDown
+    )
+}
+
+/// Which key does what.
+#[derive(Clone, Debug)]
+struct Bindings(Vec<(KeyCode, Part)>);
+
+impl Bindings {
+    /// The defaults with `overrides` (`[play.keys]`) in place.
+    fn new(overrides: &std::collections::BTreeMap<String, String>) -> Result<Self> {
+        let mut named: Vec<(String, KeyCode)> = DEFAULT_KEYS
+            .iter()
+            .map(|&(n, k)| (n.to_owned(), k))
+            .collect();
+        for (name, key_name) in overrides {
+            if part(name).is_none() {
+                return Err(anyhow!(
+                    "[play.keys]: no pad part {name:?} (buttons as in replays, or left-up, right-down, ...)"
+                ));
+            }
+            let code =
+                key(key_name).ok_or_else(|| anyhow!("[play.keys] {name}: no key {key_name:?}"))?;
+            if matches!(code, KeyCode::Escape | KeyCode::KeyP) {
+                return Err(anyhow!("[play.keys] {name}: {key_name} quits or pauses"));
+            }
+            for entry in &mut named {
+                if entry.0 == *name {
+                    entry.1 = code;
+                }
+            }
+        }
+        Ok(Self(
+            named
+                .into_iter()
+                .filter_map(|(n, k)| Some((k, part(&n)?)))
+                .collect(),
+        ))
+    }
+
+    /// The pad the held keys make.
+    fn pad(&self, keys: &[KeyCode]) -> PadInput {
+        let mut pad = PadInput::default();
+        for &(k, part) in &self.0 {
+            if keys.contains(&k) {
+                match part {
+                    Part::Button(bit) => pad.buttons |= bit,
+                    Part::Stick(axis, value) => pad.sticks[axis] = value,
+                }
+            }
+        }
+        pad
+    }
 }
 
 /// The window.
@@ -320,6 +412,10 @@ struct App {
     frame: Option<(u64, Frame)>,
     /// Keys held.
     keys: Vec<KeyCode>,
+    bindings: Bindings,
+    /// The window's size at start (logical pixels).
+    window_size: [u32; 2],
+    pause_on_focus_loss: bool,
     error: Option<String>,
 }
 
@@ -330,7 +426,10 @@ impl ApplicationHandler<Event> for App {
         }
         let attributes = Window::default_attributes()
             .with_title("sly-rs")
-            .with_inner_size(LogicalSize::new(1280.0, 896.0));
+            .with_inner_size(LogicalSize::new(
+                f64::from(self.window_size[0]),
+                f64::from(self.window_size[1]),
+            ));
         let made = event_loop
             .create_window(attributes)
             .map(Arc::new)
@@ -379,7 +478,9 @@ impl ApplicationHandler<Event> for App {
                 self.shared.quit.store(true, Ordering::Relaxed);
             }
             WindowEvent::Focused(focused) => {
-                self.shared.paused.store(!focused, Ordering::Relaxed);
+                if self.pause_on_focus_loss {
+                    self.shared.paused.store(!focused, Ordering::Relaxed);
+                }
                 if !focused {
                     self.keys.clear();
                     self.input();
@@ -424,7 +525,7 @@ impl ApplicationHandler<Event> for App {
 impl App {
     fn input(&self) {
         if let Ok(mut pad) = self.shared.keyboard.lock() {
-            *pad = keyboard(&self.keys);
+            *pad = self.bindings.pad(&self.keys);
         }
     }
 
@@ -497,9 +598,17 @@ mod tests {
 
     #[test]
     fn keys_make_the_pad() {
-        let pad = keyboard(&[KeyCode::Space, KeyCode::KeyW, KeyCode::KeyL, KeyCode::Enter]);
+        let bindings = Bindings::new(&std::collections::BTreeMap::new()).unwrap();
+        let pad = bindings.pad(&[KeyCode::Space, KeyCode::KeyW, KeyCode::KeyL, KeyCode::Enter]);
         assert_eq!(pad.buttons, 1 << 14 | 1 << 3);
         assert_eq!(pad.sticks, [0xFF, 0x80, 0x80, 0x00]);
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("cross".to_owned(), "KeyK".to_owned());
+        let bindings = Bindings::new(&overrides).unwrap();
+        assert_eq!(bindings.pad(&[KeyCode::KeyK]).buttons, 1 << 14);
+        assert_eq!(bindings.pad(&[KeyCode::Space]).buttons, 0);
+        overrides.insert("jump".to_owned(), "KeyZ".to_owned());
+        assert!(Bindings::new(&overrides).is_err());
     }
 
     #[test]

@@ -1,10 +1,17 @@
-//! Where the user keeps their discs.
+//! Where the user keeps their discs, and how `play` behaves.
 //!
 //! The configuration is a TOML file, `sly-rs.toml`:
 //!
 //! ```toml
 //! [discs]
 //! sly1 = "oracle/Sly Cooper and the Thievius Raccoonus (USA)/Sly Cooper and the Thievius Raccoonus (USA).iso"
+//!
+//! [play]
+//! pause_on_focus_loss = true
+//! window = [1280, 896]
+//! [play.keys]          # DualShock button or stick direction = key
+//! cross = "KeyK"
+//! left-up = "KeyW"
 //! ```
 //!
 //! Relative paths are resolved against the file's directory. The file is
@@ -52,6 +59,32 @@ pub enum ConfigError {
 pub struct Config {
     path: Option<PathBuf>,
     discs: BTreeMap<Game, PathBuf>,
+    play: Play,
+}
+
+/// How `play` behaves.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Play {
+    /// Pause the game while the window is not focused.
+    pub pause_on_focus_loss: bool,
+    /// The window's size at start, in logical pixels.
+    pub window: [u32; 2],
+    /// Key bindings that replace the defaults: a DualShock button
+    /// (`cross`, `start`, `l1`, ... as in a replay's presses) or a stick
+    /// direction (`left-up`, `right-left`, ...) to a key's name as winit
+    /// gives it (`KeyW`, `Space`, `ArrowUp`, `Digit1`, `ShiftLeft`, ...).
+    pub keys: BTreeMap<String, String>,
+}
+
+impl Default for Play {
+    fn default() -> Self {
+        Self {
+            pause_on_focus_loss: true,
+            window: [1280, 896],
+            keys: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -59,6 +92,8 @@ pub struct Config {
 struct FileFormat {
     #[serde(default)]
     discs: DiscsFormat,
+    #[serde(default)]
+    play: Play,
 }
 
 #[derive(Default, Deserialize)]
@@ -121,7 +156,11 @@ impl Config {
             .into_iter()
             .filter_map(|(game, path)| Some((game, base.join(path?))))
             .collect();
-        Ok(Self { path: None, discs })
+        Ok(Self {
+            path: None,
+            discs,
+            play: file.play,
+        })
     }
 
     /// Applies `SLY_RS_DISC_<GAME>` overrides read through `var`.
@@ -138,6 +177,12 @@ impl Config {
     #[must_use]
     pub fn disc(&self, game: Game) -> Option<&Path> {
         self.discs.get(&game).map(PathBuf::as_path)
+    }
+
+    /// How `play` behaves.
+    #[must_use]
+    pub const fn play(&self) -> &Play {
+        &self.play
     }
 
     /// The file the configuration was loaded from, if any.
@@ -192,6 +237,18 @@ mod tests {
         );
         assert_eq!(config.disc(Game::Sly2), None);
         assert_eq!(config.disc(Game::Sly3), Some(Path::new("/discs/sly3.iso")));
+    }
+
+    #[test]
+    fn play_settings_default_and_override() {
+        let config = Config::parse("", Path::new(".")).unwrap();
+        assert!(config.play().pause_on_focus_loss);
+        let text = "[play]\npause_on_focus_loss = false\n[play.keys]\ncross = \"KeyK\"\n";
+        let config = Config::parse(text, Path::new(".")).unwrap();
+        assert!(!config.play().pause_on_focus_loss);
+        assert_eq!(config.play().window, [1280, 896]);
+        assert_eq!(config.play().keys["cross"], "KeyK");
+        assert!(Config::parse("[play]\nvolume = 3\n", Path::new(".")).is_err());
     }
 
     #[test]
