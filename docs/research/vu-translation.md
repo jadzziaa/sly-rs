@@ -10,9 +10,9 @@ sources:
   - id: plan
     resource: docs/plan.md, phase 6
     title: 'The plan: ahead-of-time translation of every .DVP overlay'
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:12:29Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:20:37Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:16:51Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:20:37Z }
 ---
 
 # VU microcode translated ahead of time
@@ -86,6 +86,8 @@ On the 4000 recorded programs (2.1 million pairs), with no GS:
 | Interpreter | 19.5 (19.8 before the float changes below) |
 | Translated, first version (one function per program) | 13.0 |
 | Translated, in pieces, closures replaced by macros | 10.8 |
+| Four-lane float operations: interpreter | 15.5 |
+| Four-lane float operations: translated | 9.4 to 10.2 |
 
 The first version compiled in almost 6 minutes and left the per-component
 loop and the data loads as closure calls; pieces build in under a minute.
@@ -101,12 +103,18 @@ Real time is 16.7 ms a field.
 
 ## Where the time is now
 
-- **The float operations.** A translated pair is still about 200 host
-  instructions: each component converts to `f64`, operates, and rounds
-  toward zero to a PS2 single by hand, twice for a multiply-add. Making
-  `value`, `chop` and the adder's alignment branch-free changed little.
-  Vectorising the four components (SSE2 has what is needed) would help
-  the interpreter as much as the translations.
+- **The float operations.** Each component converts to `f64`, operates,
+  and rounds toward zero to a PS2 single by hand, twice for a
+  multiply-add. `ps2_core::float::x4` now does the four components at
+  once (add, sub, mul, madd, msub, max, min, ITOF, FTOI): every lane
+  without branches, from operations SSE2 has (`f64` compares in place of
+  64-bit integer ones), in plain Rust the compiler vectorises; the lanes
+  outside `dest` are dropped. A test checks every lane against the scalar
+  operations on 200,000 random operands (every exponent, both signs,
+  near-cancelling pairs, NaN and infinite doubles). The flags are built
+  four lanes per group. Building the adder's alignment mask from a float
+  exponent instead of a shift was slower and was dropped. Timings move by
+  a few tenths of a nanosecond from one build to the next.
 - **The GS.** The machine waited for the GS 8.3 s of its 21.7 s. This
   note first blamed the GS's front end; measured, most of that time was
   primitives drawn one after another under too coarse hazard rules (see

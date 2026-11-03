@@ -81,10 +81,6 @@ pub struct Run {
 
 /// Status flag bits.
 mod status {
-    pub(super) const Z: u32 = 1;
-    pub(super) const S: u32 = 1 << 1;
-    pub(super) const U: u32 = 1 << 2;
-    pub(super) const O: u32 = 1 << 3;
     pub(super) const I: u32 = 1 << 4;
     pub(super) const D: u32 = 1 << 5;
 }
@@ -254,19 +250,6 @@ impl Cache {
     }
 }
 
-/// Runs `op` (an expression of the component `i`) on the components in
-/// `dest`, into `out` and `flags`. A macro rather than a function taking a
-/// closure, so that it is always inlined and translations specialise it.
-macro_rules! each {
-    ($dest:expr, $out:expr, $flags:expr, |$i:ident| $op:expr) => {
-        for $i in 0..4 {
-            if in_dest($dest, $i) {
-                ($out[$i], $flags[$i]) = $op;
-            }
-        }
-    };
-}
-
 /// The four words of `[u32; 4]` from `x`, through `f`, without a closure
 /// (always inlined).
 macro_rules! map4 {
@@ -331,30 +314,28 @@ fn load(data: &[u8], at: u32) -> [u32; 4] {
 /// The MAC flags and the new status for results in `dest`.
 #[allow(clippy::inline_always, reason = "translations specialise it by `dest`")]
 #[inline(always)]
-fn flags(status: u32, out: [u32; 4], f: [float::Flags; 4], dest: u32) -> (u32, u32) {
-    let mut mac = 0;
-    for i in 0..4 {
-        let bit = 3 - i;
-        let set = u32::from(out[i] << 1 == 0)
-            | ((out[i] >> 31) << 4)
-            | (u32::from(f[i].underflow) << 8)
-            | (u32::from(f[i].overflow) << 12);
-        mac |= set << bit;
-    }
-    // Only the components written count: dest's bit for x is bit 3, as
-    // the MAC flags' is.
-    mac &= dest * 0x1111;
+fn flags(
+    status: u32,
+    out: [u32; 4],
+    overflow: [u32; 4],
+    underflow: [u32; 4],
+    dest: u32,
+) -> (u32, u32) {
+    // Each group's four lane bits, x in bit 3 as `dest`'s.
+    let lanes = |bit: &dyn Fn(usize) -> u32| (bit(0) << 3) | (bit(1) << 2) | (bit(2) << 1) | bit(3);
+    let groups = [
+        lanes(&|i| u32::from(out[i] << 1 == 0)),
+        lanes(&|i| out[i] >> 31),
+        lanes(&|i| underflow[i] & 1),
+        lanes(&|i| overflow[i] & 1),
+    ]
+    .map(|g| g & dest);
+    let mac = groups[0] | (groups[1] << 4) | (groups[2] << 8) | (groups[3] << 12);
     // Z, S, U, O: whether any component set each group.
-    let current = [status::Z, status::S, status::U, status::O]
-        .iter()
-        .enumerate()
-        .fold(0, |c, (group, &flag)| {
-            if mac & (0xF << (4 * group)) == 0 {
-                c
-            } else {
-                c | flag
-            }
-        });
+    let current = u32::from(groups[0] != 0)
+        | (u32::from(groups[1] != 0) << 1)
+        | (u32::from(groups[2] != 0) << 2)
+        | (u32::from(groups[3] != 0) << 3);
     let sticky = (status & 0xFC0) | (current << 6);
     (mac, (status & (status::I | status::D)) | current | sticky)
 }
@@ -559,32 +540,27 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
                 Operand::Q => [r.q; 4],
                 Operand::I => [r.i; 4],
             };
-            let mut out = if to_acc { acc } else { r.vf[fd] };
-            let mut f = [float::Flags::default(); 4];
-            // One loop per operation, the operation chosen once.
-            let (o, fl) = (&mut out, &mut f);
-            match arith {
-                Arith::Add => each!(dest, o, fl, |i| float::add(a[i], b[i])),
-                Arith::Sub => each!(dest, o, fl, |i| float::sub(a[i], b[i])),
-                Arith::Mul => each!(dest, o, fl, |i| float::mul(a[i], b[i])),
-                Arith::Madd => each!(dest, o, fl, |i| float::madd(acc[i], a[i], b[i])),
-                Arith::Msub => each!(dest, o, fl, |i| float::msub(acc[i], a[i], b[i])),
-                Arith::Max => each!(dest, o, fl, |i| (
-                    float::max(a[i], b[i]),
-                    float::Flags::default()
-                )),
-                Arith::Min => each!(dest, o, fl, |i| (
-                    float::min(a[i], b[i]),
-                    float::Flags::default()
-                )),
-            }
+            let old = if to_acc { acc } else { r.vf[fd] };
+            // All four lanes at once (the compiler vectorises them); the
+            // lanes in `dest` are kept.
+            let none = [0; 4];
+            let (result, overflow, underflow) = match arith {
+                Arith::Add => float::x4::add(a, b),
+                Arith::Sub => float::x4::sub(a, b),
+                Arith::Mul => float::x4::mul(a, b),
+                Arith::Madd => float::x4::madd(acc, a, b),
+                Arith::Msub => float::x4::msub(acc, a, b),
+                Arith::Max => (float::x4::max(a, b), none, none),
+                Arith::Min => (float::x4::min(a, b), none, none),
+            };
+            let out = merge(old, result, dest);
             if to_acc {
                 upper_acc = Some(out);
             } else {
                 upper_vf = Some((fd, out));
             }
             if !matches!(arith, Arith::Max | Arith::Min) {
-                upper_flags = Some(flags(r.status, out, f, dest));
+                upper_flags = Some(flags(r.status, out, overflow, underflow, dest));
             }
         }
         op @ (Upper::Opmula | Upper::Opmsub) => {
@@ -605,21 +581,14 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
             } else {
                 upper_vf = Some((fd, out));
             }
-            upper_flags = Some(flags(r.status, out, f, dest));
+            let (overflow, underflow) = (
+                f.map(|f| u32::from(f.overflow)),
+                f.map(|f| u32::from(f.underflow)),
+            );
+            upper_flags = Some(flags(r.status, out, overflow, underflow, dest));
         }
-        Upper::Itof(scale) => {
-            let out = map4!(r.vf[fs], |x| float::chop(
-                f64::from(x as i32) / f64::from(1u32 << scale)
-            )
-            .0);
-            upper_vf = Some((ft, out));
-        }
-        Upper::Ftoi(scale) => {
-            let out = map4!(r.vf[fs], |x| float::to_int(
-                float::chop(float::value(x) * f64::from(1u32 << scale)).0
-            ));
-            upper_vf = Some((ft, out));
-        }
+        Upper::Itof(scale) => upper_vf = Some((ft, float::x4::from_fixed(r.vf[fs], scale))),
+        Upper::Ftoi(scale) => upper_vf = Some((ft, float::x4::to_fixed(r.vf[fs], scale))),
         Upper::Abs => upper_vf = Some((ft, map4!(r.vf[fs], |x| x & 0x7FFF_FFFF))),
         Upper::Clip => {
             let a = r.vf[fs];

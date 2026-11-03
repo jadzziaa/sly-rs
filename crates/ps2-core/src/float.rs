@@ -296,6 +296,181 @@ pub fn from_int(a: u32) -> u32 {
     chop(f64::from(a.cast_signed())).0
 }
 
+/// The VUs' operations on four components at once, giving each component
+/// what the scalar operation gives, bit for bit.
+///
+/// Every lane is computed without branches, from operations SSE2 has
+/// (`f64` compares rather than 64-bit integer ones), so the compiler
+/// vectorises them; the caller keeps the lanes it writes. Flags are 0 or 1
+/// per lane.
+pub mod x4 {
+    use super::MAX;
+
+    /// Four lanes.
+    pub type V = [u32; 4];
+
+    /// A result and its overflow and underflow flags.
+    pub type Out = (V, V, V);
+
+    /// [`super::value`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn values(a: V) -> [f64; 4] {
+        let mut out = [0.0; 4];
+        for i in 0..4 {
+            let exponent = (a[i] >> 23) & 0xFF;
+            let sign = a[i] & 0x8000_0000;
+            let bits = if exponent == 0 { sign } else { a[i] };
+            let bits = if exponent == 0xFF { sign | MAX } else { bits };
+            out[i] = f64::from(f32::from_bits(bits));
+        }
+        out
+    }
+
+    /// [`super::chop`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn chop(x: [f64; 4]) -> Out {
+        let (mut r, mut o, mut u) = ([0; 4], [0; 4], [0; 4]);
+        for i in 0..4 {
+            let bits = x[i].to_bits();
+            let sign = ((bits >> 32) as u32) & 0x8000_0000;
+            let magnitude = x[i].abs();
+            // A NaN overflows, as in `chop`.
+            let overflow = magnitude > f64::from(f32::MAX) || magnitude.is_nan();
+            let tiny = magnitude < f64::from(f32::MIN_POSITIVE);
+            let underflow = tiny && magnitude != 0.0;
+            // Exponent and mantissa from the double's bits, rebiased; only
+            // the low 32 bits matter (modulo 2^32).
+            let normal = ((magnitude.to_bits() >> 29) as u32).wrapping_sub(896 << 23);
+            let value = if tiny { 0 } else { normal };
+            r[i] = sign | if overflow { MAX } else { value };
+            o[i] = u32::from(overflow);
+            u[i] = u32::from(underflow && !overflow);
+        }
+        (r, o, u)
+    }
+
+    /// [`super::aligned`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    fn aligned(a: V, b: V) -> (V, V) {
+        let (mut ka, mut kb) = ([u32::MAX; 4], [u32::MAX; 4]);
+        for i in 0..4 {
+            let (ea, eb) = ((a[i] >> 23) & 0xFF, (b[i] >> 23) & 0xFF);
+            let difference = ea.max(eb) - ea.min(eb);
+            let keep = if difference >= 24 {
+                0x8000_0000
+            } else {
+                !((1u32 << difference.min(31)) - 1)
+            };
+            let keep = if ea == 0 || eb == 0 { u32::MAX } else { keep };
+            if ea >= eb {
+                kb[i] = keep;
+            } else {
+                ka[i] = keep;
+            }
+        }
+        (
+            std::array::from_fn(|i| a[i] & ka[i]),
+            std::array::from_fn(|i| b[i] & kb[i]),
+        )
+    }
+
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    fn zip(a: [f64; 4], b: [f64; 4], f: impl Fn(f64, f64) -> f64) -> [f64; 4] {
+        [f(a[0], b[0]), f(a[1], b[1]), f(a[2], b[2]), f(a[3], b[3])]
+    }
+
+    /// [`super::add`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn add(a: V, b: V) -> Out {
+        let (a, b) = aligned(a, b);
+        chop(zip(values(a), values(b), |x, y| x + y))
+    }
+
+    /// [`super::sub`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn sub(a: V, b: V) -> Out {
+        add(a, b.map(|x| x ^ 0x8000_0000))
+    }
+
+    /// [`super::mul`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn mul(a: V, b: V) -> Out {
+        chop(zip(values(a), values(b), |x, y| x * y))
+    }
+
+    /// [`super::madd`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn madd(acc: V, a: V, b: V) -> Out {
+        let (product, o1, _) = mul(a, b);
+        let (sum, o2, u2) = add(acc, product);
+        (sum, std::array::from_fn(|i| o1[i] | o2[i]), u2)
+    }
+
+    /// [`super::msub`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn msub(acc: V, a: V, b: V) -> Out {
+        let (product, o1, _) = mul(a, b);
+        let (difference, o2, u2) = sub(acc, product);
+        (difference, std::array::from_fn(|i| o1[i] | o2[i]), u2)
+    }
+
+    /// ITOF: each lane as a signed integer with `scale` fraction bits,
+    /// rounded toward zero to a PS2 single.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn from_fixed(a: V, scale: u32) -> V {
+        let divisor = f64::from(1u32 << scale);
+        chop(a.map(|x| f64::from(x.cast_signed()) / divisor)).0
+    }
+
+    /// FTOI: each lane times 2^`scale`, rounded toward zero to a PS2
+    /// single, then to a signed integer, saturating ([`super::to_int`]).
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn to_fixed(a: V, scale: u32) -> V {
+        let factor = f64::from(1u32 << scale);
+        let scaled = chop(values(a).map(|x| x * factor)).0;
+        // `as` truncates and saturates, as `to_int` does.
+        values(scaled).map(|x| (x as i32).cast_unsigned())
+    }
+
+    /// [`super::max`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn max(a: V, b: V) -> V {
+        let (x, y) = (values(a), values(b));
+        std::array::from_fn(|i| if x[i] >= y[i] { a[i] } else { b[i] })
+    }
+
+    /// [`super::min`], per lane.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn min(a: V, b: V) -> V {
+        let (x, y) = (values(a), values(b));
+        std::array::from_fn(|i| if x[i] <= y[i] { a[i] } else { b[i] })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +544,85 @@ mod tests {
             (a, truncate(b, ea - eb))
         } else {
             (truncate(a, eb - ea), b)
+        }
+    }
+
+    /// The four-lane operations give each lane what the scalar ones give:
+    /// random operands over every exponent (zero, denormal, 255 and the
+    /// ones between), both signs, and operands near each other's
+    /// magnitude, where alignment and cancellation matter.
+    #[test]
+    fn four_lanes_agree_with_one() {
+        let mut state = 0x6A09_E667_F3BC_C909u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let flags = |f: Flags| (u32::from(f.overflow), u32::from(f.underflow));
+        for _ in 0..200_000 {
+            let mut lanes = || -> [u32; 4] {
+                std::array::from_fn(|_| {
+                    let r = next();
+                    let exponent = match r % 8 {
+                        0 => 0,
+                        1 => 0xFF,
+                        2 => 0xFE,
+                        3 => 1,
+                        _ => ((r >> 8) as u32) & 0xFF,
+                    };
+                    ((r >> 16) as u32 & 0x807F_FFFF) | (exponent << 23)
+                })
+            };
+            let (acc, a, mut b) = (lanes(), lanes(), lanes());
+            // Some lanes close in magnitude to the other operand.
+            b[0] = a[0] ^ 0x8000_0000;
+            b[1] = a[1].wrapping_add(1);
+            for i in 0..4 {
+                let check = |name: &str, four: x4::Out, one: (u32, Flags)| {
+                    let (r, o, u) = four;
+                    assert_eq!(
+                        (r[i], o[i], u[i]),
+                        (one.0, flags(one.1).0, flags(one.1).1),
+                        "{name} {:#x} {:#x} {:#x}",
+                        acc[i],
+                        a[i],
+                        b[i]
+                    );
+                };
+                check("add", x4::add(a, b), add(a[i], b[i]));
+                check("sub", x4::sub(a, b), sub(a[i], b[i]));
+                check("mul", x4::mul(a, b), mul(a[i], b[i]));
+                check("madd", x4::madd(acc, a, b), madd(acc[i], a[i], b[i]));
+                check("msub", x4::msub(acc, a, b), msub(acc[i], a[i], b[i]));
+                assert_eq!(x4::max(a, b)[i], max(a[i], b[i]));
+                for scale in [0, 4, 12, 15] {
+                    let factor = f64::from(1u32 << scale);
+                    assert_eq!(
+                        x4::from_fixed(a, scale)[i],
+                        chop(f64::from(a[i].cast_signed()) / factor).0
+                    );
+                    assert_eq!(
+                        x4::to_fixed(a, scale)[i],
+                        to_int(chop(value(a[i]) * factor).0),
+                        "{:#x} {scale}",
+                        a[i]
+                    );
+                }
+                assert_eq!(x4::min(a, b)[i], min(a[i], b[i]));
+            }
+            let doubles: [f64; 4] = std::array::from_fn(|_| f64::from_bits(next()));
+            let (r, o, u) = x4::chop(doubles);
+            for i in 0..4 {
+                let (one, f) = chop(doubles[i]);
+                assert_eq!(
+                    (r[i], o[i], u[i]),
+                    (one, flags(f).0, flags(f).1),
+                    "{:e}",
+                    doubles[i]
+                );
+            }
         }
     }
 

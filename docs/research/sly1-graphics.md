@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:39:05Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:22:22Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:43:00Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:22:22Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -121,8 +121,12 @@ through our GS alone, a repeatable benchmark of drawing.
 | Recompiled, narrower drawing hazards | 17.2 s | 16 ms a field | 17 ms a field |
 | Interpreted, narrower drawing hazards | 30.1 s | 24 ms a field | 34 ms a field |
 | Recompiled, drawing queued to a drawer | 16.7 s | 18 ms a field | 16 ms a field |
+| Recompiled, four-lane VU float operations | 16.1 s | 15 ms a field | 17 ms a field |
+| Interpreted, four-lane VU float operations | 26.8 s | 32 ms a field | 31 ms a field |
 
-Real time is 16.7 ms a field. The recompiled build's EE is faster, but VU1
+Real time is 16.7 ms a field. From the recompiled build at 17 s down,
+per-stretch figures move by 2 to 4 ms a field from run to run (the totals
+by about 0.3 s); the table gives typical runs. The recompiled build's EE is faster, but VU1
 and the GS are the same code, so it gains least where VU1 is busiest; it
 waits for the GS 8.2 s of its run. Until the fix below, it was not in the
 same state as the interpreter at all: after the change to event checks
@@ -239,8 +243,9 @@ Where the time is now:
 - **Drawing in order.** The 5,818 primitives that texture from what they
   draw, and the small batches, draw on one thread: about 3 s of the
   drawer's 6.5 s. The machine still waits for the GS 3.9 s of 16.7 s.
-- **VU1.** About 1 million pairs a 3D field: 19.5 ns a pair interpreted,
-  10.8 translated. What is left is the exact float arithmetic.
+- **VU1.** About 1 million pairs a 3D field: 15.5 ns a pair interpreted,
+  about 10 translated, with the float operations on four lanes
+  ([vu-translation.md](vu-translation.md)).
 - **The interpreted EE**, in the interpreted build.
 
 ## Open
