@@ -20,7 +20,10 @@
 # with `tools/framecmp.py`.
 #
 # With SAVE_RT=1, PCSX2 also saves the framebuffer after every draw in
-# those frames (`*_rt*`), to find the first draw that differs.
+# those frames (`*_rt*`), to find the first draw that differs. INFO=0 leaves
+# out each draw's registers and vertices (long ranges of pictures only).
+# STEP=N saves every Nth frame of the range only (FIRST, FIRST+N, ...
+# below FIRST+COUNT).
 #
 # PCSX2 runs inside `gamescope --backend headless` (no window opens) with a
 # data folder of its own in a temporary directory, no memory cards (as
@@ -60,12 +63,12 @@ upscale_multiplier = 1
 DumpGSData = true
 SaveFrame = true
 SaveRT = $([ "${SAVE_RT:-0}" = 1 ] && echo true || echo false)
-SaveInfo = true
+SaveInfo = $([ "${INFO:-1}" = 1 ] && echo true || echo false)
 SaveDrawStart = 0
 SaveDrawCount = -1
 SaveFrameStart = $first
 SaveFrameCount = $count
-SaveFrameBy = 1
+SaveFrameBy = ${STEP:-1}
 HWDumpDirectory = $out
 SWDumpDirectory = $out
 INI
@@ -75,8 +78,12 @@ INI
     -logfile "$work/pcsx2.log" -- "$disc") > "$work/stdout" 2>&1 &
 pid=$!
 
-# Stop once the last frame asked for has its registers.
-last=$(printf 'f%05d_vsync' $((first + count - 1)))
+# Stop once the last frame asked for has its registers (or, with INFO=0,
+# which writes none, its picture).
+step=${STEP:-1}
+end=$((first + (count - 1) / step * step))
+last=$(printf 'f%05d_vsync' $end)
+[ "${INFO:-1}" = 1 ] || last=$(printf 'f%05d_fr' $end)
 i=0
 until ls "$out" 2>/dev/null | grep -q "$last"; do
     i=$((i + 1))
