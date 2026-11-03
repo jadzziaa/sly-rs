@@ -17,9 +17,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:52:17Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:59:17Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:52:17Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:59:17Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -156,11 +156,18 @@ field).
     three frames. Swapping regions shows that only the two framebuffers
     carry the error.
   - The game blends each frame with the previous one, so whatever is not
-    redrawn persists. What we never draw: three textures PCSX2 draws with
-    (`TBP` 0x2CE0 and 0x2CE8, 64 × 64, and 0x3AE4, 32 × 32, all 4-bit;
-    about 1,150 vertices), most likely the sky, clouds and moon. We also
-    draw none of PCSX2's 1,100-odd line primitives (the toon outlines).
-    Both come from the EE or VU1 side, not the GS.
+    redrawn persists. Bucketed by primitive and texture, what we draw
+    less of is distant: strips with three textures (`TBP` 0x2CE0 and
+    0x2CE8, 64 × 64, and 0x3AE4, 32 × 32, all 4-bit; about 960 vertices)
+    in a small area around the Eiffel Tower, 2,216 untextured line
+    vertices in the same area (the tower's lattice, by position), and
+    large strips spanning the screen, likely the sky, drawn with a fifth of
+    PCSX2's vertices (`TBP` 0x2D10 and 0x2DA0 to 0x2DA6).
+  - The EE does send these objects: their `TEX0` settings reach VU1
+    through VIF1 UNPACKs every frame, but no GIF packet carrying them
+    leaves VU1. The fault is in VU1, likely a clipping or culling decision
+    in the microprogram that draws them, which phase 6 could not see: it
+    compared only our own packets drawn by both GSes.
 - The comparison also found two machine bugs: `SetGsCrt` now sets the CRT
   registers as the BIOS does for NTSC, and the GS CSR's revision and ID sit
   in bits 16 to 31.
@@ -398,8 +405,9 @@ Where the time is now, and how much is left to win:
 
 ## Open
 
-- The sky and the toon outlines are missing from the intro and the title
-  (above): find which code draws them in PCSX2 and why ours does not.
+- Distant objects (the sky, the Eiffel Tower and its lines) are culled
+  in VU1 in the intro and the title (above): find the microprogram that
+  draws them and the decision that drops them.
 
 - The logo's top edge looked clipped in earlier pictures; field and
   interlace handling in the display are checked only for this game's
