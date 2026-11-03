@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:29:45Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:35:00Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:29:50Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:38:40Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -117,6 +117,7 @@ through our GS alone, a repeatable benchmark of drawing.
 | GS on one thread (`d0824b6`) | 37.4 s | 32 ms a field | 81 ms a field |
 | Drawing on 8 threads | 32.4 s | 25 ms a field | 40 ms a field |
 | The same, recompiled build | 27.6 s | 31 ms a field | 32 ms a field |
+| Recompiled, VU1 microcode translated | 21.7 s | 19 ms a field | 26 ms a field |
 
 Real time is 16.7 ms a field. The recompiled build's EE is faster, but VU1
 and the GS are the same code, so it gains least where VU1 is busiest; it
@@ -177,14 +178,13 @@ replay's state hashes are unchanged. The changes:
     of the host's, at most 8. Past 4 it gains nothing in the game.
 
 Where the time is now:
-- **The machine's thread.** EE and VU1 are the limit. It waits for the GS
-  only 3.9 s of a 32 s run, when the GS's single front end (parsing,
-  batching, waiting for each batch) falls behind. Overlapping a batch's
-  drawing with the next batch's parsing is a further step.
-- **VU1.** It runs about 1 million pairs a 3D field at about 17 ns each,
-  close to the hardware's own instruction rate, so the interpreter does no
-  wasted work. The remaining lever there is translating the microcode
-  (the plan's `.DVP` item).
+- **The GS.** With VU1's microcode translated
+  ([vu-translation.md](vu-translation.md)), the recompiled build waits for
+  the GS 8.3 s of 21.7 s: the GS's single front end (parsing, batching,
+  waiting for each batch) falls behind. Overlapping a batch's drawing with
+  the next batch's parsing is the next step.
+- **VU1.** About 1 million pairs a 3D field: 19.5 ns a pair interpreted,
+  10.8 translated. What is left is the exact float arithmetic.
 
 ## Open
 

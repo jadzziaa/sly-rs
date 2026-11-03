@@ -195,6 +195,14 @@ impl Machine {
         self.table = table;
     }
 
+    /// Attaches translated VU microcode, used by both VUs wherever their
+    /// micro memory holds it.
+    pub fn attach_vu(&mut self, translations: &'static [ps2_vu::micro::Translation]) {
+        let mut hw = self.hw.borrow_mut();
+        hw.vif0.translations = translations;
+        hw.vif1.translations = translations;
+    }
+
     /// Runs generated code from the current PC, if there is some and the
     /// machine has nothing to do before `deadline`. True if it ran at least
     /// one instruction.
@@ -314,7 +322,9 @@ impl Machine {
     }
 
     /// A hash of the machine's state: registers, the clock, RAM and the
-    /// scratchpad, and the IOP's registers and RAM. Two runs from the same start must give the same hash.
+    /// scratchpad, both VUs' memories and VU1's registers (VU0's are the
+    /// EE's), and the IOP's registers and RAM. Two runs from the same start
+    /// must give the same hash.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
@@ -334,9 +344,23 @@ impl Machine {
         for reg in cpu.fpr {
             feed(&reg.to_le_bytes());
         }
-        feed(&self.mem.regions.ram);
-        feed(&self.mem.regions.scratchpad);
-        feed(&self.mem.regions.iop_ram);
+        for vu in [&cpu.vu0, &self.hw.borrow().vu1] {
+            for word in ps2_vu::record::registers(vu) {
+                feed(&word.to_le_bytes());
+            }
+        }
+        let regions = &self.mem.regions;
+        for memory in [
+            &regions.ram,
+            &regions.scratchpad,
+            &regions.vu0_code,
+            &regions.vu0_data,
+            &regions.vu1_code,
+            &regions.vu1_data,
+            &regions.iop_ram,
+        ] {
+            feed(memory);
+        }
         let iop = &self.iop.core.cpu;
         for reg in iop.gpr {
             feed(&reg.to_le_bytes());
@@ -361,6 +385,7 @@ impl Machine {
         let mut mem = ps2_vu::Memories {
             code: &mut regions.vu0_code,
             data: &mut regions.vu0_data,
+            code_writes: &mut regions.vu_code_writes[0],
         };
         let started = std::time::Instant::now();
         if hw.vif0.run(&mut self.cpu.vu0, &mut mem, &mut hw.gs) == ps2_vu::vif::Stop::Interrupt {
@@ -465,6 +490,8 @@ impl Machine {
 
     fn run_vu_program(&mut self, vu1: bool, address: u32) {
         let regions = &mut self.mem.regions;
+        let mut hw = self.hw.borrow_mut();
+        let hw = &mut *hw;
         if !vu1 {
             ps2_vu::micro::run(
                 &mut ps2_vu::micro::Unit {
@@ -472,14 +499,14 @@ impl Machine {
                     code: &regions.vu0_code,
                     data: &mut regions.vu0_data,
                     vu1: None,
-                    cache: &mut self.hw.borrow_mut().vif0.cache,
+                    cache: &mut hw.vif0.cache,
+                    translations: hw.vif0.translations,
+                    code_writes: regions.vu_code_writes[0],
                 },
                 address,
             );
             return;
         }
-        let mut hw = self.hw.borrow_mut();
-        let hw = &mut *hw;
         ps2_vu::micro::run(
             &mut ps2_vu::micro::Unit {
                 regs: &mut hw.vu1,
@@ -491,6 +518,8 @@ impl Machine {
                     gs: &mut hw.gs,
                 }),
                 cache: &mut hw.vif1.cache,
+                translations: hw.vif1.translations,
+                code_writes: regions.vu_code_writes[1],
             },
             address,
         );

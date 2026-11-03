@@ -82,6 +82,10 @@ pub struct Vif {
     pub pairs: u64,
     /// The VU's decoded pairs.
     pub cache: micro::Cache,
+    /// Translated microcode for the VU.
+    pub translations: &'static [micro::Translation],
+    /// Programs being recorded (`$SLY_RS_VU_RECORD`).
+    recording: Option<crate::record::Recording>,
 }
 
 impl Vif {
@@ -113,6 +117,8 @@ impl Vif {
             programs: 0,
             pairs: 0,
             cache: micro::Cache::default(),
+            translations: &[],
+            recording: None,
         }
     }
 
@@ -163,6 +169,8 @@ impl Vif {
                         programs: self.programs,
                         pairs: self.pairs,
                         cache: std::mem::take(&mut self.cache),
+                        translations: self.translations,
+                        recording: self.recording.take(),
                         ..Self::new(self.vif1)
                     };
                 }
@@ -320,6 +328,16 @@ impl Vif {
         }
         tracing::trace!(target: "vu", "VIF{} starts the VU at {pc:x?} (TPC {:#x})", u8::from(self.vif1), regs.tpc);
         let pc = pc.unwrap_or(regs.tpc);
+        if self.vif1
+            && let Some((path, skip, count)) = crate::record::wanted()
+            && (*skip..skip + count).contains(&self.programs)
+        {
+            let rec = self.recording.get_or_insert_default();
+            rec.add(mem.code, mem.data, regs, pc, self.itop, self.top);
+            if self.programs + 1 == skip + count {
+                let _ = std::fs::write(path, rec.to_bytes());
+            }
+        }
         let vu1 = self.vif1.then_some(micro::Vu1Link {
             itop: self.itop,
             top: self.top,
@@ -332,6 +350,8 @@ impl Vif {
                 data: mem.data,
                 vu1,
                 cache: &mut self.cache,
+                translations: self.translations,
+                code_writes: *mem.code_writes,
             },
             pc,
         );
@@ -504,9 +524,11 @@ mod tests {
         }
 
         fn resume(&mut self) -> Stop {
+            let mut writes = 0;
             let mut mem = Memories {
                 code: &mut self.code,
                 data: &mut self.data,
+                code_writes: &mut writes,
             };
             self.vif.run(&mut self.regs, &mut mem, &mut self.gs)
         }

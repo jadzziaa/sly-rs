@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:02:54Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:35:01Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -685,8 +685,20 @@ given: the gates are the schedule.
       field, 16,561 of 143,360 pixels differ, by at most 11, and 45 by
       more than 8: rounding of perspective texture coordinates and
       shading.
-  - Next: the machine's thread (EE and VU1) is the limit: translating VU1
-    microcode, and speeding up the interpreted EE.
+  - VU microcode is translated ahead of time
+    ([research/vu-translation.md](research/vu-translation.md)): every
+    overlay, used where micro memory holds it byte for byte, the
+    interpreter elsewhere. Every program Sly 1 runs in the replay is an
+    overlay of its executable (the "check early" item). Translations give
+    the interpreter's results (replay and lockstep now hash and compare VU
+    memory and registers; `vu-bench` compares recorded programs) at 10.8 ns
+    a pair against 19.5. The recompiled build runs 1300 fields in 21.7 s,
+    26 ms a 3D field.
+  - The recompiled build had diverged from the interpreter since the
+    event-check speed-up; fixed, and `cargo xtask test-full` now runs it in
+    lockstep and through the replay.
+  - Next: the GS's front end is now the limit of the recompiled build;
+    then the float arithmetic (VUs, both modes) and the interpreted EE.
 
 ### Phase 7 - Playable Sly 1
 

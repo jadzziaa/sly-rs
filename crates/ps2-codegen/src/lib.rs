@@ -12,8 +12,11 @@
 //! [`module`] generates a set of functions as one Rust module, with a
 //! `BLOCKS` table of every block start; calls between functions of the same
 //! module are direct, everything else goes through the table at run time.
+//!
+//! [`vu`] translates VU microcode overlays the same way.
 
 mod lower;
+pub mod vu;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;

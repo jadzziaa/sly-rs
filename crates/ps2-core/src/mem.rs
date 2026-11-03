@@ -40,6 +40,9 @@ pub struct Regions {
     pub vu1_data: Box<[u8]>,
     /// IOP RAM.
     pub iop_ram: Box<[u8]>,
+    /// Counts the EE's accesses that may write VU0's and VU1's micro
+    /// memory, so translated microcode knows to check it again.
+    pub vu_code_writes: [u64; 2],
 }
 
 impl Default for Regions {
@@ -52,6 +55,7 @@ impl Default for Regions {
             vu1_code: vec![0; 16 << 10].into_boxed_slice(),
             vu1_data: vec![0; 16 << 10].into_boxed_slice(),
             iop_ram: vec![0; IOP_RAM_SIZE].into_boxed_slice(),
+            vu_code_writes: [0; 2],
         }
     }
 }
@@ -78,9 +82,15 @@ impl Regions {
     fn physical(&mut self, address: u32, len: u32) -> Option<&mut [u8]> {
         let (region, offset): (&mut [u8], u32) = match address {
             0x0000_0000..0x1000_0000 => (&mut self.ram, address & 0x01FF_FFFF),
-            0x1100_0000..0x1100_4000 => (&mut self.vu0_code, address & 0xFFF),
+            0x1100_0000..0x1100_4000 => {
+                self.vu_code_writes[0] += 1;
+                (&mut self.vu0_code, address & 0xFFF)
+            }
             0x1100_4000..0x1100_8000 => (&mut self.vu0_data, address & 0xFFF),
-            0x1100_8000..0x1100_C000 => (&mut self.vu1_code, address & 0x3FFF),
+            0x1100_8000..0x1100_C000 => {
+                self.vu_code_writes[1] += 1;
+                (&mut self.vu1_code, address & 0x3FFF)
+            }
             0x1100_C000..0x1101_0000 => (&mut self.vu1_data, address & 0x3FFF),
             0x1C00_0000..0x1E00_0000 => (&mut self.iop_ram, address & 0x001F_FFFF),
             _ => return None,

@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Creation**: [research/vu-translation.md](research/vu-translation.md): VU microcode translated ahead of time, how it is matched and checked, and what it gains. Plan phase 6 status and the speed figures in [research/sly1-graphics.md](research/sly1-graphics.md) updated.
 * **Update**: Fixed the recompiled build, which had diverged from the interpreter since the event-check change: compiled hardware writes now reschedule the next event. `test-full` now runs the recompiled build in lockstep and through the replay. Recompiled speed added to [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: Drawing on several threads: the heaviest 3D stretch from 81 to 40 ms a field, results unchanged ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).
 * **Update**: Speed measured honestly (the GS thread included): 1300 fields in 37.4 s, was 73.5; earlier figures were too good. VU1 programs faster ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).

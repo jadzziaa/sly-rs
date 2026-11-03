@@ -38,6 +38,8 @@ fn exec(code: &[u8], regs: &mut Regs, data: &mut [u8], gs: Option<&mut Gs>) -> R
             data,
             vu1,
             cache: &mut Cache::default(),
+            translations: &[],
+            code_writes: 0,
         },
         0,
     )

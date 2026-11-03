@@ -28,68 +28,47 @@ pub struct Flags {
 }
 
 /// The value of a PS2 single as an `f64`.
-#[inline]
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn value(bits: u32) -> f64 {
+    // Without branches (selects), as everything on the VUs' hot path:
+    // exponent 0 reads as a signed zero, exponent 255 as ±`MAX`.
     let exponent = (bits >> 23) & 0xFF;
-    if exponent == 0 {
-        return if bits >> 31 == 0 { 0.0 } else { -0.0 };
-    }
-    let clamped = if exponent == 0xFF {
-        (bits & 0x8000_0000) | MAX
-    } else {
-        bits
-    };
-    f64::from(f32::from_bits(clamped))
+    let sign = bits & 0x8000_0000;
+    let bits = if exponent == 0 { sign } else { bits };
+    let bits = if exponent == 0xFF { sign | MAX } else { bits };
+    f64::from(f32::from_bits(bits))
 }
 
 /// Rounds `x` toward zero to a PS2 single, clamping overflow and flushing
 /// underflow.
-#[inline]
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn chop(x: f64) -> (u32, Flags) {
-    // As `finish(x, true)`, from the bits: a value in single precision's
-    // normal range keeps its exponent and loses the low 29 bits of its
-    // mantissa.
-    let sign = if x.is_sign_negative() { 0x8000_0000 } else { 0 };
-    let magnitude = x.abs();
-    if magnitude == 0.0 {
-        return (sign, Flags::default());
-    }
-    if magnitude > f64::from(f32::MAX) {
-        return (
-            sign | MAX,
-            Flags {
-                overflow: true,
-                underflow: false,
-            },
-        );
-    }
-    let bits = magnitude.to_bits();
-    let exponent = (bits >> 52) as u32;
-    // Above single precision's range only a NaN gets here (it compares
-    // false with everything); like `finish`, it overflows.
-    if exponent > 1150 {
-        return (
-            sign | MAX,
-            Flags {
-                overflow: true,
-                underflow: false,
-            },
-        );
-    }
-    // 2^-126, the smallest normal single, has the double exponent 897.
-    if exponent < 897 {
-        return (
-            sign,
-            Flags {
-                overflow: false,
-                underflow: true,
-            },
-        );
-    }
-    let mantissa = (bits >> 29) as u32 & 0x007F_FFFF;
-    (sign | ((exponent - 896) << 23) | mantissa, Flags::default())
+    // As `finish(x, true)`, from the bits and without branches: a value in
+    // single precision's normal range keeps its exponent and loses the low
+    // 29 bits of its mantissa. Magnitudes compare as integers, NaNs above
+    // everything (they overflow, as in `finish`).
+    let bits = x.to_bits();
+    let sign = ((bits >> 32) as u32) & 0x8000_0000;
+    let magnitude = bits & !(1 << 63);
+    // f32::MAX and 2^-126, the smallest normal single, as doubles.
+    let overflow = magnitude > 0x47EF_FFFF_E000_0000;
+    let tiny = magnitude < 0x3810_0000_0000_0000;
+    let underflow = tiny && magnitude != 0;
+    let exponent = (magnitude >> 52) as u32;
+    let mantissa = (magnitude >> 29) as u32 & 0x007F_FFFF;
+    let normal = sign | (exponent.wrapping_sub(896) << 23) | mantissa;
+    let result = if tiny { sign } else { normal };
+    (
+        if overflow { sign | MAX } else { result },
+        Flags {
+            overflow,
+            underflow,
+        },
+    )
 }
 
 /// Rounds `x` to the nearest PS2 single, clamping overflow and flushing
@@ -141,33 +120,31 @@ fn finish(x: f64, toward_zero: bool) -> (u32, Flags) {
     (sign | bits, Flags::default())
 }
 
-/// Drops the bits of `small` below the last place of an operand
-/// `difference` binary orders of magnitude larger.
-fn truncate_smaller(small: u32, difference: u32) -> u32 {
-    if difference >= 24 {
-        small & 0x8000_0000
-    } else if difference > 0 {
-        small & !((1 << difference) - 1)
-    } else {
-        small
-    }
-}
-
 /// The operands of an add with the smaller one truncated as the hardware's
-/// adder does.
+/// adder does: the bits below the larger operand's last place are dropped,
+/// all but the sign 24 orders of magnitude down or more. Without branches.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 fn aligned(a: u32, b: u32) -> (u32, u32) {
     let (ea, eb) = ((a >> 23) & 0xFF, (b >> 23) & 0xFF);
-    if ea == 0 || eb == 0 {
-        return (a, b);
-    }
-    if ea >= eb {
-        (a, truncate_smaller(b, ea - eb))
+    let difference = ea.abs_diff(eb);
+    let keep = if difference >= 24 {
+        0x8000_0000
     } else {
-        (truncate_smaller(a, eb - ea), b)
-    }
+        !((1u32 << difference.min(31)) - 1)
+    };
+    let keep = if ea == 0 || eb == 0 { u32::MAX } else { keep };
+    let (keep_a, keep_b) = if ea >= eb {
+        (u32::MAX, keep)
+    } else {
+        (keep, u32::MAX)
+    };
+    (a & keep_a, b & keep_b)
 }
 
 /// `a + b`.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn add(a: u32, b: u32) -> (u32, Flags) {
     let (a, b) = aligned(a, b);
@@ -175,18 +152,24 @@ pub fn add(a: u32, b: u32) -> (u32, Flags) {
 }
 
 /// `a - b`.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn sub(a: u32, b: u32) -> (u32, Flags) {
     add(a, b ^ 0x8000_0000)
 }
 
 /// `a * b`.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn mul(a: u32, b: u32) -> (u32, Flags) {
     chop(value(a) * value(b))
 }
 
 /// `acc + a * b`, rounded after each step.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn madd(acc: u32, a: u32, b: u32) -> (u32, Flags) {
     let (product, f1) = mul(a, b);
@@ -201,6 +184,8 @@ pub fn madd(acc: u32, a: u32, b: u32) -> (u32, Flags) {
 }
 
 /// `acc - a * b`, rounded after each step.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn msub(acc: u32, a: u32, b: u32) -> (u32, Flags) {
     let (product, f1) = mul(a, b);
@@ -277,12 +262,16 @@ pub fn rsqrt(a: u32, b: u32) -> (u32, DivFlags) {
 }
 
 /// The larger of two values.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn max(a: u32, b: u32) -> u32 {
     if value(a) >= value(b) { a } else { b }
 }
 
 /// The smaller of two values.
+#[allow(clippy::inline_always, reason = "the VUs' hot path")]
+#[inline(always)]
 #[must_use]
 pub fn min(a: u32, b: u32) -> u32 {
     if value(a) <= value(b) { a } else { b }
@@ -341,8 +330,67 @@ mod tests {
             f64::NEG_INFINITY,
             f64::MAX,
             f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            -f64::from_bits(0x000F_FFFF_FFFF_FFFF),
         ] {
             assert_eq!(chop(x), finish(x, true), "{x:e}");
+        }
+    }
+
+    /// `value` and `aligned` as first written, with branches.
+    fn value_reference(bits: u32) -> f64 {
+        let exponent = (bits >> 23) & 0xFF;
+        if exponent == 0 {
+            return if bits >> 31 == 0 { 0.0 } else { -0.0 };
+        }
+        let clamped = if exponent == 0xFF {
+            (bits & 0x8000_0000) | MAX
+        } else {
+            bits
+        };
+        f64::from(f32::from_bits(clamped))
+    }
+
+    fn aligned_reference(a: u32, b: u32) -> (u32, u32) {
+        let truncate = |small: u32, difference: u32| {
+            if difference >= 24 {
+                small & 0x8000_0000
+            } else if difference > 0 {
+                small & !((1 << difference) - 1)
+            } else {
+                small
+            }
+        };
+        let (ea, eb) = ((a >> 23) & 0xFF, (b >> 23) & 0xFF);
+        if ea == 0 || eb == 0 {
+            return (a, b);
+        }
+        if ea >= eb {
+            (a, truncate(b, ea - eb))
+        } else {
+            (truncate(a, eb - ea), b)
+        }
+    }
+
+    #[test]
+    fn branch_free_value_and_alignment_agree_with_the_first_forms() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for exponent in 0..=255u32 {
+            for _ in 0..512 {
+                let r = next();
+                let a = ((r as u32) & 0x807F_FFFF) | (exponent << 23);
+                assert_eq!(value(a).to_bits(), value_reference(a).to_bits(), "{a:#x}");
+                // Every exponent difference, both orders.
+                let b = (((r >> 32) as u32) & 0x807F_FFFF) | (((r >> 40) as u32 & 0xFF) << 23);
+                assert_eq!(aligned(a, b), aligned_reference(a, b), "{a:#x} {b:#x}");
+                assert_eq!(aligned(b, a), aligned_reference(b, a), "{b:#x} {a:#x}");
+            }
         }
     }
 

@@ -11,6 +11,7 @@ mod info;
 mod lockstep;
 mod replay;
 mod run;
+mod vu_bench;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -28,6 +29,8 @@ pub struct Recompiled {
     pub code_hash: u64,
     /// Every block start with its function, one slice per generated crate.
     pub chunks: &'static [&'static [(u32, GuestFn)]],
+    /// The VU microcode overlays, translated.
+    pub vu: &'static [ps2_vu::micro::Translation],
 }
 
 /// Boots `game`, running `recompiled` code where it has some.
@@ -51,6 +54,7 @@ pub fn boot(
             image.code_hash()
         );
         machine.attach(recompiled.table());
+        machine.attach_vu(recompiled.vu);
     }
     Ok((machine, image))
 }
@@ -142,6 +146,17 @@ enum Command {
         /// Drive both machines with a replay's presses.
         #[arg(long)]
         replay: Option<PathBuf>,
+    },
+    /// Run VU1 programs recorded with `$SLY_RS_VU_RECORD=PATH,SKIP,COUNT`
+    /// through the interpreter and the translated microcode: time both and
+    /// check they agree.
+    #[command(hide = true)]
+    VuBench {
+        /// The recording.
+        path: PathBuf,
+        /// Times to run it (the best is reported).
+        #[arg(long, default_value_t = 3)]
+        repeat: u32,
     },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
@@ -249,6 +264,9 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
             record,
             interpret,
         } => replay::run(&path, record, recompiled.filter(|_| !interpret)),
+        Command::VuBench { path, repeat } => {
+            vu_bench::bench(&path, repeat, recompiled.map_or(&[], |r| r.vu))
+        }
         Command::GsReplay {
             path,
             repeat,

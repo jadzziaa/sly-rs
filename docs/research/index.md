@@ -7,6 +7,7 @@
 * [Recompiled code hands control back instead of switching stacks](recompiled-control.md) - Why sly-rs's generated code needs neither host threads nor coroutines for EE threads - the guest's stack lives in guest memory, so compiled code can always return to the machine and resume at any block - and the invariants that keep recompiled execution identical to the interpreter's, to the cycle.
 * [How Sly 1 boots in the interpreter](sly1-boot.md) - The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver on the emulated IOP, DMA and GS events, the pad, the memory card check, the title and a new game - up to its first level.
 * [How Sly 1's graphics reach the GS in sly-rs](sly1-graphics.md) - The path Sly 1's frames take through DMA, the scratchpad, VIF0/VIF1, VU0/VU1 and the GS as sly-rs models it, and the four missing pieces that each stopped the first level from drawing. (draft)
+* [VU microcode translated ahead of time](vu-translation.md) - How sly-rs translates the VU microcode overlays into Rust at recompile time, how the translations are matched against what the game uploads and checked against the interpreter bit for bit, and what they gain on Sly 1.
 
 # Research Note
 

@@ -17,6 +17,7 @@
 )]
 
 pub mod micro;
+pub mod record;
 pub mod vif;
 
 pub use ps2_core::Vu0 as Regs;
@@ -36,6 +37,8 @@ pub struct Memories<'a> {
     pub code: &'a mut [u8],
     /// Data memory.
     pub data: &'a mut [u8],
+    /// Counts writes to micro memory (see [`micro::Unit::code_writes`]).
+    pub code_writes: &'a mut u64,
 }
 
 impl Memories<'_> {
@@ -60,6 +63,7 @@ impl Memories<'_> {
     /// Writes an instruction pair into micro memory at byte `address`.
     pub fn write_micro(&mut self, address: u32, lower: u32, upper: u32) {
         let at = (address & (self.code.len() as u32 - 1) & !7) as usize;
+        *self.code_writes += 1;
         self.code[at..at + 4].copy_from_slice(&lower.to_le_bytes());
         self.code[at + 4..at + 8].copy_from_slice(&upper.to_le_bytes());
     }

@@ -406,6 +406,7 @@ version = "0.1.0"
 dependencies = [
  "ps2-analysis",
  "ps2-isa",
+ "ps2-vu",
 ]
 
 [[package]]
@@ -631,6 +632,7 @@ dependencies = [
  "ps2-gs",
  "ps2-iop",
  "ps2-isa",
+ "ps2-vu",
  "sly-common",
  "tracing",
  "tracing-subscriber",

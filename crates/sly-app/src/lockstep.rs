@@ -1,7 +1,8 @@
 //! `lockstep`: the recompiled game and the interpreter side by side,
 //! compared at every field. Execution is meant to be identical to the cycle,
 //! so any difference is a recompiler bug; the first one is narrowed down to
-//! a window of a few cycles. The IOP's registers and RAM are compared too.
+//! a window of a few cycles. The IOP's registers and RAM, both VUs' memories
+//! and VU1's registers are compared too.
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -42,6 +43,9 @@ fn difference(a: &Machine, b: &Machine) -> Option<String> {
         }
         return Some(format!("registers: {}", parts.join(", ")));
     }
+    if a.hw.borrow().vu1 != b.hw.borrow().vu1 {
+        return Some("VU1 registers".to_owned());
+    }
     if a.iop.core.cpu != b.iop.core.cpu {
         let (x, y) = (&a.iop.core.cpu, &b.iop.core.cpu);
         return Some(format!(
@@ -55,6 +59,26 @@ fn difference(a: &Machine, b: &Machine) -> Option<String> {
             "scratchpad",
             &a.mem.regions.scratchpad,
             &b.mem.regions.scratchpad,
+        ),
+        (
+            "VU0 micro memory",
+            &a.mem.regions.vu0_code,
+            &b.mem.regions.vu0_code,
+        ),
+        (
+            "VU0 data memory",
+            &a.mem.regions.vu0_data,
+            &b.mem.regions.vu0_data,
+        ),
+        (
+            "VU1 micro memory",
+            &a.mem.regions.vu1_code,
+            &b.mem.regions.vu1_code,
+        ),
+        (
+            "VU1 data memory",
+            &a.mem.regions.vu1_data,
+            &b.mem.regions.vu1_data,
         ),
         ("IOP RAM", &a.mem.regions.iop_ram, &b.mem.regions.iop_ram),
     ] {

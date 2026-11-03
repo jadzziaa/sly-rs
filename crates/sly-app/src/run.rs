@@ -148,10 +148,11 @@ pub(crate) fn run(
     )?;
     writeln!(
         out,
-        "  VU1: {} programs, {} pairs from VIF1; VIF1 with VU1 {:.2} s",
+        "  VU1: {} programs, {} pairs from VIF1; VIF1 with VU1 {:.2} s, {:.2} s of it waiting for the GS",
         hw.vif1.programs,
         hw.vif1.pairs,
-        hw.timing.vif1.as_secs_f64()
+        hw.timing.vif1.as_secs_f64(),
+        hw.timing.vif1_gs_wait.as_secs_f64()
     )?;
     let t = &hw.timing;
     let total = elapsed.as_secs_f64();

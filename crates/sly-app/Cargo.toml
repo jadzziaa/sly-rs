@@ -25,6 +25,7 @@ ps2-ee.workspace = true
 ps2-gs.workspace = true
 ps2-iop.workspace = true
 ps2-isa.workspace = true
+ps2-vu.workspace = true
 sly-common.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

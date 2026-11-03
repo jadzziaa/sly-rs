@@ -105,6 +105,8 @@ pub struct Timing {
     pub vif0: std::time::Duration,
     /// VIF1, with VU1 programs and what they draw.
     pub vif1: std::time::Duration,
+    /// The part of `vif1` spent waiting for room in the GS's queue.
+    pub vif1_gs_wait: std::time::Duration,
     /// VU programs the EE starts (`vcallms`, CMSAR1).
     pub vu_calls: std::time::Duration,
 }
@@ -274,6 +276,7 @@ impl Hardware {
         let mut mem = ps2_vu::Memories {
             code: &mut regions.vu1_code,
             data: &mut regions.vu1_data,
+            code_writes: &mut regions.vu_code_writes[1],
         };
         if self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs) == ps2_vu::vif::Stop::Interrupt {
             self.raise_intc(intc::VIF1);
@@ -288,11 +291,13 @@ impl Hardware {
         };
         let before = chain.cycles();
         let started = std::time::Instant::now();
+        let waited = self.gs.waited;
         let mut words = Vec::with_capacity(4);
         let interrupt = loop {
             let mut mem = ps2_vu::Memories {
                 code: &mut regions.vu1_code,
                 data: &mut regions.vu1_data,
+                code_writes: &mut regions.vu_code_writes[1],
             };
             match self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs) {
                 ps2_vu::vif::Stop::NeedData => {
@@ -305,11 +310,14 @@ impl Hardware {
                 ps2_vu::vif::Stop::Interrupt => break true,
                 ps2_vu::vif::Stop::Stalled => {
                     self.vif1_chain = Some(chain);
+                    self.timing.vif1 += started.elapsed();
+                    self.timing.vif1_gs_wait += self.gs.waited.saturating_sub(waited);
                     return;
                 }
             }
         };
         self.timing.vif1 += started.elapsed();
+        self.timing.vif1_gs_wait += self.gs.waited.saturating_sub(waited);
         let due = self.clock.get() + chain.cycles() - before;
         self.transfers.push(crate::dma::Transfer {
             channel: 1,
