@@ -31,6 +31,7 @@ KEYS = {
     "left": "Left",
     "right": "Right",
     "gsdump": "F8",
+    "state": "F1",
 }
 
 

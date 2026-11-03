@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T12:29:12Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:43:30Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -771,6 +771,9 @@ given: the gates are the schedule.
     and a backface test culled them. Fixed
     ([research/sly1-graphics.md](research/sly1-graphics.md)); the replay's
     hashes are re-recorded.
+  - The title's lamp lit nothing: VIF0 started with CYCLE 0 (the BIOS
+    leaves 4, 4) and its reset cleared CYCLE, so VIF0 stalled at boot and
+    VU0's light tests ran on empty memory. Fixed; hashes re-recorded.
   - Next: memory card saves.
 
 ### Phase 8 - Sound and movies

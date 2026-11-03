@@ -17,9 +17,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T12:39:58Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:43:30Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T12:39:58Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:43:30Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -189,6 +189,26 @@ field).
   - `sly-rs vu-trace` (hidden) lists the programs of a VU1 recording or
     steps one pair by pair, with the registers each pair changes; that is
     how the test was found.
+- **The lamp on the title's water tower lit nothing.** Matched against a
+  PCSX2 GS dump of the same moment, our commands were PCSX2's except for
+  vertex colours: objects near the lamp had the moon's light only. The
+  chain, found with `vu-trace` and store probes:
+  - Lighting is baked into each model's colour arrays by VU1 jobs, read
+    back by `VU1_Interrupt`; the lights a model gets come from
+    `TwpsFindSwLights` (from `DrawGlob`), which tests the model's sphere
+    against each group of lights with VU0 microprograms (`vcallms 0x60`,
+    `0x168`) on light spheres `PrepareSwLightsForDraw` uploads through
+    VIF0.
+  - VIF0 had stopped for good at boot. Its first UNPACK came with CYCLE
+    at 0, so it read no data; the data was then read as codes, one of
+    them with the interrupt bit, and VIF0 stalled. VU0's data memory
+    stayed empty, every light test failed, and only the always-on light
+    (the moon) was ever found.
+  - The game never sets VIF0's CYCLE. A PCSX2 savestate shows it at 4, 4,
+    as the BIOS leaves it, and PCSX2's FBRST reset keeps CYCLE and the
+    other registers (only the FIFO, ERR, MSKPATH3 and the status are
+    reset). Ours reset everything. Now both VIFs start at 4, 4, and a
+    reset keeps the registers. Per-model colours now equal PCSX2's.
 - The comparison also found two machine bugs: `SetGsCrt` now sets the CRT
   registers as the BIOS does for NTSC, and the GS CSR's revision and ID sit
   in bits 16 to 31.

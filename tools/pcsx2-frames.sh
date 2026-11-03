@@ -27,7 +27,8 @@
 #
 # PRESS=BUTTON@FRAME,... presses pad 1's buttons (cross, circle, square,
 # triangle, start, select, up, down, left, right; gsdump saves a GS dump
-# of the next frame, as PCSX2's hotkey does, into OUT) once PCSX2 has saved that
+# of the next frame, as PCSX2's hotkey does, and state a savestate, both
+# into OUT) once PCSX2 has saved that
 # frame or a later one (tools/pcsx2-press.py; it needs python-xlib), so
 # a press lands on the first saved frame at or after FRAME, give or take
 # the moment it takes to notice.
@@ -92,6 +93,7 @@ Left = Keyboard/Left
 Right = Keyboard/Right
 [Hotkeys]
 GSDumpSingleFrame = Keyboard/F8
+SaveStateToSlot = Keyboard/F1
 [EmuCore/GS]
 GSDumpCompression = 0
 Renderer = 13
@@ -138,8 +140,8 @@ until ls "$out" 2>/dev/null | grep -q "$last"; do
     fi
     sleep 0.5
 done
-# GS dumps taken with the gsdump press.
-for dump in "$data"/snaps/*.gs "$data"/snaps/*/*.gs; do
+# GS dumps taken with the gsdump press, savestates with the state press.
+for dump in "$data"/snaps/*.gs "$data"/snaps/*/*.gs "$data"/sstates/*.p2s "$data"/sstates/*/*.p2s; do
     [ -e "$dump" ] && cp "$dump" "$out/"
 done
 echo "$(ls "$out" | grep -c '_fr[0-9]_.*png') framebuffers from PCSX2 in $out"

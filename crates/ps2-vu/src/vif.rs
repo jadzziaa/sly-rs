@@ -89,15 +89,18 @@ pub struct Vif {
 }
 
 impl Vif {
-    /// A VIF at reset.
+    /// A VIF as the BIOS leaves it when it starts a game: CYCLE is 4, 4
+    /// (PCSX2's savestates of Sly 1 show it so on VIF0, which the game
+    /// never sets itself; with CL and WL at 0, its first UNPACK would read
+    /// no data and the rest of the stream would be misread).
     #[must_use]
     pub fn new(vif1: bool) -> Self {
         Self {
             vif1,
             stat: 0,
             err: 0,
-            cl: 0,
-            wl: 0,
+            cl: 4,
+            wl: 4,
             mode: 0,
             mask: 0,
             row: [0; 4],
@@ -163,15 +166,18 @@ impl Vif {
         match offset {
             0x10 => {
                 if value & 1 != 0 {
-                    // RST: the VIF and its FIFO to their reset state.
-                    *self = Self {
-                        commands: self.commands,
-                        programs: self.programs,
-                        pairs: self.pairs,
-                        cache: std::mem::take(&mut self.cache),
-                        translations: self.translations,
-                        recording: self.recording.take(),
-                        ..Self::new(self.vif1)
+                    // RST, as PCSX2 resets a VIF: the FIFO, ERR, MSKPATH3
+                    // and the status (VIF0 keeps MRK, DBF and VEW). CYCLE,
+                    // MODE, MASK, ROW, COL and the other registers keep
+                    // their values: Sly 1 resets VIF0 and relies on the
+                    // CYCLE the BIOS left.
+                    self.fifo.clear();
+                    self.err = 0;
+                    self.mask_path3 = false;
+                    self.stat = if self.vif1 {
+                        0
+                    } else {
+                        self.stat & (stat::MRK | stat::DBF | 0x4)
                     };
                 }
                 if value & 8 != 0 {
@@ -583,6 +589,19 @@ mod tests {
         ]);
         rig.run(&[0x7C01_0002, 1, 2, 3, 4]);
         assert_eq!([0, 4, 8, 12].map(|k| rig.word(32 + k)), [10, 20, 0, 4]);
+    }
+
+    #[test]
+    fn cycle_starts_at_four_and_survives_a_reset() {
+        let mut rig = Rig::new();
+        rig.vif.vif1 = false;
+        assert_eq!(rig.vif.read(0x40), 0x0404, "as the BIOS leaves it");
+        // RST: the FIFO and the status go, CYCLE stays; an UNPACK V4-32 of
+        // one quadword then reads its four words.
+        rig.vif.write(0x10, 1);
+        assert_eq!(rig.vif.read(0x40), 0x0404);
+        assert_eq!(rig.run(&[0x6C01_0002, 1, 2, 3, 4]), Stop::NeedData);
+        assert_eq!([0, 4, 8, 12].map(|k| rig.word(32 + k)), [1, 2, 3, 4]);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: VIF0 starts with CYCLE 4, 4, as the BIOS leaves it, and a VIF reset keeps its registers, as in PCSX2: VIF0 had stalled at boot, so the lamps' lights were never found and the title's lamp lit nothing ([graphics](research/sly1-graphics.md)). Replay hashes re-recorded; `tools/pcsx2-frames.sh` takes a `state` press (a savestate).
 * **Update**: VU flags now land four cycles after their instruction, as on the hardware: Sly 1's backface test in VU1 had culled the intro's and the title's sky, moon and Eiffel Tower ([graphics](research/sly1-graphics.md)). Replay hashes re-recorded.
 * **Update**: [Graphics](research/sly1-graphics.md): the objects missing from the intro are distant (the sky, the Eiffel Tower and its lines); their data reaches VU1 every frame but never leaves it.
 * **Update**: [Graphics](research/sly1-graphics.md): compared with the real game in PCSX2. The GS draws PCSX2's dump correctly; our intro lacks the sky and the toon outlines, which the game's frame blending turns into stale, smeared pictures.
