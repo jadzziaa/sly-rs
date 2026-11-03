@@ -29,6 +29,38 @@ pub(crate) struct Transfer {
     region: Region,
 }
 
+/// Pixels written into one buffer: its format, base and width, and each
+/// pixel's (x, y, value).
+type Run = (Psm, u32, u32, Vec<(u32, u32, u32)>);
+
+/// Pixels written by transfers, in order.
+#[derive(Default)]
+pub(crate) struct Upload {
+    runs: Vec<Run>,
+    /// Pixels held.
+    pub(crate) pixels: usize,
+}
+
+impl Upload {
+    /// Adds `writes` into a `psm` buffer at `bp`, `bw` wide.
+    pub(crate) fn add(&mut self, psm: Psm, bp: u32, bw: u32, writes: &[(u32, u32, u32)]) {
+        self.pixels += writes.len();
+        match self.runs.last_mut() {
+            Some((p, b, w, run)) if (*p, *b, *w) == (psm, bp, bw) => run.extend_from_slice(writes),
+            _ => self.runs.push((psm, bp, bw, writes.to_vec())),
+        }
+    }
+
+    /// Writes the pixels into local memory.
+    pub(crate) fn apply(&self, mem: &crate::Memory) {
+        for (psm, bp, bw, run) in &self.runs {
+            for &(x, y, value) in run {
+                mem.write(*psm, *bp, *bw, x, y, value);
+            }
+        }
+    }
+}
+
 /// Bits a pixel of `psm` takes in a transfer.
 pub(crate) const fn transfer_bits(psm: Psm) -> u32 {
     match psm {
@@ -90,14 +122,14 @@ impl Gs {
         let Some(mut t) = self.transfer.take() else {
             return;
         };
-        self.before_upload(t.region);
         let size = transfer_bits(t.psm);
-        let write = |gs: &mut Self, t: &mut Transfer, value: u32| {
+        let mut writes = Vec::with_capacity(data.len() * 8 / size as usize);
+        let mut write = |t: &mut Transfer, value: u32| {
             if t.y >= t.h {
                 return;
             }
             let (x, y) = ((t.x0 + t.x) & 0x7FF, (t.y0 + t.y) & 0x7FF);
-            gs.mem.write(t.psm, t.bp, t.bw, x, y, value);
+            writes.push((x, y, value));
             t.x += 1;
             if t.x == t.w {
                 t.x = 0;
@@ -106,8 +138,8 @@ impl Gs {
         };
         if size == 4 {
             for &b in data {
-                write(self, &mut t, u32::from(b & 0xF));
-                write(self, &mut t, u32::from(b >> 4));
+                write(&mut t, u32::from(b & 0xF));
+                write(&mut t, u32::from(b >> 4));
             }
         } else {
             let n = (size / 8) as usize;
@@ -116,10 +148,11 @@ impl Gs {
             let bytes = std::mem::take(&mut t.pending);
             for px in bytes[..whole].chunks_exact(n) {
                 let value = px.iter().rev().fold(0, |v, &b| (v << 8) | u32::from(b));
-                write(self, &mut t, value);
+                write(&mut t, value);
             }
             t.pending = bytes[whole..].to_vec();
         }
+        self.upload(t.psm, t.bp, t.bw, &writes, t.region);
         if t.y < t.h {
             self.transfer = Some(t);
         }

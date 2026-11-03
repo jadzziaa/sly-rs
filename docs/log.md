@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: GS drawing queued to a drawer thread, with uploads coalesced in order: [research/sly1-graphics.md](research/sly1-graphics.md) records the measurements (no gain with one batch in flight; upload waits; 13 million upload pieces) and the small final gain.
 * **Update**: Drawing hazards narrowed (texels read, depth by use, per-row regions): primitives drawn alone fell from 220,734 to 11,704. [research/sly1-graphics.md](research/sly1-graphics.md) and [research/vu-translation.md](research/vu-translation.md) correct the claim that the GS front end was the limit.
 * **Update**: [research/sly1-graphics.md](research/sly1-graphics.md) notes that the state hash now covers the VUs and the replay was re-recorded; [research/vu-translation.md](research/vu-translation.md) states the shared-semantics property.
 * **Creation**: [research/vu-translation.md](research/vu-translation.md): VU microcode translated ahead of time, how it is matched and checked, and what it gains. Plan phase 6 status and the speed figures in [research/sly1-graphics.md](research/sly1-graphics.md) updated.

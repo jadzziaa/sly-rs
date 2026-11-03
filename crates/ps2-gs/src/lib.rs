@@ -64,8 +64,9 @@ pub struct Events {
 
 /// The GS.
 pub struct Gs {
-    /// Local memory.
-    pub mem: Memory,
+    /// Local memory, shared with the drawing threads. Read it after
+    /// [`Gs::flush`]: until then they may still be drawing into it.
+    pub mem: std::sync::Arc<Memory>,
     /// The two drawing contexts.
     pub ctx: [Context; 2],
     prim: u64,
@@ -108,7 +109,8 @@ pub struct Gs {
     dump: Option<dump::Dump>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
-    /// Host time spent drawing (for reports).
+    /// Host time spent drawing, or queueing primitives when drawing on
+    /// several threads (for reports).
     pub draw_time: std::time::Duration,
     /// Primitives drawn alone, batches drawn, and batches drawn on several
     /// threads, when drawing on several threads (for reports).
@@ -124,7 +126,7 @@ pub struct Gs {
 impl Default for Gs {
     fn default() -> Self {
         Self {
-            mem: Memory::default(),
+            mem: std::sync::Arc::default(),
             ctx: [Context::default(); 2],
             prim: 0,
             prmode: 0,

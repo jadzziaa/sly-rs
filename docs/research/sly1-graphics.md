@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:12:29Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:39:05Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:16:51Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:43:00Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -120,6 +120,7 @@ through our GS alone, a repeatable benchmark of drawing.
 | Recompiled, VU1 microcode translated | 21.7 s | 19 ms a field | 26 ms a field |
 | Recompiled, narrower drawing hazards | 17.2 s | 16 ms a field | 17 ms a field |
 | Interpreted, narrower drawing hazards | 30.1 s | 24 ms a field | 34 ms a field |
+| Recompiled, drawing queued to a drawer | 16.7 s | 18 ms a field | 16 ms a field |
 
 Real time is 16.7 ms a field. The recompiled build's EE is faster, but VU1
 and the GS are the same code, so it gains least where VU1 is busiest; it
@@ -197,8 +198,10 @@ build with translated microcode gives the same values.) The changes:
       reads apart, so a primitive whose depth reads hit another's frame
       writes (a hazard the old rules missed) also ends the batch.
 
-    Primitives drawn alone fell to 11,704: true page-level overlaps, a
-    4-bit texture kept inside the depth buffer's pages. Two tests guard
+    Primitives drawn alone fell to 11,704. Checked block by block, half
+    of them share no block with what they write, but those are tiny
+    (about a million pixels in all); the other 5,818, 59 million pixels,
+    texture from blocks they draw into and must stay in order. Two tests guard
     the rules: every pixel of random rectangles lies in its region, in
     every format and width; and the narrowed cases draw on 4 threads what
     they draw on one. Three runs of 1300 fields give the same GS memory.
@@ -208,10 +211,34 @@ build with translated microcode gives the same values.) The changes:
   - The number of threads is `$SLY_RS_GS_THREADS`, by default all but two
     of the host's, at most 8. Past 4 it gains nothing in the game.
 
+- **Drawing queued to a drawer.** The GS thread used to hand each batch
+  to the drawing threads and wait for it. Now a drawer thread takes
+  batches in order, up to 16 ahead, and draws each on the pool (or one
+  primitive after another, for small batches and primitives drawn alone),
+  while the GS thread parses on. Measured on the way:
+  - With one batch in flight it gained nothing: the GS thread waited 6.4 s
+    for batches, as long as drawing took (3.4 s on the pool, 3.0 s one
+    primitive after another), because batches come back to back.
+  - With 16, it still waited 5.6 s, for uploads: the game streams textures
+    into the same blocks, and each upload waited for the drawing of the
+    texture before it. Uploads now go through the drawer too, in order.
+  - Handed over one by one, the 13 million upload pieces (mostly a
+    quadword each) cost more than they saved. They are now coalesced: the
+    pixels not yet handed over come before the batch being built (the
+    primitives that read them were queued after them), and go to the
+    drawer with it, or alone when a CLUT load needs them.
+
+  The gain is small: 17.2 s to 16.7 s for 1300 fields, and the 3D stretch
+  from 17 to 16 ms a field, now at the console's own pace. The drawer
+  is the critical path: it draws for about 6.5 s, 3 s of it one primitive
+  after another. A test uploads textures again and again into the blocks
+  the queued batches read, and a palette for a CLUT load; with uploads
+  written out of order, it fails.
+
 Where the time is now:
-- **The GS.** The recompiled build still waits for it 4.2 s of 17.2 s:
-  the GS thread hands each batch to the drawing threads and waits for it.
-  Drawing a batch while the next one is parsed is the next step.
+- **Drawing in order.** The 5,818 primitives that texture from what they
+  draw, and the small batches, draw on one thread: about 3 s of the
+  drawer's 6.5 s. The machine still waits for the GS 3.9 s of 16.7 s.
 - **VU1.** About 1 million pairs a 3D field: 19.5 ns a pair interpreted,
   10.8 translated. What is left is the exact float arithmetic.
 - **The interpreted EE**, in the interpreted build.

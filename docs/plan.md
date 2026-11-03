@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:12:29Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:39:05Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -701,8 +701,11 @@ given: the gates are the schedule.
     primitives drawn alone fell from 220,734 to 11,704 over 1300 fields.
     The recompiled build runs them in 17.2 s, 17 ms a 3D field; the
     interpreted build in 30.1 s, 34 ms a 3D field.
-  - Next: drawing a batch while the GS parses the next; then the float
-    arithmetic (VUs, both modes) and the interpreted EE.
+  - Drawing is queued to a drawer thread, uploads with it in order, while
+    the GS parses on: 16.7 s for the 1300 fields, 16 ms a 3D field (the
+    console's pace is 16.7). A small gain: the drawer, drawing in order,
+    is now the critical path.
+  - Next: the float arithmetic (VUs, both modes) and the interpreted EE.
 
 ### Phase 7 - Playable Sly 1
 

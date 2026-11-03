@@ -23,17 +23,27 @@
 //! with the next), or whose depth buffer, where it uses it, overlaps its
 //! frame, is drawn alone, in order.
 //!
+//! Batches go to a drawer thread, which draws them in order, each on the
+//! pool of drawing threads or one primitive after another, while the GS
+//! parses the next ones. Transfers' pixels go through the drawer too, in
+//! order, coalesced; a CLUT load, a read back, a copy or a look at local
+//! memory waits for what it depends on.
+//!
 //! Footprints are conservative: on each page row a rectangle covers, the
 //! pages from its first column's to its last's. A texture's rectangle is
 //! the texels the primitive can read ([`Prim::texels`]); a depth buffer
 //! counts only where the depth test compares or depth is written.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, mpsc};
 
 use rayon::prelude::*;
 
 use crate::draw::{Prim, Raster};
 use crate::mem::page_shape;
 use crate::regs::{Tex0, bits};
-use crate::{Gs, Psm};
+use crate::transfer::Upload;
+use crate::{Gs, Memory, Psm};
 
 /// Blocks of local memory.
 const BLOCKS: u32 = 16384;
@@ -173,27 +183,21 @@ impl Blocks {
 /// What a batch draws into: the frame and the depth buffer.
 type Target = ((Psm, u32, u32), Option<(Psm, u32)>);
 
-/// Primitives waiting to be drawn, and what they read and write.
+/// What a batch's primitives use: blocks written as frame, written as
+/// depth, used as depth (tested or written), read as texture.
 #[derive(Default)]
-pub(crate) struct Batch {
-    pool: Option<rayon::ThreadPool>,
-    prims: Vec<Prim>,
-    /// Blocks written as frame, written as depth, used as depth (tested or
-    /// written), read as texture.
+struct Uses {
     frame: Blocks,
     depth_written: Blocks,
     depth: Blocks,
     texture: Blocks,
-    target: Option<Target>,
-    pixels: u64,
-    tiles: Vec<Vec<u32>>,
 }
 
-impl Batch {
-    /// Whether a primitive with this footprint must wait for the batch: it
-    /// reads what the batch writes or writes what it reads, other than the
-    /// same frame or depth pixels, which stay in one tile.
-    fn conflicts(&self, f: &Footprint) -> bool {
+impl Uses {
+    /// Whether a primitive with this footprint must wait for these uses: it
+    /// reads what they write or writes what they read, other than the same
+    /// frame or depth pixels, which stay in one tile.
+    fn conflict(&self, f: &Footprint) -> bool {
         let written = |r: Region| self.frame.hits(r) || self.depth_written.hits(r);
         f.texture.is_some_and(written)
             || self.texture.hits(f.frame)
@@ -202,8 +206,32 @@ impl Batch {
                 .is_some_and(|d| self.frame.hits(d) || (f.depth_written && self.texture.hits(d)))
     }
 
+    fn mark(&mut self, f: &Footprint) {
+        self.frame.mark(f.frame);
+        if let Some(d) = f.depth {
+            self.depth.mark(d);
+            if f.depth_written {
+                self.depth_written.mark(d);
+            }
+        }
+        if let Some(t) = f.texture {
+            self.texture.mark(t);
+        }
+    }
+
+    /// Whether an upload into `region` must wait.
+    fn uploads_conflict(&self, region: Region) -> bool {
+        [&self.frame, &self.depth, &self.texture]
+            .iter()
+            .any(|set| set.hits(region))
+    }
+
+    /// Whether reading `region` (a CLUT load) must wait.
+    fn reads_conflict(&self, region: Region) -> bool {
+        self.frame.hits(region) || self.depth_written.hits(region)
+    }
+
     fn clear(&mut self) {
-        self.prims.clear();
         for set in [
             &mut self.frame,
             &mut self.depth_written,
@@ -212,8 +240,182 @@ impl Batch {
         ] {
             set.clear();
         }
-        self.target = None;
-        self.pixels = 0;
+    }
+}
+
+/// A batch's primitives and the buffers drawing them takes, which go to
+/// the drawing threads and come back.
+#[derive(Default)]
+struct Work {
+    prims: Vec<Prim>,
+    tiles: Vec<Vec<u32>>,
+    /// Drawn one primitive after another (a primitive drawn alone).
+    serial: bool,
+    pixels: u64,
+    /// Local memory, while the batch is with the drawer (it draws there).
+    memory: Option<Arc<Memory>>,
+}
+
+/// Batches the drawer may hold, drawn or waiting, before the GS waits for
+/// the oldest.
+const DEPTH: usize = 16;
+/// Transfer pixels held before they are handed to the drawer.
+const UPLOAD_MAX: usize = 1 << 18;
+
+/// Primitives waiting to be drawn and what they use, and the batches handed
+/// to the drawer, which draws them in order (each on the pool or one
+/// primitive after another) while the GS parses on.
+#[derive(Default)]
+pub(crate) struct Batch {
+    pool: Option<Arc<rayon::ThreadPool>>,
+    work: Work,
+    uses: Uses,
+    target: Option<Target>,
+    drawer: Option<Drawer>,
+    /// Batches handed to the drawer, oldest first: number and uses.
+    drawing: VecDeque<(u64, Uses)>,
+    /// Batches handed over and drawn so far.
+    submitted: u64,
+    drawn: u64,
+    /// Transfers' pixels not yet handed over, with the blocks they write.
+    /// They come before the primitives queued: those that read them were
+    /// queued after them, and the others do not touch them.
+    upload: Option<(Upload, Uses)>,
+    /// Buffers of drawn batches, for the next.
+    spare_work: Vec<Work>,
+    spare_uses: Vec<Uses>,
+}
+
+/// What the drawer does, in order: draw a batch (on the pool or not), or
+/// write a transfer's pixels.
+enum Item {
+    Batch(Work, bool),
+    Upload(Upload, Arc<Memory>),
+}
+
+/// The thread that draws batches in order.
+struct Drawer {
+    batches: mpsc::SyncSender<Item>,
+    /// Each item's end, with a batch's buffers for the next.
+    done: mpsc::Receiver<Option<Work>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drawer {
+    fn start(pool: Arc<rayon::ThreadPool>) -> Option<Self> {
+        let (batches, todo) = mpsc::sync_channel::<Item>(DEPTH);
+        let (finished, done) = mpsc::sync_channel(DEPTH);
+        let thread = std::thread::Builder::new()
+            .name("gs-drawer".to_owned())
+            .spawn(move || {
+                for item in todo {
+                    let back = match item {
+                        Item::Batch(mut work, parallel) => {
+                            let mem = work.memory.take().unwrap_or_default();
+                            if parallel {
+                                pool.install(|| draw(&mem, &mut work, true));
+                            } else {
+                                draw(&mem, &mut work, false);
+                            }
+                            Some(work)
+                        }
+                        Item::Upload(upload, mem) => {
+                            upload.apply(&mem);
+                            None
+                        }
+                    };
+                    if finished.send(back).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            batches,
+            done,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Batch {
+    /// Waits until batch `n` (counted from 1) has been drawn.
+    fn wait_for(&mut self, n: u64) {
+        while self.drawn < n {
+            let Some(drawer) = &self.drawer else {
+                return;
+            };
+            let Ok(back) = drawer.done.recv() else {
+                // The drawer panicked: memory is not what it should be.
+                assert!(std::thread::panicking(), "the GS's drawer has stopped");
+                return;
+            };
+            self.drawn += 1;
+            if let Some(mut work) = back {
+                work.prims.clear();
+                work.serial = false;
+                work.pixels = 0;
+                self.spare_work.push(work);
+            }
+            if let Some((_, mut uses)) = self.drawing.pop_front() {
+                uses.clear();
+                self.spare_uses.push(uses);
+            }
+        }
+    }
+
+    /// Gives the drawer the transfers' pixels not yet handed over.
+    fn hand_over_upload(&mut self, mem: &Arc<Memory>) {
+        if let Some((upload, uses)) = self.upload.take() {
+            self.hand_over(Item::Upload(upload, Arc::clone(mem)), uses);
+        }
+    }
+
+    /// Gives the drawer `item`, which uses `uses`.
+    fn hand_over(&mut self, item: Item, uses: Uses) {
+        if self.drawing.len() >= DEPTH {
+            self.wait_for(self.submitted + 1 - DEPTH as u64);
+        }
+        let Some(drawer) = &self.drawer else {
+            return;
+        };
+        assert!(
+            drawer.batches.send(item).is_ok(),
+            "the GS's drawer has stopped"
+        );
+        self.submitted += 1;
+        self.drawing.push_back((self.submitted, uses));
+    }
+
+    /// Waits until every batch handed over has been drawn.
+    fn wait(&mut self) {
+        self.wait_for(self.submitted);
+    }
+
+    /// Waits for the batches handed over that `conflict` says matter.
+    fn wait_if(&mut self, conflict: impl Fn(&Uses) -> bool) {
+        if let Some(&(n, _)) = self.drawing.iter().rev().find(|(_, uses)| conflict(uses)) {
+            self.wait_for(n);
+        }
+    }
+
+    /// Waits for everything handed over, then stops the drawer.
+    fn stop(&mut self) {
+        self.wait();
+        if let Some(mut drawer) = self.drawer.take() {
+            let thread = drawer.thread.take();
+            // Closing the queue ends the drawer.
+            drop(drawer);
+            if let Some(thread) = thread {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -248,6 +450,52 @@ fn footprint(prim: &Prim) -> Footprint {
     }
 }
 
+/// Draws a batch's primitives: split into tiles drawn in parallel, or one
+/// after another.
+fn draw(mem: &Memory, work: &mut Work, parallel: bool) {
+    let raster = Raster { mem };
+    if !parallel {
+        for prim in &work.prims {
+            raster.prim(prim, prim.bbox);
+        }
+        return;
+    }
+    if work.tiles.is_empty() {
+        work.tiles = vec![Vec::new(); TILES * TILES];
+    }
+    let mut used = Vec::new();
+    for (i, prim) in work.prims.iter().enumerate() {
+        let [x0, x1, y0, y1] = prim.bbox.map(|c| c / TILE);
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                let t = ty as usize * TILES + tx as usize;
+                if work.tiles[t].is_empty() {
+                    used.push(t);
+                }
+                work.tiles[t].push(i as u32);
+            }
+        }
+    }
+    let (prims, tiles) = (&work.prims, &work.tiles);
+    used.par_iter().for_each(|&t| {
+        let (tx, ty) = ((t % TILES) as i32 * TILE, (t / TILES) as i32 * TILE);
+        for &i in &tiles[t] {
+            let prim = &prims[i as usize];
+            let [x0, x1, y0, y1] = prim.bbox;
+            let clip = [
+                x0.max(tx),
+                x1.min(tx + TILE - 1),
+                y0.max(ty),
+                y1.min(ty + TILE - 1),
+            ];
+            raster.prim(prim, clip);
+        }
+    });
+    for t in used {
+        work.tiles[t].clear();
+    }
+}
+
 impl Gs {
     /// Draws with `threads` threads (1: one primitive after another, as it
     /// comes). The result is the same either way.
@@ -257,23 +505,32 @@ impl Gs {
     /// If the threads cannot be started.
     pub fn set_threads(&mut self, threads: usize) {
         self.flush();
+        self.batch.stop();
         self.batch.pool = (threads > 1).then(|| {
             match rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .thread_name(|i| format!("gs-draw-{i}"))
                 .build()
             {
-                Ok(pool) => pool,
+                Ok(pool) => Arc::new(pool),
                 Err(e) => panic!("starting the GS's drawing threads: {e}"),
             }
         });
+        if let Some(pool) = &self.batch.pool {
+            self.batch.drawer = Drawer::start(Arc::clone(pool));
+            assert!(
+                self.batch.drawer.is_some(),
+                "starting the GS's drawer thread"
+            );
+        }
     }
 
     pub(crate) const fn batching(&self) -> bool {
         self.batch.pool.is_some()
     }
 
-    /// Queues a primitive, drawing the batch first when it must.
+    /// Queues a primitive, handing the batch to the drawing threads first
+    /// when it must.
     pub(crate) fn queue(&mut self, prim: Prim) {
         let f = footprint(&prim);
         let p = &prim.pipe;
@@ -284,100 +541,86 @@ impl Gs {
             || f.texture.is_some_and(|t| {
                 t.overlaps(f.frame) || f.depth.is_some_and(|d| f.depth_written && t.overlaps(d))
             });
-        if alone {
-            self.alone += 1;
-            self.flush();
-            Raster { mem: &self.mem }.prim(&prim, prim.bbox);
-            return;
-        }
         let target = (p.frame, p.zbuf);
         let b = &self.batch;
-        if b.target.is_some_and(|t| t != target) || b.conflicts(&f) || b.prims.len() >= MAX_PRIMS {
-            self.flush();
+        if alone
+            || b.target.is_some_and(|t| t != target)
+            || b.uses.conflict(&f)
+            || b.work.prims.len() >= MAX_PRIMS
+        {
+            self.submit();
         }
         let b = &mut self.batch;
         b.target = Some(target);
-        b.frame.mark(f.frame);
-        if let Some(d) = f.depth {
-            b.depth.mark(d);
-            if f.depth_written {
-                b.depth_written.mark(d);
-            }
-        }
-        if let Some(t) = f.texture {
-            b.texture.mark(t);
-        }
+        b.uses.mark(&f);
         let [x0, x1, y0, y1] = prim.bbox;
-        b.pixels += ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
-        b.prims.push(prim);
+        b.work.pixels += ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
+        b.work.prims.push(prim);
+        if alone {
+            // A batch of its own, drawn as one primitive after another.
+            self.alone += 1;
+            self.batch.work.serial = true;
+            self.submit();
+        }
     }
 
-    /// Draws the primitives waiting in the batch.
+    /// Draws everything queued: when it returns, local memory holds it.
     pub fn flush(&mut self) {
-        let Self { batch: b, mem, .. } = self;
-        if b.prims.is_empty() {
+        self.submit();
+        self.batch.wait();
+    }
+
+    /// Hands the queued primitives to the drawer and returns without
+    /// waiting for them (unless the drawer already holds [`DEPTH`]
+    /// batches).
+    fn submit(&mut self) {
+        let b = &mut self.batch;
+        b.hand_over_upload(&self.mem);
+        if b.work.prims.is_empty() {
             return;
         }
-        let raster = Raster { mem };
-        self.batches += 1;
-        match &b.pool {
-            Some(pool) if b.pixels >= PARALLEL_MIN => {
-                self.parallel_batches += 1;
-                if b.tiles.is_empty() {
-                    b.tiles = vec![Vec::new(); TILES * TILES];
-                }
-                let mut used = Vec::new();
-                for (i, prim) in b.prims.iter().enumerate() {
-                    let [x0, x1, y0, y1] = prim.bbox.map(|c| c / TILE);
-                    for ty in y0..=y1 {
-                        for tx in x0..=x1 {
-                            let t = ty as usize * TILES + tx as usize;
-                            if b.tiles[t].is_empty() {
-                                used.push(t);
-                            }
-                            b.tiles[t].push(i as u32);
-                        }
-                    }
-                }
-                let (prims, tiles) = (&b.prims, &b.tiles);
-                pool.install(|| {
-                    used.par_iter().for_each(|&t| {
-                        let (tx, ty) = ((t % TILES) as i32 * TILE, (t / TILES) as i32 * TILE);
-                        for &i in &tiles[t] {
-                            let prim = &prims[i as usize];
-                            let [x0, x1, y0, y1] = prim.bbox;
-                            let clip = [
-                                x0.max(tx),
-                                x1.min(tx + TILE - 1),
-                                y0.max(ty),
-                                y1.min(ty + TILE - 1),
-                            ];
-                            raster.prim(prim, clip);
-                        }
-                    });
-                });
-                for t in used {
-                    b.tiles[t].clear();
-                }
-            }
-            _ => {
-                for prim in &b.prims {
-                    raster.prim(prim, prim.bbox);
-                }
-            }
+        if b.drawer.is_none() {
+            return;
         }
-        b.clear();
+        let parallel = !b.work.serial && b.work.pixels >= PARALLEL_MIN;
+        let mut work = std::mem::replace(&mut b.work, b.spare_work.pop().unwrap_or_default());
+        work.memory = Some(Arc::clone(&self.mem));
+        let uses = std::mem::replace(&mut b.uses, b.spare_uses.pop().unwrap_or_default());
+        b.target = None;
+        b.hand_over(Item::Batch(work, parallel), uses);
+        self.batches += 1;
+        self.parallel_batches += u64::from(parallel);
     }
 
-    /// Before an upload writes `region`: the batch is drawn first if it
-    /// reads or writes any of it.
-    pub(crate) fn before_upload(&mut self, region: Region) {
-        let b = &self.batch;
-        if [&b.frame, &b.depth, &b.texture]
-            .iter()
-            .any(|set| set.hits(region))
-        {
-            self.flush();
+    /// Writes a transfer's pixels, into `region`: at once, or after what
+    /// is queued that uses those blocks, in the drawer's order.
+    pub(crate) fn upload(
+        &mut self,
+        psm: Psm,
+        bp: u32,
+        bw: u32,
+        writes: &[(u32, u32, u32)],
+        region: Region,
+    ) {
+        if !self.batching() {
+            for &(x, y, value) in writes {
+                self.mem.write(psm, bp, bw, x, y, value);
+            }
+            return;
+        }
+        if self.batch.uses.uploads_conflict(region) {
+            // After the primitives queued, which use those blocks.
+            self.submit();
+        }
+        let b = &mut self.batch;
+        let (upload, uses) = b
+            .upload
+            .get_or_insert_with(|| (Upload::default(), b.spare_uses.pop().unwrap_or_default()));
+        upload.add(psm, bp, bw, writes);
+        // Written, for a CLUT load from it.
+        uses.frame.mark(region);
+        if upload.pixels >= UPLOAD_MAX {
+            self.batch.hand_over_upload(&self.mem);
         }
     }
 
@@ -395,9 +638,19 @@ impl Gs {
             let psm = if t.cpsm < 2 { Psm::Ct32 } else { Psm::Ct16 };
             Region::of(psm, t.cbp, 1, [0, 15, 0, 15])
         };
-        if self.batch.frame.hits(region) || self.batch.depth_written.hits(region) {
+        let b = &mut self.batch;
+        if b.uses.reads_conflict(region) {
             self.flush();
+            return;
         }
+        if b.upload
+            .as_ref()
+            .is_some_and(|(_, uses)| uses.reads_conflict(region))
+        {
+            // It comes before the primitives queued: it can go alone.
+            b.hand_over_upload(&self.mem);
+        }
+        b.wait_if(|uses| uses.reads_conflict(region));
     }
 }
 
@@ -478,6 +731,51 @@ mod tests {
         }
     }
 
+    /// Textures uploaded again and again into the same blocks, each drawn
+    /// from before the next replaces it, and a palette uploaded then loaded
+    /// as the CLUT of an 8-bit texture.
+    fn uploads(gs: &mut Gs) {
+        gs.write(addr::TEST_1, 0);
+        gs.write(addr::FRAME_1, 10 << 16);
+        for k in 0..6u8 {
+            gs.write(addr::BITBLTBUF, 0x1F40 << 32 | 1 << 48);
+            gs.write(addr::TRXPOS, 0);
+            gs.write(addr::TRXREG, 64 | 64 << 32);
+            gs.write(addr::TRXDIR, 0);
+            let texels: Vec<u8> = (0..64 * 64 * 4)
+                .map(|i| (i as u8).wrapping_mul(k + 1) ^ k)
+                .collect();
+            // In pieces, as IMAGE packets come.
+            for piece in texels.chunks(4000) {
+                gs.image(piece);
+            }
+            gs.write(addr::TEX0_1, 0x1F40 | 1 << 14 | 6 << 26 | 6 << 30 | 1 << 35);
+            gs.write(addr::PRIM, 6 | 1 << 4 | 1 << 8);
+            gs.write(addr::UV, 0);
+            gs.write(addr::XYZ2, (u64::from(k) * 80 * 16) | (16 * 16) << 16);
+            gs.write(addr::UV, (64 * 16) | (64 * 16) << 16);
+            gs.write(
+                addr::XYZ2,
+                ((u64::from(k) * 80 + 300) * 16) | (220 * 16) << 16,
+            );
+        }
+        gs.write(addr::BITBLTBUF, 0x3E80 << 32 | 1 << 48);
+        gs.write(addr::TRXPOS, 0);
+        gs.write(addr::TRXREG, 16 | 16 << 32);
+        gs.write(addr::TRXDIR, 0);
+        let palette: Vec<u8> = (0..16 * 16 * 4).map(|i| (i * 7) as u8).collect();
+        gs.image(&palette);
+        gs.write(
+            addr::TEX0_1,
+            0x1F40 | 1 << 14 | 0x13 << 20 | 6 << 26 | 6 << 30 | 1 << 35 | 0x3E80 << 37 | 1 << 61,
+        );
+        gs.write(addr::PRIM, 6 | 1 << 4 | 1 << 8);
+        gs.write(addr::UV, 0);
+        gs.write(addr::XYZ2, (100 * 16) | (10 * 16) << 16);
+        gs.write(addr::UV, (64 * 16) | (64 * 16) << 16);
+        gs.write(addr::XYZ2, (600 * 16) | (200 * 16) << 16);
+    }
+
     /// The cases the footprints were narrowed for, drawn on 4 threads and
     /// on 1: full-screen strips textured from the other half of a double
     /// buffer, with the depth buffer just after it and masked; a depth
@@ -549,6 +847,7 @@ mod tests {
             for k in 0..40 {
                 tri(&mut gs, k, 640, 224, true);
             }
+            uploads(&mut gs);
             gs.flush();
             // The strips and the self-depth buffer batch now.
             assert!(

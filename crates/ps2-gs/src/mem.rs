@@ -333,9 +333,9 @@ impl Memory {
     }
 
     /// Replaces the memory with `bytes`, little-endian (from dumps).
-    pub fn load_bytes(&mut self, bytes: &[u8]) {
-        for (w, b) in self.words.iter_mut().zip(bytes.as_chunks::<4>().0) {
-            *w.get_mut() = u32::from_le_bytes(*b);
+    pub fn load_bytes(&self, bytes: &[u8]) {
+        for (w, b) in self.words.iter().zip(bytes.as_chunks::<4>().0) {
+            w.store(u32::from_le_bytes(*b), Ordering::Relaxed);
         }
     }
 

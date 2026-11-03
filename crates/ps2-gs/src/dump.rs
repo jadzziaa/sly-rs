@@ -46,6 +46,8 @@ impl Gs {
     /// Starts a dump from the GS's state now; `privileged` is the
     /// privileged registers' block (`0x12000000..0x12002000`).
     pub fn start_dump(&mut self, privileged: &[u8; PRIV_SIZE]) {
+        // The dump starts from local memory with everything queued drawn.
+        self.flush();
         let state = self.freeze();
         let mut d = Dump::default();
         // A new-style header: CRC 0xFFFFFFFF, the header's size, the header
