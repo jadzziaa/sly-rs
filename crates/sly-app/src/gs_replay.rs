@@ -26,11 +26,16 @@ pub(crate) fn run(path: &Path, repeat: u32, screenshot: Option<&Path>) -> Result
         }
         let elapsed = started.elapsed();
         best = best.min(elapsed);
+        let d = gs.draw_time.map(|t| t.as_secs_f64());
         writeln!(
             out,
-            "{fields} fields, {} primitives in {:.3} s",
+            "{fields} fields, {} primitives in {:.3} s (points {:.3}, lines {:.3}, triangles {:.3}, sprites {:.3})",
             gs.drawn,
-            elapsed.as_secs_f64()
+            elapsed.as_secs_f64(),
+            d[0],
+            d[1],
+            d[2],
+            d[3]
         )?;
         if let Some(png) = screenshot {
             let frame = gs.display(&Privileged::from_block(&privileged[..]));

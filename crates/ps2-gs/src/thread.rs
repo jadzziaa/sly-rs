@@ -108,6 +108,9 @@ impl Scanner {
     }
 }
 
+/// Packets the machine may be ahead of the GS by.
+const QUEUE: usize = 4096;
+
 /// Work for the GS's thread.
 enum Job {
     Gif(usize, Vec<u128>),
@@ -116,7 +119,7 @@ enum Job {
 
 /// A GS on its own thread.
 pub struct Threaded {
-    jobs: Option<mpsc::Sender<Job>>,
+    jobs: Option<mpsc::SyncSender<Job>>,
     worker: Option<JoinHandle<()>>,
     scanner: Scanner,
     dumping: bool,
@@ -124,7 +127,9 @@ pub struct Threaded {
 
 impl Default for Threaded {
     fn default() -> Self {
-        let (jobs, queue) = mpsc::channel::<Job>();
+        // A bounded queue: when the GS falls behind, the machine waits for
+        // it rather than piling packets up in memory.
+        let (jobs, queue) = mpsc::sync_channel::<Job>(QUEUE);
         let worker = std::thread::Builder::new()
             .name("gs".to_owned())
             .spawn(move || {

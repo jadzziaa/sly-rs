@@ -64,6 +64,8 @@ pub(crate) fn run(
         }
         None => sly_common::replay::run(&mut machine, fields, &presses),
     };
+    // The GS draws on its own thread: the run is over once it has caught up.
+    machine.hw.borrow().gs.with(|_| ());
     let elapsed = started.elapsed();
     if let Some(path) = pictures.screenshot {
         let hw = machine.hw.borrow();
@@ -139,6 +141,13 @@ pub(crate) fn run(
         (hash, gs.draw_time, gs.drawn)
     });
     writeln!(out, "  GS memory hash {memory_hash:016x}")?;
+    writeln!(
+        out,
+        "  VU1: {} programs, {} pairs from VIF1; VIF1 with VU1 {:.2} s",
+        hw.vif1.programs,
+        hw.vif1.pairs,
+        hw.timing.vif1.as_secs_f64()
+    )?;
     let t = &hw.timing;
     let total = elapsed.as_secs_f64();
     let pct = |x: std::time::Duration| 100.0 * x.as_secs_f64() / total;

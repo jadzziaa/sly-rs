@@ -78,6 +78,8 @@ pub struct Vif {
     pub commands: u64,
     /// VU programs started, for reports.
     pub programs: u64,
+    /// Instruction pairs those programs ran, for reports.
+    pub pairs: u64,
     /// The VU's decoded pairs.
     pub cache: micro::Cache,
 }
@@ -109,6 +111,7 @@ impl Vif {
             fifo: VecDeque::new(),
             commands: 0,
             programs: 0,
+            pairs: 0,
             cache: micro::Cache::default(),
         }
     }
@@ -158,6 +161,7 @@ impl Vif {
                     *self = Self {
                         commands: self.commands,
                         programs: self.programs,
+                        pairs: self.pairs,
                         cache: std::mem::take(&mut self.cache),
                         ..Self::new(self.vif1)
                     };
@@ -332,6 +336,7 @@ impl Vif {
             pc,
         );
         self.programs += 1;
+        self.pairs += run.pairs;
         if run.runaway {
             tracing::warn!(target: "vu", "VU{} program at {pc:#06x} ran {} pairs without ending", u8::from(self.vif1), run.pairs);
         }

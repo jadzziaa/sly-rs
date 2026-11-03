@@ -48,7 +48,48 @@ pub fn value(bits: u32) -> f64 {
 #[inline]
 #[must_use]
 pub fn chop(x: f64) -> (u32, Flags) {
-    finish(x, true)
+    // As `finish(x, true)`, from the bits: a value in single precision's
+    // normal range keeps its exponent and loses the low 29 bits of its
+    // mantissa.
+    let sign = if x.is_sign_negative() { 0x8000_0000 } else { 0 };
+    let magnitude = x.abs();
+    if magnitude == 0.0 {
+        return (sign, Flags::default());
+    }
+    if magnitude > f64::from(f32::MAX) {
+        return (
+            sign | MAX,
+            Flags {
+                overflow: true,
+                underflow: false,
+            },
+        );
+    }
+    let bits = magnitude.to_bits();
+    let exponent = (bits >> 52) as u32;
+    // Above single precision's range only a NaN gets here (it compares
+    // false with everything); like `finish`, it overflows.
+    if exponent > 1150 {
+        return (
+            sign | MAX,
+            Flags {
+                overflow: true,
+                underflow: false,
+            },
+        );
+    }
+    // 2^-126, the smallest normal single, has the double exponent 897.
+    if exponent < 897 {
+        return (
+            sign,
+            Flags {
+                overflow: false,
+                underflow: true,
+            },
+        );
+    }
+    let mantissa = (bits >> 29) as u32 & 0x007F_FFFF;
+    (sign | ((exponent - 896) << 23) | mantissa, Flags::default())
 }
 
 /// Rounds `x` to the nearest PS2 single, clamping overflow and flushing
@@ -269,6 +310,41 @@ pub fn from_int(a: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chop_from_the_bits_agrees_with_rounding_then_correcting() {
+        // Doubles spread over every exponent near and inside single
+        // precision's range, with assorted mantissas and both signs.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for exponent in 800u64..1200 {
+            for _ in 0..2000 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let mantissa = state & ((1 << 52) - 1);
+                for sign in [0, 1u64 << 63] {
+                    let x = f64::from_bits(sign | (exponent << 52) | mantissa);
+                    assert_eq!(chop(x), finish(x, true), "{x:e}");
+                }
+            }
+        }
+        for x in [
+            0.0,
+            -0.0,
+            f64::from(f32::MAX),
+            f64::from(f32::MIN_POSITIVE),
+            1.0,
+            -3.5,
+            f64::NAN,
+            -f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ] {
+            assert_eq!(chop(x), finish(x, true), "{x:e}");
+        }
+    }
 
     const ONE: u32 = 0x3F80_0000;
     const TWO: u32 = 0x4000_0000;

@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:05:34Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:37:29Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:05:34Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:37:29Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -105,24 +105,27 @@ field).
 
 ## Speed
 
-Measured on the replay's first 1300 fields; the last 200 are the 3D title.
-`perf` and `samply` need `kernel.perf_event_paranoid` at 1 or lower, so
-the profiles came from sampling stacks with gdb, and `sly-rs run` reports
-where host time goes. `sly-rs gs-replay` plays a GS dump through our GS
-alone, a repeatable benchmark of drawing.
+Measured on the replay's first fields, timing the whole process (the GS
+thread included). `perf` and `samply` need `kernel.perf_event_paranoid` at
+1 or lower, so the profiles came from sampling stacks with gdb. `sly-rs run`
+reports where host time goes, and `sly-rs gs-replay` plays a GS dump
+through our GS alone, a repeatable benchmark of drawing.
 
-| | 1300 fields | 3D field |
-| --- | --- | --- |
-| Before | 76 s | about 200 ms |
-| After | 29.7 s | about 35 ms |
+| | 1300 fields | fields 1100-1200 | fields 1200-1300 (3D) |
+| --- | --- | --- | --- |
+| Before (`3ed1483`) | 73.5 s | 101 ms a field | 158 ms a field |
+| Now | 37.4 s | 32 ms a field | 81 ms a field |
 
-Real time is 16.7 ms a field. Every change left the pictures bit for bit
-the same: the whole of GS memory at field 1300 hashes the same, and the
+Real time is 16.7 ms a field. Earlier figures in this note (29.7 s, about
+35 ms a 3D field) timed the machine without waiting for the GS thread to
+catch up, and were too good. Every change left the results bit for bit the
+same: the whole of GS memory at field 1300 hashes the same, and the
 replay's state hashes are unchanged. The changes:
 
 - **The GS on its own thread.** Nothing the EE does depends on what the GS
   draws. A tag scanner finds the SIGNAL, FINISH and LABEL writes as packets
-  are sent, and the GS draws them in order on a worker thread.
+  are sent, and the GS draws them in order on a worker thread. The queue
+  holds up to 4096 packets, so memory stays bounded (about 170 MB at peak).
 - **Fewer event checks.** The machine recomputed its next event after
   every interpreted instruction, 16% of the main thread. Now it does so
   only after a system call or a hardware write.
@@ -133,11 +136,27 @@ replay's state hashes are unchanged. The changes:
   - Frame and depth pixels are located once per fragment.
   - Texels with a zero bilinear weight are not fetched.
   - The GS dump replay went from 0.285 s to 0.197 s.
-- **VU programs.** Decoded pairs are kept per VU, used only while the
-  memory still holds the same pair.
+- **VU programs.**
+  - Decoded pairs are kept per VU, used only while the memory still holds
+    the same pair.
+  - Arithmetic chooses its operand and operation once per instruction, not
+    per component.
+  - Flags are computed without branching.
+  - Round-toward-zero comes from the bits instead of rounding and
+    correcting.
 
-The main thread is now mostly VU1 interpretation (VIF1 with VU1, about 56%
-of the run's time); the GS thread is busy about 80% of it.
+  VU1 programs went from 17.1 s to 13.0 s of the run.
+
+Where the time is now:
+- **Drawing.** The GS thread is the limit: in the 3D stretch it is busy
+  all the time, and the game's full-screen blend of the previous frame
+  costs about 11 ms a field even in 2D. The next step is drawing with
+  several threads, which needs sync points wherever one primitive reads
+  what another thread drew (render to texture, CLUT loads, copies).
+- **VU1.** It runs about 1 million pairs a 3D field at about 17 ns each,
+  close to the hardware's own instruction rate, so the interpreter does no
+  wasted work. The remaining lever there is translating the microcode
+  (the plan's `.DVP` item).
 
 ## Open
 

@@ -191,6 +191,21 @@ impl Cache {
     }
 }
 
+/// Runs `op` on the components in `dest`, into `out` and `flags`.
+#[inline]
+fn each(
+    dest: u32,
+    out: &mut [u32; 4],
+    flags: &mut [float::Flags; 4],
+    op: impl Fn(usize) -> (u32, float::Flags),
+) {
+    for i in 0..4 {
+        if in_dest(dest, i) {
+            (out[i], flags[i]) = op(i);
+        }
+    }
+}
+
 /// Whether component `i` (0 = x … 3 = w) is in the 4-bit `dest` mask.
 const fn in_dest(dest: u32, i: usize) -> bool {
     dest & (8 >> i) != 0
@@ -203,22 +218,28 @@ fn merge(old: [u32; 4], new: [u32; 4], dest: u32) -> [u32; 4] {
 /// The MAC flags and the new status for results in `dest`.
 fn flags(status: u32, out: [u32; 4], f: [float::Flags; 4], dest: u32) -> (u32, u32) {
     let mut mac = 0;
-    for i in (0..4).filter(|&i| in_dest(dest, i)) {
+    for i in 0..4 {
         let bit = 3 - i;
-        mac |= u32::from(out[i] << 1 == 0) << bit;
-        mac |= (out[i] >> 31) << (4 + bit);
-        mac |= u32::from(f[i].underflow) << (8 + bit);
-        mac |= u32::from(f[i].overflow) << (12 + bit);
+        let set = u32::from(out[i] << 1 == 0)
+            | ((out[i] >> 31) << 4)
+            | (u32::from(f[i].underflow) << 8)
+            | (u32::from(f[i].overflow) << 12);
+        mac |= set << bit;
     }
-    let mut current = 0;
-    for (group, flag) in [status::Z, status::S, status::U, status::O]
-        .into_iter()
+    // Only the components written count: dest's bit for x is bit 3, as
+    // the MAC flags' is.
+    mac &= dest * 0x1111;
+    // Z, S, U, O: whether any component set each group.
+    let current = [status::Z, status::S, status::U, status::O]
+        .iter()
         .enumerate()
-    {
-        if mac & (0xF << (4 * group)) != 0 {
-            current |= flag;
-        }
-    }
+        .fold(0, |c, (group, &flag)| {
+            if mac & (0xF << (4 * group)) == 0 {
+                c
+            } else {
+                c | flag
+            }
+        });
     let sticky = (status & 0xFC0) | (current << 6);
     (mac, (status & (status::I | status::D)) | current | sticky)
 }
@@ -364,24 +385,28 @@ pub fn run(unit: &mut Unit<'_>, pc: u32) -> Run {
         match class {
             Upper::Arith(arith, operand, to_acc) => {
                 let (a, t, acc) = (r.vf[fs], r.vf[ft], r.acc);
+                let b = match operand {
+                    Operand::Ft => t,
+                    Operand::Bc => [t[bc]; 4],
+                    Operand::Q => [r.q; 4],
+                    Operand::I => [r.i; 4],
+                };
                 let mut out = if to_acc { acc } else { r.vf[fd] };
                 let mut f = [float::Flags::default(); 4];
-                for i in (0..4).filter(|&i| in_dest(dest, i)) {
-                    let b = match operand {
-                        Operand::Ft => t[i],
-                        Operand::Bc => t[bc],
-                        Operand::Q => r.q,
-                        Operand::I => r.i,
-                    };
-                    (out[i], f[i]) = match arith {
-                        Arith::Add => float::add(a[i], b),
-                        Arith::Sub => float::sub(a[i], b),
-                        Arith::Mul => float::mul(a[i], b),
-                        Arith::Madd => float::madd(acc[i], a[i], b),
-                        Arith::Msub => float::msub(acc[i], a[i], b),
-                        Arith::Max => (float::max(a[i], b), float::Flags::default()),
-                        Arith::Min => (float::min(a[i], b), float::Flags::default()),
-                    };
+                // One loop per operation, the operation chosen once.
+                let (o, fl) = (&mut out, &mut f);
+                match arith {
+                    Arith::Add => each(dest, o, fl, |i| float::add(a[i], b[i])),
+                    Arith::Sub => each(dest, o, fl, |i| float::sub(a[i], b[i])),
+                    Arith::Mul => each(dest, o, fl, |i| float::mul(a[i], b[i])),
+                    Arith::Madd => each(dest, o, fl, |i| float::madd(acc[i], a[i], b[i])),
+                    Arith::Msub => each(dest, o, fl, |i| float::msub(acc[i], a[i], b[i])),
+                    Arith::Max => each(dest, o, fl, |i| {
+                        (float::max(a[i], b[i]), float::Flags::default())
+                    }),
+                    Arith::Min => each(dest, o, fl, |i| {
+                        (float::min(a[i], b[i]), float::Flags::default())
+                    }),
                 }
                 if to_acc {
                     upper_acc = Some(out);

@@ -277,12 +277,12 @@ impl Gs {
                 } else {
                     last.rgba
                 };
+                let fog = exact(f[0].f.into(), f[1].f.into(), f[2].f.into()) as i32;
                 let uv = if p.tme {
                     tex_coords(p, &f, w.map(|e| e as f64 * inv), (tw, th))
                 } else {
                     (0.0, 0.0)
                 };
-                let fog = exact(f[0].f.into(), f[1].f.into(), f[2].f.into()) as i32;
                 self.fragment(
                     p,
                     x,
