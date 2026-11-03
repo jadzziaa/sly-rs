@@ -7,6 +7,7 @@
 //! - [`execute`]: one instruction's effect, and what the machine must do
 //!   next ([`Outcome`]).
 //! - [`rec`]: what recompiled code runs on.
+//! - [`iop`]: the I/O processor's state, memory and instruction semantics.
 //! - [`float`]: PS2 single-precision arithmetic (no Inf/NaN, no denormals,
 //!   round toward zero, no guard bits).
 
@@ -26,6 +27,7 @@
 pub mod cpu;
 mod exec;
 pub mod float;
+pub mod iop;
 pub mod mem;
 mod mmi;
 pub mod rec;

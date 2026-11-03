@@ -131,6 +131,9 @@ enum Command {
         /// Fields (1/59.94 s) to run at most.
         #[arg(long, default_value_t = 600)]
         fields: u64,
+        /// Print what the IOP's modules print instead of the EE's console.
+        #[arg(long)]
+        iop: bool,
     },
     /// Disassemble a game's executable around an address, marking the
     /// functions discovery finds (blind) and the known symbols.
@@ -167,7 +170,7 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
             count,
         } => disasm::run(&game, &address, count),
         Command::Analyze { games, functions } => analyze::run(&games, functions),
-        Command::Elf { path, fields } => elf_run::run(&path, fields),
+        Command::Elf { path, fields, iop } => elf_run::run(&path, fields, iop),
         Command::Run {
             game,
             fields,

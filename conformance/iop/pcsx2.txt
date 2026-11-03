@@ -1,0 +1,22 @@
+iop conformance 1
+sprintf [-42 beef ok z]
+strtol -1234 127
+memset memcpy [aaXYaaaa] strncmp 0 1
+poll empty -419
+start worker 1 (higher priority)
+worker 1 start
+start worker 2 (lower priority)
+signal
+worker 1 has the semaphore
+worker 1 exits
+delay
+worker 2 start
+signal again
+wait for both
+worker 2 has the semaphore
+flags 6
+flags after clear 4
+suspend 0
+resume 0
+worker 2 exits
+iop done

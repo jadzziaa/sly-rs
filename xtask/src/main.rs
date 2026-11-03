@@ -10,10 +10,12 @@
 //!   into crates under `generated/<game>/`; `--build` builds its binary,
 //!   `--check` also runs it in lockstep with the interpreter (the phase 4
 //!   gate).
-//! - `conformance-build`: builds `conformance/conformance.elf` with the
-//!   ps2dev toolchain (the `ps2dev/ps2dev` image, run with podman).
-//! - `conformance-record`: records PCSX2's output for it, recompiler and
-//!   interpreter, into `conformance/pcsx2-*.txt` (headless, in gamescope).
+//! - `conformance-build`: builds the conformance programs (`conformance/`
+//!   and the IOP module in `conformance/iop/`) with the ps2dev toolchain (the
+//!   `ps2dev/ps2dev` image, run with podman).
+//! - `conformance-record`: records PCSX2's output for them (EE: recompiler
+//!   and interpreter; IOP) into `conformance/pcsx2-*.txt` and
+//!   `conformance/iop/pcsx2.txt` (headless, in gamescope).
 //! - `import-sly1-symbols <symbol_addrs.txt>`: converts the function symbols
 //!   of the Sly 1 decompilation (github.com/TheOnlyZac/sly1, CC0) into
 //!   `games/sly1/symbols.tsv`.
@@ -170,25 +172,31 @@ fn check_deps(root: &Path) -> Result<()> {
 const PS2DEV_IMAGE: &str = "docker.io/ps2dev/ps2dev:v2.0.0";
 
 fn conformance_build(root: &Path) -> Result<()> {
-    let dir = root.join("conformance");
-    eprintln!("== conformance.elf ({PS2DEV_IMAGE})");
-    let volume = format!("{}:/w:Z", dir.display());
-    run(
-        Command::new("podman")
-            .args(["run", "--rm", "-v", &volume, "-w", "/w", PS2DEV_IMAGE])
-            .args(["sh", "./build.sh"]),
-        "podman",
-    )
+    for dir in [root.join("conformance"), root.join("conformance/iop")] {
+        eprintln!("== {} ({PS2DEV_IMAGE})", dir.display());
+        let volume = format!("{}:/w:Z", dir.display());
+        run(
+            Command::new("podman")
+                .args(["run", "--rm", "-v", &volume, "-w", "/w", PS2DEV_IMAGE])
+                .args(["sh", "./build.sh"]),
+            "podman",
+        )?;
+    }
+    Ok(())
 }
 
 fn conformance_record(root: &Path) -> Result<()> {
     let dir = root.join("conformance");
-    for mode in ["recompiler", "interpreter"] {
-        eprintln!("== PCSX2 ({mode})");
+    for (mode, program, out) in [
+        ("recompiler", "ee", dir.join("pcsx2-recompiler.txt")),
+        ("interpreter", "ee", dir.join("pcsx2-interpreter.txt")),
+        ("recompiler", "iop", dir.join("iop/pcsx2.txt")),
+    ] {
+        eprintln!("== PCSX2 ({mode}, {program})");
         run(
             Command::new(dir.join("record-pcsx2.sh"))
-                .arg(dir.join(format!("pcsx2-{mode}.txt")))
-                .arg(mode),
+                .arg(out)
+                .args([mode, program]),
             "record-pcsx2.sh",
         )?;
     }

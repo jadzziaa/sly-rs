@@ -1,7 +1,7 @@
 //! `lockstep`: the recompiled game and the interpreter side by side,
 //! compared at every field. Execution is meant to be identical to the cycle,
 //! so any difference is a recompiler bug; the first one is narrowed down to
-//! the instruction step where the two machines part.
+//! a window of a few cycles. The IOP's registers and RAM are compared too.
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -42,6 +42,13 @@ fn difference(a: &Machine, b: &Machine) -> Option<String> {
         }
         return Some(format!("registers: {}", parts.join(", ")));
     }
+    if a.iop.core.cpu != b.iop.core.cpu {
+        let (x, y) = (&a.iop.core.cpu, &b.iop.core.cpu);
+        return Some(format!(
+            "IOP registers: pc {:08x}/{:08x} cycles {}/{}",
+            x.pc, y.pc, x.cycles, y.cycles
+        ));
+    }
     for (name, x, y) in [
         ("RAM", &a.mem.regions.ram, &b.mem.regions.ram),
         (
@@ -49,6 +56,7 @@ fn difference(a: &Machine, b: &Machine) -> Option<String> {
             &a.mem.regions.scratchpad,
             &b.mem.regions.scratchpad,
         ),
+        ("IOP RAM", &a.mem.regions.iop_ram, &b.mem.regions.iop_ram),
     ] {
         if x != y {
             let at = x

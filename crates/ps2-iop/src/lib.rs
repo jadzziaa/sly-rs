@@ -8,6 +8,10 @@
 //! protocol, as Sony's `sifcmd`/`sifrpc` modules do, and hands RPC calls to
 //! [`Server`]s written in Rust. Packet layouts follow the SDK's
 //! (`SifCmdHeader`, `SifRpcBindPkt`, `SifRpcCallPkt`, `SifRpcRendPkt`).
+//!
+//! The IOP's own processor ([`IopCore`]) runs the modules the game ships
+//! for itself (`libsd`, `989snd`) on a high-level emulation of the IOP
+//! kernel; the system modules stay Rust servers.
 
 // Packets, buffers and IOP addresses are small 32-bit quantities.
 #![allow(
@@ -20,7 +24,44 @@ use std::collections::{BTreeMap, VecDeque};
 use ps2_core::Memory;
 
 pub mod cdvd;
+mod core;
+mod format;
+mod hle;
+pub mod irx;
+pub mod kernel;
 pub mod loadfile;
+
+pub use crate::core::{IopCore, Module, Started};
+
+/// Modules the IOP side emulates in Rust (their RPC servers): loading one
+/// only records it.
+const RUST_MODULES: &[&str] = &["sio2man", "padman", "mcman", "mcserv"];
+
+/// Where module files come from: `host:` paths (the folder a test program
+/// runs from) and `cdrom0:` paths (the disc).
+pub trait Files {
+    /// The file at `path` (`cdrom0:\LIBSD.IRX;1`, `host:iopconf.irx`).
+    fn read(&self, path: &str) -> Option<Vec<u8>>;
+}
+
+/// `host:` files from a folder on the host, as PCSX2's `HostFs` serves them.
+pub struct HostFiles(pub std::path::PathBuf);
+
+impl Files for HostFiles {
+    fn read(&self, path: &str) -> Option<Vec<u8>> {
+        let name = path.strip_prefix("host:")?.trim_start_matches(['/', '\\']);
+        std::fs::read(self.0.join(name)).ok()
+    }
+}
+
+/// A loader RPC waiting for its module's start function.
+struct PendingLoad {
+    /// The `RPC_END` packet's words 4..=7 (request id, packet, rpc id,
+    /// client).
+    header: [u32; 4],
+    /// The EE's receive buffer and size.
+    recv: (u32, u32),
+}
 
 /// Where the IOP receives command packets (its `pktbuf`), published in the
 /// SMCOM mailbox at boot.
@@ -137,6 +178,11 @@ pub struct Iop {
     pub calls: BTreeMap<(u32, u32), u64>,
     /// Commands seen, by id.
     pub commands: BTreeMap<u32, u64>,
+    /// The IOP's processor.
+    pub core: IopCore,
+    files: Option<Box<dyn Files>>,
+    loads: BTreeMap<u64, PendingLoad>,
+    next_load: u64,
 }
 
 impl Default for Iop {
@@ -156,7 +202,107 @@ impl Iop {
             outgoing: VecDeque::new(),
             calls: BTreeMap::new(),
             commands: BTreeMap::new(),
+            core: IopCore::new(),
+            files: None,
+            loads: BTreeMap::new(),
+            next_load: 0,
         }
+    }
+
+    /// Gives the loader its module files.
+    pub fn attach_files(&mut self, files: Box<dyn Files>) {
+        self.files = Some(files);
+    }
+
+    /// Runs the IOP's processor until its clock reaches `until` (IOP
+    /// cycles), then answers the module loads that finished.
+    ///
+    /// # Errors
+    ///
+    /// Something the IOP emulation does not support yet.
+    pub fn run(&mut self, mem: &mut Memory, until: u64) -> Result<(), String> {
+        self.core.run_until(&mut mem.regions.iop_ram, until)?;
+        while let Some(done) = self.core.started.pop_front() {
+            if let Some(load) = self.loads.remove(&done.token) {
+                self.answer_load(&load, done.id.cast_signed(), done.result);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the IOP's processor has something to do by `until`.
+    #[must_use]
+    pub fn busy(&self, until: u64) -> bool {
+        self.core.busy(until)
+    }
+
+    /// Replies to a module load: the module id (or an error) and its start
+    /// function's result.
+    fn answer_load(&mut self, load: &PendingLoad, id: i32, result: u32) {
+        let (recv_buf, recv_size) = load.recv;
+        let extra = (recv_buf != 0 && recv_size > 0).then(|| {
+            let mut bytes = [id.to_le_bytes(), result.to_le_bytes()].concat();
+            bytes.resize(recv_size as usize, 0);
+            (recv_buf, bytes)
+        });
+        let [a, b, c, d] = load.header;
+        self.send(
+            vec![
+                0,
+                0,
+                cid::RPC_END,
+                0,
+                a,
+                b,
+                c,
+                d,
+                cid::RPC_CALL,
+                loadfile::LOADFILE,
+                0,
+                0,
+            ],
+            extra,
+        );
+    }
+
+    /// Loader function 0: load and start a module from a file. Modules the
+    /// IOP side emulates in Rust are only recorded; the others run, and the
+    /// reply waits for their start function.
+    fn load_module(&mut self, words: &[u32], data: &[u8], mem: &mut Memory) -> bool {
+        let path: Vec<u8> = data
+            .iter()
+            .skip(8)
+            .take_while(|&&b| b != 0)
+            .copied()
+            .collect();
+        let path = String::from_utf8_lossy(&path).into_owned();
+        let Some(bytes) = self.files.as_ref().and_then(|f| f.read(&path)) else {
+            return false;
+        };
+        let name = irx::Irx::parse(&bytes).map(|m| m.name).unwrap_or_default();
+        if RUST_MODULES.contains(&name.as_str()) {
+            return false;
+        }
+        let load = PendingLoad {
+            header: [words[4], words[5], words[6], words[7]],
+            recv: (words[10], words[11]),
+        };
+        self.next_load += 1;
+        let token = self.next_load;
+        match self
+            .core
+            .load(&mut mem.regions.iop_ram, &bytes, &path, token)
+        {
+            Ok(_) => {
+                self.loads.insert(token, load);
+            }
+            Err(error) => {
+                tracing::warn!(target: "iop::loadfile", "{error}");
+                // KE_LINKERR: the module could not be linked.
+                self.answer_load(&load, -200, 0);
+            }
+        }
+        true
     }
 
     /// Registers a server answering the ids `sids`.
@@ -265,6 +411,9 @@ impl Iop {
         };
         *self.calls.entry((server, function)).or_default() += 1;
         let data: Vec<u8> = (0..send_size).map(|i| iop_byte(mem, buffer + i)).collect();
+        if server == loadfile::LOADFILE && function == 0 && self.load_module(words, &data, mem) {
+            return;
+        }
         let reply = self.servers[index].call(
             &Call {
                 sid: server,

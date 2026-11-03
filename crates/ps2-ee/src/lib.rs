@@ -42,6 +42,10 @@ pub const FIELD_CYCLES: u64 = EE_HZ * 1001 / 60_000;
 pub const HSYNC_CYCLES: u64 = FIELD_CYCLES * 2 / 525;
 /// Where V-blank starts within a field (line 240 of 262.5).
 pub const VBLANK_START: u64 = HSYNC_CYCLES * 240;
+/// How often the IOP's processor runs while it has work: every H-line.
+pub const IOP_SLICE: u64 = HSYNC_CYCLES;
+/// EE cycles per IOP cycle (294.912 MHz / 36.864 MHz).
+pub const IOP_DIVIDER: u64 = 8;
 /// The top of user memory, the default stack top.
 pub const RAM_TOP: u32 = 0x0200_0000;
 
@@ -92,6 +96,8 @@ pub struct Machine {
     next_vblank_end: u64,
     /// When a rebooting IOP reports itself booted.
     iop_booted_at: u64,
+    /// Why the IOP's processor stopped, if it did.
+    iop_error: Option<String>,
     /// Fields shown so far.
     pub fields: u64,
     /// Calls to subsystems not built yet, by kind (VU0 micro programs, …).
@@ -148,6 +154,7 @@ impl Machine {
             next_vblank_start: VBLANK_START,
             next_vblank_end: FIELD_CYCLES,
             iop_booted_at: u64::MAX,
+            iop_error: None,
             fields: 0,
             skipped: BTreeMap::new(),
             samples: None,
@@ -193,6 +200,19 @@ impl Machine {
         ran > 0
     }
 
+    /// When the IOP's processor next runs: the next slice boundary while it
+    /// has a thread to run, the slice its next alarm falls in otherwise.
+    fn next_iop_slice(&self) -> u64 {
+        let slice_after = |cycle: u64| (cycle / IOP_SLICE + 1) * IOP_SLICE;
+        if self.iop.core.kernel.runnable() {
+            slice_after(self.cpu.cycles)
+        } else {
+            self.iop.core.next_alarm().map_or(u64::MAX, |alarm| {
+                slice_after((alarm * IOP_DIVIDER).max(self.cpu.cycles))
+            })
+        }
+    }
+
     /// The next cycle at which an event is due.
     fn next_event(&self) -> u64 {
         let alarm = self.kernel.next_alarm().unwrap_or(u64::MAX);
@@ -200,12 +220,20 @@ impl Machine {
             .min(self.next_vblank_end)
             .min(alarm)
             .min(self.iop_booted_at)
+            .min(self.next_iop_slice())
     }
 
     /// Raises the events due at the current cycle. Field k runs from
     /// k × [`FIELD_CYCLES`]; V-blank covers its last 22.5 lines.
     fn events(&mut self) {
         let now = self.cpu.cycles;
+        // The IOP catches up whenever it has work due: at its slice
+        // boundaries, and at any other event while it is busy.
+        if self.iop.busy(now / IOP_DIVIDER)
+            && let Err(error) = self.iop.run(&mut self.mem, now / IOP_DIVIDER)
+        {
+            self.iop_error = Some(error);
+        }
         if now >= self.next_vblank_start {
             // V-blank start: interrupt, GS CSR (V-sync bit, field flip), the
             // kernel's V-sync flag.
@@ -250,7 +278,7 @@ impl Machine {
     }
 
     /// A hash of the machine's state: registers, the clock, RAM and the
-    /// scratchpad. Two runs from the same start must give the same hash.
+    /// scratchpad, and the IOP's registers and RAM. Two runs from the same start must give the same hash.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
@@ -272,6 +300,13 @@ impl Machine {
         }
         feed(&self.mem.regions.ram);
         feed(&self.mem.regions.scratchpad);
+        feed(&self.mem.regions.iop_ram);
+        let iop = &self.iop.core.cpu;
+        for reg in iop.gpr {
+            feed(&reg.to_le_bytes());
+        }
+        feed(&iop.pc.to_le_bytes());
+        feed(&iop.cycles.to_le_bytes());
         hash
     }
 
@@ -282,6 +317,9 @@ impl Machine {
         while self.cpu.cycles < end {
             if self.cpu.cycles >= next_event {
                 self.events();
+                if let Some(error) = self.iop_error.take() {
+                    return Stop::Unimplemented(error);
+                }
                 next_event = self.next_event();
             }
             if self.iop.pending() && !self.kernel.in_interrupt() && self.iop.deliver(&mut self.mem)
