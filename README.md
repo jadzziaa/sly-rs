@@ -45,6 +45,10 @@ Commands so far:
 - `sly-rs run sly1 --fields 600` boots the game in the interpreter, headless,
   and reports kernel calls, threads, IOP traffic and the hottest functions;
   `--watch 1e1db8` records the arguments at an address.
+- `sly-rs replay games/sly1/replays/new-game.toml` plays scripted pad input
+  from power-on to the first level and checks the game's state at each
+  checkpoint (`--record` writes new state hashes); `sly-rs run sly1 --press
+  cross@700` presses buttons at chosen fields.
 - `cargo xtask recomp sly1 --build` recompiles Sly 1 into Rust and builds
   `generated/sly1/target/release/sly1`: the same command line with the game's
   code compiled. Its `run` uses the generated code (`--interpret` for the

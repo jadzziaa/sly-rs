@@ -6,7 +6,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use ps2_analysis::syscall_name;
-use ps2_ee::FIELD_CYCLES;
 use sly_common::Game;
 
 use crate::Recompiled;
@@ -20,8 +19,10 @@ pub(crate) fn run(
     game: &str,
     fields: u64,
     watch: &[String],
+    press: &[String],
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
+    let presses = sly_common::replay::parse_presses(press)?;
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
     let recompiled = recompiled.filter(|_| watch.is_empty());
     let (mut machine, image) = crate::boot(game, recompiled)?;
@@ -34,11 +35,18 @@ pub(crate) fn run(
         machine.watches.insert(address, Vec::new());
     }
     let started = Instant::now();
-    let stop = machine.run(fields * FIELD_CYCLES);
+    let stop = sly_common::replay::run(&mut machine, fields, &presses);
     let elapsed = started.elapsed();
     let mut out = io::stdout().lock();
     let cpu = &machine.cpu;
     writeln!(out, "{game}: stopped: {stop:?}")?;
+    if game == Game::Sly1 {
+        writeln!(
+            out,
+            "  game: {}",
+            sly_common::state::Sly1State::read(&mut machine.mem)
+        )?;
+    }
     writeln!(
         out,
         "  at pc {:#010x} (ra {:#010x}), {} cycles = {} fields, {:.1} s host ({:.0} M instructions/s)",
@@ -172,6 +180,7 @@ pub(crate) fn run(
             .collect();
         writeln!(out, "  interpreted most at: {}", top.join(" "))?;
     }
+    drop(hw);
     let watches = machine.watches.clone();
     for (address, hits) in &watches {
         writeln!(out, "  watch {address:08x}: {} hits", hits.len())?;

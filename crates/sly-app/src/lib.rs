@@ -8,6 +8,7 @@ mod elf;
 mod elf_run;
 mod info;
 mod lockstep;
+mod replay;
 mod run;
 
 use std::path::PathBuf;
@@ -113,6 +114,10 @@ enum Command {
         /// Use the interpreter only (and sample where time goes).
         #[arg(long)]
         interpret: bool,
+        /// Pad presses, BUTTON@FIELD (start@300,cross@420): each holds the
+        /// button for six fields.
+        #[arg(long, value_delimiter = ',')]
+        press: Vec<String>,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -122,6 +127,21 @@ enum Command {
         /// Fields (1/59.94 s) to run.
         #[arg(long, default_value_t = 300)]
         fields: u64,
+        /// Drive both machines with a replay's presses.
+        #[arg(long)]
+        replay: Option<PathBuf>,
+    },
+    /// Run a replay (scripted presses) and check its checkpoints: the game's
+    /// world and level, and the machine's state hash.
+    Replay {
+        /// The replay file (games/sly1/replays/...).
+        path: PathBuf,
+        /// Record the state hashes into the file instead of checking them.
+        #[arg(long)]
+        record: bool,
+        /// Use the interpreter only.
+        #[arg(long)]
+        interpret: bool,
     },
     /// Run any PS2 executable in the interpreter (a test program) and print
     /// what it writes to the EE's debug console.
@@ -176,8 +196,24 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
             fields,
             watch,
             interpret,
-        } => run::run(&game, fields, &watch, recompiled.filter(|_| !interpret)),
-        Command::Lockstep { game, fields } => lockstep::run(&game, fields, recompiled),
+            press,
+        } => run::run(
+            &game,
+            fields,
+            &watch,
+            &press,
+            recompiled.filter(|_| !interpret),
+        ),
+        Command::Lockstep {
+            game,
+            fields,
+            replay,
+        } => lockstep::run(&game, fields, replay.as_deref(), recompiled),
+        Command::Replay {
+            path,
+            record,
+            interpret,
+        } => replay::run(&path, record, recompiled.filter(|_| !interpret)),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

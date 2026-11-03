@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-02
+* **Update**: [Phase 5](plan.md) gate passed: under a scripted replay Sly 1 reaches its title, starts a new game and loads [its first level](research/sly1-boot.md) with recorded hashes, interpreted and recompiled alike; pad, memory card (no card), movie hooks.
 * **Update**: [Phase 5](plan.md): DMA transfers complete at modelled times with their GS events; Sly 1 runs [its frame loop](research/sly1-boot.md).
 * **Update**: [Phase 5](plan.md) under way: LIBSD and 989SND run on an emulated IOP (R3000 interpreter, IRX loader, kernel HLE, SPU2 DMA); the [boot](research/sly1-boot.md) now gets past the sound driver to the first frame's GS FINISH wait.
 * **Update**: Hosted CI: GitHub Actions runs `cargo xtask ci` on pushes to main and pull requests ([plan](plan.md), phase 0 status).

@@ -30,6 +30,8 @@ mod hle;
 pub mod irx;
 pub mod kernel;
 pub mod loadfile;
+pub mod mcserv;
+pub mod pad;
 pub mod spu2;
 
 pub use crate::core::{GuestServer, IopCore, Module, RpcRequest, Started};
@@ -113,6 +115,8 @@ pub trait Server {
     /// are sent back). `mem` is the EE's memory, for servers that move data
     /// there directly (disc reads).
     fn call(&mut self, call: &Call<'_>, mem: &mut Memory) -> Vec<u8>;
+    /// Runs at each V-blank (pads report their state then).
+    fn vblank(&mut self, _mem: &mut Memory) {}
 }
 
 /// The modules behind well-known server ids, for the log.
@@ -194,6 +198,8 @@ pub struct Iop {
     pub commands: BTreeMap<u32, u64>,
     /// The IOP's processor.
     pub core: IopCore,
+    /// What the pad in port 0 reports.
+    pad: std::rc::Rc<std::cell::Cell<pad::PadInput>>,
     files: Option<Box<dyn Files>>,
     loads: BTreeMap<u64, PendingLoad>,
     next_load: u64,
@@ -217,9 +223,32 @@ impl Iop {
             calls: BTreeMap::new(),
             commands: BTreeMap::new(),
             core: IopCore::new(),
+            pad: std::rc::Rc::default(),
             files: None,
             loads: BTreeMap::new(),
             next_load: 0,
+        }
+    }
+
+    /// Registers the pad servers (`padman`) and the memory card server
+    /// (`mcserv`).
+    pub fn attach_pad(&mut self) {
+        self.register(
+            &pad::PADMAN,
+            Box::new(pad::Padman::new(std::rc::Rc::clone(&self.pad))),
+        );
+        self.register(&[mcserv::MCSERV], Box::new(mcserv::Mcserv));
+    }
+
+    /// Sets what the pad in port 0 reports from the next V-blank on.
+    pub fn set_pad(&self, input: pad::PadInput) {
+        self.pad.set(input);
+    }
+
+    /// V-blank: the servers that report at V-blank do (the pads).
+    pub fn vblank(&mut self, mem: &mut Memory) {
+        for server in &mut self.servers {
+            server.vblank(mem);
         }
     }
 

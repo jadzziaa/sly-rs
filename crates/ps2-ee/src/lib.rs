@@ -65,6 +65,11 @@ pub enum Stop {
     Fault(String),
 }
 
+/// A native replacement for a guest function: it reads its arguments from
+/// the registers, does the function's work and leaves the result in `$v0`;
+/// the machine then returns to `$ra`.
+pub type Hook = fn(&mut Cpu, &mut Memory);
+
 /// Where the machine's instructions ran.
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -81,6 +86,8 @@ pub struct Stats {
     pub exits: BTreeMap<Exit, u64>,
     /// Instructions interpreted, by address (the first 4096 addresses).
     pub interpreted_at: BTreeMap<u32, u64>,
+    /// Hooked functions run, by name.
+    pub hooks: BTreeMap<&'static str, u64>,
 }
 
 /// A booted machine.
@@ -113,6 +120,8 @@ pub struct Machine {
     pub watches: BTreeMap<u32, Vec<[u32; 5]>>,
     /// Generated code, by the addresses it can start at.
     table: Table,
+    /// Native replacements, by function address.
+    hooks: BTreeMap<u32, (&'static str, Hook)>,
     /// Where instructions ran.
     pub stats: Stats,
 }
@@ -153,7 +162,11 @@ impl Machine {
             mem,
             hw,
             kernel,
-            iop: Iop::new(),
+            iop: {
+                let mut iop = Iop::new();
+                iop.attach_pad();
+                iop
+            },
             clock,
             next_vblank_start: VBLANK_START,
             next_vblank_end: FIELD_CYCLES,
@@ -164,8 +177,16 @@ impl Machine {
             samples: None,
             watches: BTreeMap::new(),
             table: Table::empty(),
+            hooks: BTreeMap::new(),
             stats: Stats::default(),
         })
+    }
+
+    /// Replaces the function at `address` with `hook`. Generated code must
+    /// not contain it (calls to it then reach the machine), so a compiled
+    /// call can never skip a hook.
+    pub fn hook(&mut self, address: u32, name: &'static str, hook: Hook) {
+        self.hooks.insert(address, (name, hook));
     }
 
     /// Runs `table`'s generated code wherever it has some, the interpreter
@@ -252,6 +273,7 @@ impl Machine {
                 hw.gs_event(3);
                 hw.gs_csr
             };
+            self.iop.vblank(&mut self.mem);
             if let Some((flag, csr_at)) = self.kernel.vsync_flag() {
                 self.mem.write32(flag, 1);
                 self.mem.write64(csr_at, csr);
@@ -357,6 +379,15 @@ impl Machine {
                     continue;
                 }
                 _ => {}
+            }
+            if let Some(&(name, hook)) = self.hooks.get(&self.cpu.pc) {
+                // A hooked function: its work in one cycle, then back to $ra.
+                hook(&mut self.cpu, &mut self.mem);
+                self.cpu.pc = self.cpu.r32(31);
+                self.cpu.cycles += 1;
+                self.clock.set(self.cpu.cycles);
+                *self.stats.hooks.entry(name).or_default() += 1;
+                continue;
             }
             if self.run_compiled(next_event.min(end)) {
                 continue;

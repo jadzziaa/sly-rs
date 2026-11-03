@@ -70,7 +70,18 @@ fn difference(a: &Machine, b: &Machine) -> Option<String> {
     None
 }
 
-pub(crate) fn run(game: &str, fields: u64, recompiled: Option<&Recompiled>) -> Result<()> {
+pub(crate) fn run(
+    game: &str,
+    fields: u64,
+    replay: Option<&std::path::Path>,
+    recompiled: Option<&Recompiled>,
+) -> Result<()> {
+    let presses = match replay {
+        Some(path) => {
+            sly_common::replay::parse_presses(&sly_common::replay::Replay::load(path)?.presses)?
+        }
+        None => Vec::new(),
+    };
     let recompiled = recompiled
         .context("this binary carries no recompiled code (build one with cargo xtask recomp)")?;
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
@@ -79,6 +90,9 @@ pub(crate) fn run(game: &str, fields: u64, recompiled: Option<&Recompiled>) -> R
     let mut out = io::stdout().lock();
     let (mut time_c, mut time_i) = (Duration::ZERO, Duration::ZERO);
     for field in 1..=fields {
+        let input = sly_common::replay::input_at(&presses, field - 1);
+        compiled.iop.set_pad(input);
+        interpreted.iop.set_pad(input);
         let started = Instant::now();
         let a = compiled.run(FIELD_CYCLES);
         time_c += started.elapsed();
@@ -92,7 +106,9 @@ pub(crate) fn run(game: &str, fields: u64, recompiled: Option<&Recompiled>) -> R
         };
         if let Some(what) = differs {
             writeln!(out, "field {field}: the machines differ: {what}")?;
-            narrow(game, recompiled, (field - 1) * FIELD_CYCLES, &mut out)?;
+            if presses.is_empty() {
+                narrow(game, recompiled, (field - 1) * FIELD_CYCLES, &mut out)?;
+            }
             bail!("lockstep failed at field {field}");
         }
         if field % 60 == 0 || field == fields {

@@ -93,5 +93,8 @@ pub fn boot(game: Game) -> Result<(Machine, Image), BootError> {
         .attach_disc(Rc::new(DiscSectors(Rc::clone(&disc))));
     machine.iop.attach_files(Box::new(DiscFiles(disc)));
     machine.iop.attach_loader(Build::of(game).iop_version);
+    for &(address, name, hook) in crate::hooks::hooks(game) {
+        machine.hook(address, name, hook);
+    }
     Ok((machine, image))
 }

@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:00:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:30:46Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -570,36 +570,51 @@ given: the gates are the schedule.
   loads the first level under a scripted pad replay; two runs give identical
   hashes.
 
-- **Status, 2026-11-03: in progress** (details:
+- **Status, 2026-11-03: gate passed; three items outstanding** (details:
   [research/sly1-boot.md](research/sly1-boot.md)).
-  - Built, with the advisor's sub-gates (a)-(d) passed:
+  - Built, through the advisor's sub-gates (a)-(d):
     - (a) The IOP runtime: R3000 semantics in `ps2-core::iop`, an IRX
-      loader with relocation and linking, a kernel HLE (threads with
-      priorities, semaphores, event flags, alarms, interrupt handlers,
-      hardware timers, `sysmem`, `sysclib`, `stdio`, `sifman`, the server
-      side of `sifcmd`, `cdvdman` reads). Our own IOP conformance module
-      (`conformance/iop`) prints exactly what it prints on PCSX2, whose IOP
-      runs Sony's own kernel.
+      loader with relocation and linking, and a kernel HLE.
+      - The HLE: threads with priorities, semaphores, event flags, alarms,
+        interrupt handlers, hardware timers, `sysmem`, `sysclib`, `stdio`,
+        `sifman`, the server side of `sifcmd`, `cdvdman` reads.
+      - Our own IOP conformance module (`conformance/iop`) prints exactly
+        what it prints on PCSX2, whose IOP runs Sony's own kernel.
     - (b) `LIBSD` starts. (c) `989SND` starts and registers its RPC
-      servers.
-    - (d) The EE's sound calls get real replies. Both sound banks load into
-      SPU2 memory through a modelled DMA, and Sly 1 stops at a new point:
-      its first frame's GS FINISH wait.
-  - The recompiled lockstep still passes (300 fields, IOP registers and RAM
-    compared too); 99.990% of the game's own instructions run recompiled.
-  - Simplifications to revisit:
-    - Disc reads by modules complete at once, like the EE's. One drive model
-      with modelled read times, shared by `cdvdfsv` and `cdvdman`, is still
-      to do.
-    - The SPU2 is registers, sound memory and DMA only: no voices yet.
-    - PCSX2 cannot check the timer functions 989SND uses (the BIOS's
-      `TIMRMAN` lacks them); the game exercises them instead.
-  - DMA transfers now complete at modelled times and set the GS events
-    their GIF packets ask for (PATH3 and VIF1 DIRECT); Sly 1 gets past its
-    first FINISH wait and runs one frame per field.
-  - Next: an observable for the title screen, pad and memory card servers,
-    modelled disc timing, the libmpeg hook, the anticrack test, the replay
-    format and the gate.
+      servers. (d) The game's sound calls get real replies, and both sound
+      banks load into SPU2 memory through a modelled DMA.
+    - DMA transfers complete at modelled times with the GS events their
+      packets ask for, so the game runs one frame per field.
+    - `padman` (the protocol ps2sdk's `libpad` documents, version 4.3 like
+      the disc's module): a DualShock 2 in port 0 whose record is written
+      into EE memory each V-blank.
+    - `mcserv` (MCSERV 2.0f numbering): no card inserted yet.
+    - Hooks (plan §5.3): native replacements by address, left out of
+      generated code so a compiled call always reaches them. Movies are
+      skipped by three hooks around `CMpeg::Execute`'s decoding, so the
+      game's own bookkeeping around a movie still runs.
+    - Observables read from the game's memory (`sly-common::state`):
+      interface, joypad, save system, world and level.
+    - Replays (`games/sly1/replays/*.toml`): presses per field and
+      checkpoints of world, level and state hash; `sly-rs replay` checks or
+      records them.
+  - Gate (`new_game` disc test): from power-on the replay reaches the title
+    (the attract world), starts a new game and loads the first level
+    (`jb_intro`). Two runs give the recorded hash at every checkpoint.
+    - The recompiled build gives the same hashes. Lockstep with the
+      replay's input is equal for 2,000 fields, 99.990% recompiled.
+    - The anticrack checks run and pass: `g_anticrack_frm` stays 0 and the
+      code in RAM is the executable's, byte for byte.
+    - Caveat: "title" and "first level" are the game state's world ids
+      (decompilation, `include/game.h`); nothing is drawn yet to confirm it
+      by eye.
+  - Outstanding, carried to the phases that need them:
+    - A memory card image (PCSX2-compatible `.ps2`), for saving.
+    - One disc drive model with modelled read times shared by `cdvdfsv` and
+      `cdvdman`: reads complete at once for now.
+    - Recompiling the IOP's modules: they run on the interpreter, which is
+      fast enough (the IOP idles most of the time).
+    - The SPU2 has no voices yet (phase 8).
 
 ### Phase 6 - Graphics
 

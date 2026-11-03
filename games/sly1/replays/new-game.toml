@@ -1,0 +1,24 @@
+# Sly 1 from power-on: the title (attract world), a new game, the first
+# level (jb_intro). Our own input script; checkpoints are the game state's
+# world and level (decompilation: include/game.h) and sly-rs's state hash.
+game = "sly1"
+fields = 2000
+presses = ["start@300", "start@500", "cross@700", "start@900"]
+
+[[checkpoint]]
+field = 600
+world = 0
+level = 2
+hash = "77c806ff8217a9be"
+
+[[checkpoint]]
+field = 1000
+world = 0
+level = 3
+hash = "e906e4e6de14db67"
+
+[[checkpoint]]
+field = 2000
+world = 0
+level = 3
+hash = "6615e9f36e1b95e8"
