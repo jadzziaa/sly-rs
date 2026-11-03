@@ -46,51 +46,58 @@ impl Gs {
     }
 
     fn feed(&mut self, path: usize, data: impl IntoIterator<Item = u128>) {
+        // The path's tag in a local while its quadwords go by (nothing
+        // else reads it), stored back at the end.
+        let mut current = self.paths[path].tag.take();
         for q in data {
-            match self.paths[path].tag {
-                None => self.gif_tag(path, q),
-                Some(mut tag) => {
-                    match tag.flg {
-                        0 => {
-                            let desc = ((tag.regs >> (4 * tag.reg)) & 0xF) as u8;
-                            self.packed(desc, q, &mut tag.q);
-                            tag.reg += 1;
+            let Some(tag) = current.as_mut() else {
+                current = self.gif_tag(q);
+                continue;
+            };
+            match tag.flg {
+                0 => {
+                    let desc = ((tag.regs >> (4 * tag.reg)) & 0xF) as u8;
+                    self.packed(desc, q, &mut tag.q);
+                    tag.reg += 1;
+                }
+                1 => {
+                    // Loops end per half here, so `reg` never reaches
+                    // `nreg` below.
+                    for half in [q as u64, (q >> 64) as u64] {
+                        let desc = ((tag.regs >> (4 * tag.reg)) & 0xF) as u8;
+                        if desc < 0xE {
+                            self.write(desc, half);
                         }
-                        1 => {
-                            // Loops end per half here, so `reg` never
-                            // reaches `nreg` below.
-                            for half in [q as u64, (q >> 64) as u64] {
-                                let desc = ((tag.regs >> (4 * tag.reg)) & 0xF) as u8;
-                                if desc < 0xE {
-                                    self.write(desc, half);
-                                }
-                                tag.reg += 1;
-                                if tag.reg == tag.nreg {
-                                    tag.reg = 0;
-                                    tag.nloop -= 1;
-                                    if tag.nloop == 0 {
-                                        // The rest of the quadword is padding.
-                                        break;
-                                    }
-                                }
+                        tag.reg += 1;
+                        if tag.reg == tag.nreg {
+                            tag.reg = 0;
+                            tag.nloop -= 1;
+                            if tag.nloop == 0 {
+                                // The rest of the quadword is padding.
+                                break;
                             }
                         }
-                        _ => {
-                            self.image(&q.to_le_bytes());
-                            tag.reg = tag.nreg;
-                        }
                     }
-                    if tag.reg == tag.nreg {
-                        tag.reg = 0;
-                        tag.nloop -= 1;
-                    }
-                    self.paths[path].tag = (tag.nloop > 0).then_some(tag);
+                }
+                _ => {
+                    self.image(&q.to_le_bytes());
+                    tag.reg = tag.nreg;
                 }
             }
+            if tag.reg == tag.nreg {
+                tag.reg = 0;
+                tag.nloop -= 1;
+            }
+            if tag.nloop == 0 {
+                current = None;
+            }
         }
+        self.paths[path].tag = current;
     }
 
-    fn gif_tag(&mut self, path: usize, q: u128) {
+    /// A GIF tag: its PRIM if it sets one, and the loops it starts (none
+    /// for NLOOP 0).
+    fn gif_tag(&mut self, q: u128) -> Option<Tag> {
         let lo = q as u64;
         let nloop = bits(lo, 0, 15);
         let flg = bits(lo, 58, 2);
@@ -101,7 +108,7 @@ impl Gs {
             0 => 16,
             n => n,
         };
-        let tag = Tag {
+        (nloop > 0).then_some(Tag {
             nloop,
             // IMAGE takes one quadword per loop.
             nreg: if flg >= 2 { 1 } else { nreg },
@@ -109,8 +116,7 @@ impl Gs {
             flg: flg.min(2),
             reg: 0,
             q: 1.0f32.to_bits(),
-        };
-        self.paths[path].tag = (nloop > 0).then_some(tag);
+        })
     }
 
     /// A PACKED quadword for descriptor `desc`.

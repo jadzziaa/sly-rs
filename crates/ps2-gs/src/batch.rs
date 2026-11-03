@@ -52,7 +52,7 @@ const TILE: i32 = 32;
 /// Tiles across (and down) the GS's 2048 × 2048 coordinate space.
 const TILES: usize = 2048 / TILE as usize;
 /// Pixels a batch must cover before it is worth spreading over threads.
-const PARALLEL_MIN: u64 = 16 * 1024;
+const PARALLEL_MIN: u64 = 4 * 1024;
 /// Primitives a batch holds at most.
 const MAX_PRIMS: usize = 16 * 1024;
 

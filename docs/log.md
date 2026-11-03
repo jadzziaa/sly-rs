@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: GIF parsing without per-quadword tag copies; parallel batches from 4,096 pixels; two VU interpreter experiments recorded as dropped; what is left and its ceilings in [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: Cheaper GS pixels: addressing and wrapping per primitive, flat sprites written directly; measurements in [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: Interpreted EE: decode cache, direct fetch, hook filter, instructions back to back between hand-back points; PCSX2's interpreter read for comparison. Figures and what limits the interpreted build now in [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: VU float operations on four lanes (ps2_core::float::x4): figures in [research/vu-translation.md](research/vu-translation.md) and [research/sly1-graphics.md](research/sly1-graphics.md).

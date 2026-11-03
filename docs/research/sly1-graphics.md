@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:05:18Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:24:15Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:05:18Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:24:15Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -291,16 +291,48 @@ build with translated microcode gives the same values.) The changes:
   and 0.25 s to 0.24 s. In the game the GS now finishes the first 600
   fields 2.0 s after the machine instead of 2.8 s.
 
-Where the time is now:
-- **VU1** bounds the interpreted build in 3D: about 1 million pairs a
-  field at 15.5 ns a pair; about 10 translated.
-- **The GS's pixels**, at about 25 ns each on one thread: every pixel
-  still goes through the whole pipeline, addresses computed one by one.
-  Pipelines specialised to the primitive's state, as PCSX2's software
-  renderer generates, would be the next step there.
-- **Drawing in order** in the recompiled build: the primitives that
-  texture from what they draw, and the small batches, about 3 s of the
-  drawer's 6.5 s.
+- **Parsing and small batches.** On 30 fields of the level's GS dump the
+  GS thread spent a fifth of its time parsing GIF packets, most of it
+  copying the path's tag (about 48 bytes) out of the GS and back for every
+  quadword; the tag now stays in a local while a send's quadwords go by.
+  Batches of 4,096 pixels or more (was 16,384) now draw on the pool. The
+  level dump draws in 0.464 s on one thread (was 0.559) and 0.132 s on
+  eight (was 0.232); the dialog dump in 0.45 s on eight (was 0.49). In the
+  game the gain is small (the recompiled build waits for the GS 2.7 s of
+  about 15.4 s, was 2.9; the GS finishes the first 600 fields 1.9 s after
+  the machine, was 2.0): there the machine and the drawer set the pace.
+- **Tried and dropped.**
+  - The adder's alignment done on `f64` values (scale by the larger
+    exponent's last place, truncate to an integer, scale back): exact,
+    agreeing with the scalar adder on 3 million random operands, but
+    slower (16.4 ns a pair interpreted against 15.0, 11.1 translated
+    against about 10), most likely the saturating float-to-integer
+    conversion's checks.
+  - The VU interpreter calling `exec` through one function per upper
+    class (69 instances, the class a constant), to fold its matches:
+    20 ns a pair against 15. Lower × upper would be thousands of
+    instances.
+  - Primitives drawn alone, checked block by block: the 5,818 that share
+    blocks with what they write (59 million pixels, about 2.4 s of the
+    drawer) texture from the buffer they draw into, so their pixels
+    depend on each other's order. Only a per-row dependency analysis of
+    such sprites could split them, which is not worth 2 s.
+
+Where the time is now, and how much is left to win:
+- **VU1, interpreted build.** Translated microcode does the same float
+  work at about 10 ns a pair with every dispatch folded; the interpreter
+  takes about 15. So decoding and dispatch cost at most 5 ns a pair,
+  about 3.8 s of the interpreted build's 22.4 s; no restructuring reaches
+  all of it. The rest is the exact float emulation both modes share,
+  already on four lanes.
+- **GS pixels.** About 25 ns a pixel on one thread: every pixel through
+  the whole pipeline. Pipelines specialised to a primitive's state, as
+  PCSX2's software renderer generates, are the large remaining step; they
+  would pay mostly in the recompiled build (the drawer, about 6.5 s, and
+  2.7 s of machine waits) and the title stretch, little in the
+  interpreted build (0.7 s of waits).
+- **Drawing in order**: the 5,818 primitives above, and small batches,
+  about 3 s of the drawer, mostly unavoidable.
 
 ## Open
 
