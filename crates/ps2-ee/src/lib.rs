@@ -361,11 +361,13 @@ impl Machine {
                 self.kernel.begin_interrupt(&mut self.cpu, &mut hw);
             }
             if self.kernel.current.is_none() && !self.kernel.in_interrupt() {
-                // Every thread waits: jump to the next event.
+                // Every thread waits: jump to the next event, but not past
+                // the end of the run (several short runs then equal one long
+                // one).
                 if next_event == u64::MAX {
                     return Stop::Deadlock;
                 }
-                self.cpu.cycles = next_event.max(self.cpu.cycles);
+                self.cpu.cycles = next_event.min(end).max(self.cpu.cycles);
                 self.clock.set(self.cpu.cycles);
                 continue;
             }

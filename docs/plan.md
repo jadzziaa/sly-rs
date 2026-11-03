@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:30:46Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T02:06:17Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -608,6 +608,12 @@ given: the gates are the schedule.
     - Caveat: "title" and "first level" are the game state's world ids
       (decompilation, `include/game.h`); nothing is drawn yet to confirm it
       by eye.
+    - Found in phase 6: the machine stalls at the level's first frame
+      (about field 1000), waiting for VIF1's interrupt, which needs VIF1
+      modelled (phase 6). The checkpoints at 1000 and 2000 are therefore
+      taken from a stalled machine.
+      - The survey of the "level" DMA was of that stalled machine, so the
+        level is not 2D-only. Its 3D goes through VU1 and PATH1.
   - Outstanding, carried to the phases that need them:
     - A memory card image (PCSX2-compatible `.ps2`), for saving.
     - One disc drive model with modelled read times shared by `cdvdfsv` and
@@ -637,6 +643,26 @@ given: the gates are the schedule.
   overlays (log every `MPG` in PCSX2 across several levels).
 - **Gate**: Sly 1's title screen and first level draw; replayed GS dumps match
   PCSX2's software renderer within a stated per-pixel tolerance.
+
+- **Status, 2026-11-03: in progress.**
+  - `ps2-gs` is built and unit-tested:
+    - local memory in all 13 formats, with PCSX2's swizzle tables;
+    - GIF PACKED, REGLIST and IMAGE packets;
+    - transfers host to local, local to local and local to host;
+    - CLUTs (CSM1 and CSM2);
+    - points, lines, triangles and sprites;
+    - texturing (nearest and bilinear), fog, the alpha, destination-alpha
+      and depth tests, blending, `COLCLAMP` and `FBA`;
+    - the display read-out to PNG.
+  - The machine feeds it GIF packets as DMA completes: PATH3, and PATH2
+    through VIF1's DIRECT commands.
+  - At field 600, `sly-rs run --screenshot` shows the game's "no memory
+    card" dialog.
+  - Next:
+    - VIF1, with the interrupt bit, stalls and `FBRST`. The first level
+      waits for its interrupt (phase 5 status above).
+    - One VU core for VU0 micro mode and VU1, with XGKICK (PATH1).
+    - A GS conformance program compared with PCSX2's software renderer.
 
 ### Phase 7 - Playable Sly 1
 

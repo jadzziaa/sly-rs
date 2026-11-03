@@ -2,7 +2,9 @@
 //! memory (normal mode, or source chain with its DMA tags), takes a
 //! modelled time, then completes: the channel's `D_STAT` bit is set and its
 //! start bit clears. The data goes nowhere yet (phase 6 renders it), except
-//! the GS events a GIF packet asks for: writes to SIGNAL, FINISH and LABEL
+//! the GS gets its GIF packets when the transfer completes (PATH3 from the
+//! GIF channel, PATH2 from VIF1's DIRECT commands), and the GS events a
+//! GIF packet asks for: writes to SIGNAL, FINISH and LABEL
 //! set the GS's CSR when the transfer completes, and raise the GS interrupt
 //! unless the IMR masks it. GIF packets come straight through the GIF
 //! channel (PATH3) or inside VIF1's DIRECT commands (PATH2).
@@ -31,7 +33,7 @@ pub struct GsEvents {
 }
 
 /// A transfer under way.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Transfer {
     /// The channel.
     pub channel: usize,
@@ -39,6 +41,8 @@ pub struct Transfer {
     pub due: u64,
     /// What it does to the GS.
     pub gs: GsEvents,
+    /// Its GIF packets, by path, for the GS.
+    pub packets: Vec<(usize, Vec<u128>)>,
 }
 
 /// A quadword of EE memory (bit 31 of the address selects the
@@ -210,6 +214,19 @@ pub fn gs_events(regions: &Regions, channel: usize, moves: &Moves) -> GsEvents {
     events
 }
 
+/// The GIF packets a transfer on `channel` carries, by path.
+#[must_use]
+pub fn gif_packets(regions: &Regions, channel: usize, moves: &Moves) -> Vec<(usize, Vec<u128>)> {
+    match channel {
+        2 => vec![(3, quadwords(&moves.words(regions)).collect())],
+        1 => vif_direct(&moves.words(regions))
+            .iter()
+            .map(|p| (2, quadwords(p).collect()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn quadwords(words: &[u32]) -> impl Iterator<Item = u128> + '_ {
     words.as_chunks::<4>().0.iter().map(|c| {
         u128::from(c[0]) | u128::from(c[1]) << 32 | u128::from(c[2]) << 64 | u128::from(c[3]) << 96
@@ -269,4 +286,39 @@ fn vif_direct(words: &[u32]) -> Vec<Vec<u32>> {
 #[must_use]
 pub fn duration(moves: &Moves) -> u64 {
     CYCLES_PER_TAG * (1 + u64::from(moves.tags)) + CYCLES_PER_QWORD * moves.qwords()
+}
+
+/// Appends a GIF or VIF1 transfer to `$SLY_RS_DMA_DUMP` when it is set:
+/// records of (channel, cycle, word count) then the words, little-endian.
+/// A debugging aid for graphics work; the data comes from the game, so the
+/// dump never goes into the repository.
+pub fn dump(regions: &Regions, channel: usize, cycle: u64, moves: &Moves) {
+    use std::io::Write as _;
+    static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    if !matches!(channel, 1 | 2) {
+        return;
+    }
+    let Some(file) = FILE.get_or_init(|| {
+        let path = std::env::var_os("SLY_RS_DMA_DUMP")?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
+        Some(std::sync::Mutex::new(file))
+    }) else {
+        return;
+    };
+    let words = moves.words(regions);
+    let mut record = Vec::with_capacity(16 + 4 * words.len());
+    record.extend_from_slice(&(channel as u32).to_le_bytes());
+    record.extend_from_slice(&cycle.to_le_bytes());
+    record.extend_from_slice(&(words.len() as u32).to_le_bytes());
+    for w in words {
+        record.extend_from_slice(&w.to_le_bytes());
+    }
+    if let Ok(mut file) = file.lock() {
+        let _ = file.write_all(&record);
+    }
 }

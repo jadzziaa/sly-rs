@@ -398,11 +398,16 @@ version = "0.1.0"
 dependencies = [
  "ps2-analysis",
  "ps2-core",
+ "ps2-gs",
  "ps2-iop",
  "ps2-isa",
  "thiserror",
  "tracing",
 ]
+
+[[package]]
+name = "ps2-gs"
+version = "0.1.0"
 
 [[package]]
 name = "ps2-iop"

@@ -20,6 +20,7 @@ pub(crate) fn run(
     fields: u64,
     watch: &[String],
     press: &[String],
+    screenshot: Option<&std::path::Path>,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
     let presses = sly_common::replay::parse_presses(press)?;
@@ -37,6 +38,11 @@ pub(crate) fn run(
     let started = Instant::now();
     let stop = sly_common::replay::run(&mut machine, fields, &presses);
     let elapsed = started.elapsed();
+    if let Some(path) = screenshot {
+        let hw = machine.hw.borrow();
+        let frame = hw.gs.display(&hw.gs_display());
+        std::fs::write(path, frame.png()).with_context(|| format!("writing {}", path.display()))?;
+    }
     let mut out = io::stdout().lock();
     let cpu = &machine.cpu;
     writeln!(out, "{game}: stopped: {stop:?}")?;
@@ -94,6 +100,12 @@ pub(crate) fn run(
     )?;
     let hw = machine.hw.borrow();
     writeln!(out, "  DMA kicks: {:?}", hw.dma_kicks)?;
+    writeln!(
+        out,
+        "  GS: {} primitives drawn; display {:x?}",
+        hw.gs.drawn,
+        hw.gs_display()
+    )?;
     writeln!(out, "  IOP commands: {:x?}", machine.iop.commands)?;
     writeln!(
         out,

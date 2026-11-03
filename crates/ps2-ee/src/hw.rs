@@ -76,6 +76,9 @@ pub struct Hardware {
     pub transfers: Vec<crate::dma::Transfer>,
     /// The GS's SIGNAL and LABEL registers, as packets last set them.
     pub gs_signal_label: (u64, u64),
+    /// The GS itself (outside the state hash: it only follows what the
+    /// EE sends it).
+    pub gs: Box<ps2_gs::Gs>,
 }
 
 impl Hardware {
@@ -98,6 +101,7 @@ impl Hardware {
             console: Vec::new(),
             transfers: Vec::new(),
             gs_signal_label: (0, 0),
+            gs: Box::default(),
         }
     }
 
@@ -110,6 +114,19 @@ impl Hardware {
         }
     }
 
+    /// The GS privileged registers the display read-out uses.
+    #[must_use]
+    pub fn gs_display(&self) -> ps2_gs::Privileged {
+        let reg = |address: u32| self.regs.get(&address).copied().unwrap_or(0) as u64;
+        ps2_gs::Privileged {
+            pmode: reg(0x1200_0000),
+            smode2: reg(0x1200_0020),
+            dispfb: [reg(0x1200_0070), reg(0x1200_0090)],
+            display: [reg(0x1200_0080), reg(0x1200_00A0)],
+            bgcolor: reg(0x1200_00E0),
+        }
+    }
+
     /// When the next DMA transfer completes.
     #[must_use]
     pub fn next_dma(&self) -> Option<u64> {
@@ -118,7 +135,9 @@ impl Hardware {
 
     /// Completes the transfers due by `now`.
     pub fn finish_dma(&mut self, now: u64) {
-        let (due, rest): (Vec<_>, Vec<_>) = self.transfers.iter().partition(|t| t.due <= now);
+        let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.transfers)
+            .into_iter()
+            .partition(|t| t.due <= now);
         self.transfers = rest;
         for t in due {
             let chcr = DMA_CHANNELS[t.channel].0;
@@ -126,6 +145,9 @@ impl Hardware {
                 *value &= !0x100;
             }
             self.complete_dma(t.channel);
+            for (path, packet) in t.packets {
+                self.gs.gif(path, packet);
+            }
             if let Some(signal) = t.gs.signal {
                 self.gs_signal_label.0 = signal;
                 self.gs_event(0);
@@ -332,13 +354,20 @@ impl Mmio for HardwareHandle {
                     };
                     let (madr, qwc, tadr) = (reg(&hw, 0x10), reg(&hw, 0x20), reg(&hw, 0x30));
                     let moves = crate::dma::moves(regions, value32, madr, qwc, tadr);
+                    crate::dma::dump(regions, channel, hw.clock.get(), &moves);
                     let gs = crate::dma::gs_events(regions, channel, &moves);
                     let due = hw.clock.get() + crate::dma::duration(&moves);
                     let count = hw.dma_kicks[name];
                     if count.is_power_of_two() || gs != crate::dma::GsEvents::default() {
                         tracing::debug!(target: "ee::dma", "{name} kick #{count} (CHCR {value32:#x}): {} quadwords, {} tags, {gs:?}", moves.qwords(), moves.tags);
                     }
-                    hw.transfers.push(crate::dma::Transfer { channel, due, gs });
+                    let packets = crate::dma::gif_packets(regions, channel, &moves);
+                    hw.transfers.push(crate::dma::Transfer {
+                        channel,
+                        due,
+                        gs,
+                        packets,
+                    });
                     // The machine's next event changed: recompiled code
                     // must hand back so it is taken at the exact cycle.
                     return true;

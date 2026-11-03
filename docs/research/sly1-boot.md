@@ -3,7 +3,7 @@ type: Finding
 title: How Sly 1 boots in the interpreter
 description: The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver on the emulated IOP, DMA and GS events, the pad, the memory card check, the title and a new game - up to its first level.
 tags: [finding, boot, sly1, kernel, sif, rpc, iop, sound, phase-3, phase-5]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:30:46Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T02:06:17Z }
 sources:
   - id: run
     resource: sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02
@@ -21,7 +21,7 @@ sources:
     resource: games/sly1/symbols.tsv
     title: Sly 1 function names (TheOnlyZac/sly1, CC0)
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:30:46Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T02:06:17Z }
 ---
 
 # How Sly 1 boots in the interpreter
@@ -107,17 +107,32 @@ instructions per second, about 0.6 times real time.
     (level 3); Start at field 900 plays a movie, which three hooks skip
     (`CMpeg::Start`, `sceMpegIsEnd`, `CMpeg::Finish`). The level then
     decompresses its data, builds geometry and draws text.
+16. **First level frame: stalled.** From about field 1000 no DMA is kicked
+    at all, and all four EE threads wait on semaphores. The main thread
+    waits in `OpenFrame` on `g_semaFrmMac` (`0x2623B4`). The frame loop
+    needs VIF1's interrupt: `StartupFrame` registers `VU1_Interrupt` for
+    INTC cause 5 (VIF1), which a VIF code with its interrupt bit raises
+    while VIF1 stalls. The handler reads results from the slice list and
+    writes STC to `VIF1_FBRST` (`0x10003C10`) to resume it. VIF1 is not
+    modelled yet (phase 6), so the interrupt never comes. The title's
+    frames did not depend on it.
 
 ## Graphics, in passing
 
-DMA transfers are followed through memory and their GIF packets read only
-for GS events (SIGNAL, FINISH, LABEL). Nothing is drawn: phase 6 renders
-the packets.
+DMA transfers are followed through memory. Their GIF packets (PATH3 from the
+GIF channel, PATH2 from VIF1's DIRECT commands) reach `ps2-gs` when the
+transfer completes, and their GS events (SIGNAL, FINISH, LABEL) are raised.
+At field 600, `sly-rs run --screenshot` shows the game's "no memory card"
+dialog, drawn in software. VIF1's other commands and VU1 are not modelled
+yet.
 
 ## Where it is now
 
-In the first level, under the replay `games/sly1/replays/new-game.toml`
-(the phase 5 gate). Pictures come with phase 6.
+Loading the first level, under the replay
+`games/sly1/replays/new-game.toml` (the phase 5 gate), then stalled at its
+first frame (step 16). The gate's checkpoints at fields 1000 and 2000 are
+taken from that stalled machine: they still certify determinism, but not
+that the level runs.
 
 The phase 3 gate test still runs this boot twice for 300 fields and checks
 that both runs end with the same state hash, now including the IOP's

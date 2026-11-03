@@ -118,6 +118,9 @@ enum Command {
         /// button for six fields.
         #[arg(long, value_delimiter = ',')]
         press: Vec<String>,
+        /// Write what the display shows at the end to this PNG file.
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -197,11 +200,13 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
             watch,
             interpret,
             press,
+            screenshot,
         } => run::run(
             &game,
             fields,
             &watch,
             &press,
+            screenshot.as_deref(),
             recompiled.filter(|_| !interpret),
         ),
         Command::Lockstep {
