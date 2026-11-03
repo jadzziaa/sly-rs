@@ -109,6 +109,8 @@ pub struct Timing {
     pub vif1_gs_wait: std::time::Duration,
     /// VU programs the EE starts (`vcallms`, CMSAR1).
     pub vu_calls: std::time::Duration,
+    /// The IOP catching up.
+    pub iop: std::time::Duration,
 }
 
 impl Hardware {

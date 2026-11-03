@@ -1,7 +1,7 @@
 //! `replay`: runs a replay file and checks its checkpoints (world, level and
 //! state hash), or records the hashes with `--record`. `--frames` saves what
 //! the display shows every so many fields, `--beyond` runs on past the end
-//! with the pad left alone.
+//! with the pad left alone, `--gs-dump` writes the last fields' GS traffic.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -21,6 +21,8 @@ pub(crate) struct Frames<'a> {
     pub(crate) every: u64,
     /// Fields to run past the replay's end.
     pub(crate) beyond: u64,
+    /// A GS dump of the last fields: the file and how many.
+    pub(crate) gs_dump: Option<(&'a Path, u64)>,
 }
 
 /// Runs `fields` fields of `script`, saving pictures on the way.
@@ -66,6 +68,7 @@ pub(crate) fn run(
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let mut out = io::stdout().lock();
+    let started = std::time::Instant::now();
     let mut failures = 0;
     let mut done = 0;
     for checkpoint in &mut replay.checkpoints {
@@ -102,9 +105,31 @@ pub(crate) fn run(
     }
     let end = replay.fields.max(done) + frames.beyond;
     if end > done {
-        let stop = advance(&mut machine, end - done, &script, frames)?;
+        let mut left = end - done;
+        if let Some((_, dumped)) = frames.gs_dump {
+            let before = left.saturating_sub(dumped);
+            if advance(&mut machine, before, &script, frames)? != ps2_ee::Stop::Budget {
+                bail!("stopped before the GS dump");
+            }
+            left -= before;
+            let mut hw = machine.hw.borrow_mut();
+            let block = hw.gs_privileged();
+            hw.gs.start_dump(block);
+        }
+        let stop = advance(&mut machine, left, &script, frames)?;
+        if let Some((path, _)) = frames.gs_dump {
+            let bytes = machine.hw.borrow_mut().gs.finish_dump().unwrap_or_default();
+            std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+        }
         let state = Sly1State::read(&mut machine.mem);
         writeln!(out, "field {end}: {state} ({stop:?})")?;
+    }
+    let machine_time = started.elapsed();
+    {
+        let mut hw = machine.hw.borrow_mut();
+        let draw = hw.gs.with(|gs| (gs.draw_time, gs.busy));
+        let elapsed = started.elapsed();
+        crate::run::host_time(&mut out, &hw, draw, machine_time, elapsed)?;
     }
     let stats = &machine.stats;
     writeln!(

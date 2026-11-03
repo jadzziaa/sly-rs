@@ -53,6 +53,20 @@ pub(crate) fn run(
             gs.drawn,
             elapsed.as_secs_f64()
         )?;
+        let [pool, serial, uploads] = gs.drawer_times();
+        writeln!(
+            out,
+            "  {} primitives drawn alone; {} batches, {} on the pool; the drawer: {:.3} s on the pool, \
+             {:.3} s one primitive after another, {:.3} s uploading; the GS thread queueing and drawing {:.3} s, waiting for the drawer {:.3} s",
+            gs.alone,
+            gs.batches,
+            gs.parallel_batches,
+            pool.as_secs_f64(),
+            serial.as_secs_f64(),
+            uploads.as_secs_f64(),
+            gs.draw_time.as_secs_f64(),
+            gs.drawer_waits().as_secs_f64()
+        )?;
         let hash = gs
             .mem
             .to_bytes()

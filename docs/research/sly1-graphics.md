@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:07:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:46:17Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -286,6 +286,42 @@ becomes its own statements, with the registers, the pipeline and the
 flags in locals; translated microcode from 7.8 to about 2.5 ns a pair,
 and the prologue's workload from 67.6% to 76.5% of console speed. See
 [vu-translation.md](vu-translation.md).
+
+**Gameplay is now GS-bound.** `replay` now reports where host time goes
+(as `run` does) and can write a GS dump of its last fields; `gs-replay`
+reports the drawer's time by kind of work and the GS thread's waits for
+it. On the first 8,000 fields of the prologue recording (the machine
+busy with another build beside it, so absolute times are high):
+
+- the GS thread was busy 98.7% of the run, a quarter of it queueing and
+  drawing; the machine waited for room in its queue 20% of the run;
+- VIF1 with VU1 took 71.5%, the programs about 3.6 ns a pair without
+  those waits (2.5 in `vu-bench`); the EE and the rest 27.6%; the IOP
+  0.6%.
+
+A dump of 60 fields of play (about 10 MB of GIF packets and 44,000
+primitives a field), through the GS alone:
+
+| Drawing threads | 60 fields | the drawer on the pool | one primitive after another | the GS thread waiting for the drawer |
+| --- | --- | --- | --- | --- |
+| 1 | 4.65 s | | | |
+| 4 | 1.82 s | 1.24 s | 0.23 s | 1.16 s |
+| 8 (the default cap) | 1.30 s | 0.68 s | 0.24 s | 0.61 s |
+| 16 | 1.18 s | 0.47 s | 0.24 s | 0.40 s |
+| 24 | 1.18 s | 0.44 s | 0.24 s | 0.40 s |
+
+Real time is 1.0 s. With 8 threads the GS caps play at about 77% of
+console speed, which is what the prologue measures (76.5%). The drawer
+is the critical path; the GS thread's own work (parsing, setting up and
+queueing primitives) is about 0.78 s, and the serial drawing (795
+primitives drawn alone, small batches) and uploads about 0.3 s, so more
+threads stop paying past 16. On one thread (callgrind), 90% of the GS's
+instructions are per pixel: `fragment` 66% inclusive, `texel` 22%,
+`prim` 19% itself. Each triangle pixel computes its depth with a 128-bit
+multiply-add and division and its colour and fog with five 64-bit
+divisions (exact barycentric weights; `__divti3` alone is 5.6% of the
+instructions). The same exact quotients can be stepped along a row with
+a remainder, without a division per pixel, leaving every pixel the same.
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals

@@ -113,6 +113,9 @@ pub struct Gs {
     /// Host time spent drawing, or queueing primitives when drawing on
     /// several threads (for reports).
     pub draw_time: std::time::Duration,
+    /// Host time its thread spent on packets and calls, not waiting for
+    /// them (for reports).
+    pub busy: std::time::Duration,
     /// Primitives drawn alone, batches drawn, and batches drawn on several
     /// threads, when drawing on several threads (for reports).
     pub alone: u64,
@@ -159,6 +162,7 @@ impl Default for Gs {
             dump: None,
             drawn: 0,
             draw_time: std::time::Duration::ZERO,
+            busy: std::time::Duration::ZERO,
             alone: 0,
             batches: 0,
             parallel_batches: 0,

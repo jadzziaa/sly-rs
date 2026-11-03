@@ -80,6 +80,8 @@ pub struct Vif {
     pub programs: u64,
     /// Instruction pairs those programs ran, for reports.
     pub pairs: u64,
+    /// Host time those programs took, for reports.
+    pub run_time: std::time::Duration,
     /// The VU's decoded pairs.
     pub cache: micro::Cache,
     /// Translated microcode for the VU.
@@ -118,6 +120,7 @@ impl Vif {
             fifo: VecDeque::new(),
             commands: 0,
             programs: 0,
+            run_time: std::time::Duration::ZERO,
             pairs: 0,
             cache: micro::Cache::default(),
             translations: &[],
@@ -349,6 +352,7 @@ impl Vif {
             top: self.top,
             gs,
         });
+        let started = std::time::Instant::now();
         let run = micro::run(
             &mut micro::Unit {
                 regs,
@@ -361,6 +365,7 @@ impl Vif {
             },
             pc,
         );
+        self.run_time += started.elapsed();
         self.programs += 1;
         self.pairs += run.pairs;
         if run.runaway {

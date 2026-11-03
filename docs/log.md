@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: Gameplay is now GS-bound: the drawer's pixel work is the critical path (60 fields of play take 1.30 s on 8 drawing threads, 1.18 on 16, against 1.0 s real time); replay reports host time and writes GS dumps, gs-replay reports the drawer's time ([graphics](research/sly1-graphics.md)).
 * **Update**: VU microcode translated pair by pair into statements on locals, flags carried as four snapshots in micro::State, waits in place, pieces cut outside inner loops: 7.8 → 2.5 ns a pair, identical to the interpreter on every recorded program; the prologue at 76.5% of console speed ([VU translation](research/vu-translation.md)). The [proposal](research/vu-specialising-translator.md) is carried out.
 * **Creation**: [A specialising VU1 translator](research/vu-specialising-translator.md): the design for the next VU1 speed-up, after in-place tuning stopped paying.
 * **Update**: VU programs run in the VU float environment (new crate `ps2-fenv`), on host single-precision operations: translated microcode 11.5 → 7.8 ns a pair ([graphics](research/sly1-graphics.md)).

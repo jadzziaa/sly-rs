@@ -284,6 +284,11 @@ pub(crate) struct Batch {
     /// Buffers of drawn batches, for the next.
     spare_work: Vec<Work>,
     spare_uses: Vec<Uses>,
+    /// The drawer's time on batches drawn on the pool, batches drawn one
+    /// primitive after another, and uploads (for reports).
+    pub(crate) times: [std::time::Duration; 3],
+    /// Time the GS waited for the drawer (for reports).
+    pub(crate) waited: std::time::Duration,
 }
 
 /// What the drawer does, in order: draw a batch (on the pool or not), or
@@ -296,8 +301,9 @@ enum Item {
 /// The thread that draws batches in order.
 struct Drawer {
     batches: mpsc::SyncSender<Item>,
-    /// Each item's end, with a batch's buffers for the next.
-    done: mpsc::Receiver<Option<Work>>,
+    /// Each item's end, with a batch's buffers for the next, what kind of
+    /// item it was (see [`Batch::times`]) and how long it took.
+    done: mpsc::Receiver<(Option<Work>, usize, std::time::Duration)>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -309,7 +315,8 @@ impl Drawer {
             .name("gs-drawer".to_owned())
             .spawn(move || {
                 for item in todo {
-                    let back = match item {
+                    let started = std::time::Instant::now();
+                    let (back, kind) = match item {
                         Item::Batch(mut work, parallel) => {
                             let mem = work.memory.take().unwrap_or_default();
                             if parallel {
@@ -317,14 +324,14 @@ impl Drawer {
                             } else {
                                 draw(&mem, &mut work, false);
                             }
-                            Some(work)
+                            (Some(work), usize::from(!parallel))
                         }
                         Item::Upload(upload, mem) => {
                             upload.apply(&mem);
-                            None
+                            (None, 2)
                         }
                     };
-                    if finished.send(back).is_err() {
+                    if finished.send((back, kind, started.elapsed())).is_err() {
                         return;
                     }
                 }
@@ -345,12 +352,16 @@ impl Batch {
             let Some(drawer) = &self.drawer else {
                 return;
             };
-            let Ok(back) = drawer.done.recv() else {
+            let started = std::time::Instant::now();
+            let received = drawer.done.recv();
+            self.waited += started.elapsed();
+            let Ok((back, kind, took)) = received else {
                 // The drawer panicked: memory is not what it should be.
                 assert!(std::thread::panicking(), "the GS's drawer has stopped");
                 return;
             };
             self.drawn += 1;
+            self.times[kind] += took;
             if let Some(mut work) = back {
                 work.prims.clear();
                 work.serial = false;
@@ -523,6 +534,19 @@ impl Gs {
                 "starting the GS's drawer thread"
             );
         }
+    }
+
+    /// The drawer's time on batches drawn on the pool, batches drawn one
+    /// primitive after another, and uploads, so far (for reports).
+    #[must_use]
+    pub const fn drawer_times(&self) -> [std::time::Duration; 3] {
+        self.batch.times
+    }
+
+    /// Time the GS has waited for its drawer (for reports).
+    #[must_use]
+    pub const fn drawer_waits(&self) -> std::time::Duration {
+        self.batch.waited
     }
 
     pub(crate) const fn batching(&self) -> bool {

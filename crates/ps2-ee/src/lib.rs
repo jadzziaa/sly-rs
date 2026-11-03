@@ -306,10 +306,12 @@ impl Machine {
         let now = self.cpu.cycles;
         // The IOP catches up whenever it has work due: at its slice
         // boundaries, and at any other event while it is busy.
-        if self.iop.busy(now / IOP_DIVIDER)
-            && let Err(error) = self.iop.run(&mut self.mem, now / IOP_DIVIDER)
-        {
-            self.iop_error = Some(error);
+        if self.iop.busy(now / IOP_DIVIDER) {
+            let started = std::time::Instant::now();
+            if let Err(error) = self.iop.run(&mut self.mem, now / IOP_DIVIDER) {
+                self.iop_error = Some(error);
+            }
+            self.hw.borrow_mut().timing.iop += started.elapsed();
         }
         if self.hw.borrow().next_dma().is_some_and(|due| due <= now) {
             self.hw.borrow_mut().finish_dma(now);

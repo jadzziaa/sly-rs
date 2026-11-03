@@ -253,6 +253,14 @@ enum Command {
         /// Fields to run past the replay's end, the pad left alone.
         #[arg(long, default_value_t = 0)]
         beyond: u64,
+        /// Write the last --gs-dump-fields fields' GS traffic to this file
+        /// as a PCSX2 GS dump (`.gs`). It holds the game's graphics: keep
+        /// it out of the repository.
+        #[arg(long)]
+        gs_dump: Option<PathBuf>,
+        /// Fields the GS dump covers.
+        #[arg(long, default_value_t = 2)]
+        gs_dump_fields: u64,
     },
     /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
     /// as PCSX2 keeps them), or check an existing one with --check.
@@ -344,6 +352,8 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             frames,
             every,
             beyond,
+            gs_dump,
+            gs_dump_fields,
         } => replay::run(
             &path,
             record,
@@ -351,6 +361,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 dir: frames.as_deref(),
                 every,
                 beyond,
+                gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
             },
             recompiled.filter(|_| !interpret),
         ),

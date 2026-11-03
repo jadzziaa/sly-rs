@@ -151,6 +151,7 @@ impl Default for Threaded {
                 let mut gs = Gs::default();
                 gs.set_threads(drawing_threads());
                 for job in queue {
+                    let started = std::time::Instant::now();
                     match job {
                         Job::Gif(path, data) => gs.gif(path, data),
                         Job::Call(f) => {
@@ -159,6 +160,7 @@ impl Default for Threaded {
                             f(&mut gs);
                         }
                     }
+                    gs.busy += started.elapsed();
                 }
             })
             .ok();
