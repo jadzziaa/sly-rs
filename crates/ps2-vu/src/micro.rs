@@ -26,13 +26,31 @@
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
-use ps2_core::{Vu0 as Regs, float};
+use ps2_core::Vu0 as Regs;
+pub use ps2_core::float;
 use ps2_gs::thread::Sink;
+pub use ps2_isa::vu::LowerOp;
 pub use ps2_isa::vu::Pair;
-use ps2_isa::vu::{FLAG_E, FLAG_I, LowerOp, UpperOp};
+use ps2_isa::vu::{FLAG_E, FLAG_I, UpperOp};
 
 /// The longest program run before giving up (a guard against loops).
 pub const MAX_PAIRS: u64 = 1 << 22;
+
+/// A check for translated microcode: when set, translations hand their
+/// state back to `micro::State` after every block (`vu-bench
+/// --one-block`).
+pub static ONE_BLOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The cycle at which a translation entered at `cycle` stops: the guard
+/// against runaway programs, or the next block with [`ONE_BLOCK`].
+#[must_use]
+pub fn limit(cycle: u64) -> u64 {
+    if ONE_BLOCK.load(std::sync::atomic::Ordering::Relaxed) {
+        cycle + 1
+    } else {
+        MAX_PAIRS
+    }
+}
 
 /// What VU1 has that VU0 does not.
 pub struct Vu1Link<'a> {
@@ -239,7 +257,9 @@ impl Cache {
             if code.get(at..at + t.code.len()) == Some(t.code)
                 && let Ok(k) = u16::try_from(k)
             {
-                self.runs[at / 8..(at + t.code.len()) / 8].fill(Some(k));
+                for &e in t.entries {
+                    self.runs[e as usize / 8] = Some(k);
+                }
             }
         }
     }
@@ -288,13 +308,16 @@ macro_rules! map4 {
 }
 
 /// Whether component `i` (0 = x … 3 = w) is in the 4-bit `dest` mask.
-const fn in_dest(dest: u32, i: usize) -> bool {
+#[must_use]
+pub const fn in_dest(dest: u32, i: usize) -> bool {
     dest & (8 >> i) != 0
 }
 
+/// `new`'s components in the 4-bit `dest` mask, `old`'s elsewhere.
 #[allow(clippy::inline_always, reason = "translations specialise it by `dest`")]
 #[inline(always)]
-const fn merge(old: [u32; 4], new: [u32; 4], dest: u32) -> [u32; 4] {
+#[must_use]
+pub const fn merge(old: [u32; 4], new: [u32; 4], dest: u32) -> [u32; 4] {
     let mut out = old;
     let mut i = 0;
     while i < 4 {
@@ -326,7 +349,8 @@ fn load(data: &[u8], at: u32) -> [u32; 4] {
 /// (PCSX2's model keeps no overflow or underflow flags).
 #[allow(clippy::inline_always, reason = "translations specialise it by `dest`")]
 #[inline(always)]
-fn flags(out: [u32; 4], dest: u32) -> (u32, u32) {
+#[must_use]
+pub fn flags(out: [u32; 4], dest: u32) -> (u32, u32) {
     // Each group's four lane bits, x in bit 3 as `dest`'s.
     let lanes =
         |v: [u32; 4]| ((v[0] & 1) << 3) | ((v[1] & 1) << 2) | ((v[2] & 1) << 1) | (v[3] & 1);
@@ -370,10 +394,13 @@ impl Writes {
 
 /// A result on its way: lands at `ready` (in pairs run).
 #[derive(Clone, Copy, Debug)]
-struct Pending {
-    value: u32,
-    ready: u64,
-    status: u32,
+pub struct Pending {
+    /// The result.
+    pub value: u32,
+    /// The cycle it lands at.
+    pub ready: u64,
+    /// The status flags it sets (I and D, for the divider).
+    pub status: u32,
 }
 
 /// Divider latencies, in cycles: DIV and SQRT, RSQRT.
@@ -381,44 +408,75 @@ const DIV_LATENCY: u64 = 7;
 const RSQRT_LATENCY: u64 = 13;
 
 /// Cycles from an FMAC instruction's issue until its flags are visible.
-const FLAG_LATENCY: u64 = 4;
+const FLAG_LATENCY: usize = 4;
 
-/// Room for flags under way (a power of two).
-const FLAG_SLOTS: usize = 8;
+/// Status bits the divider owns: I and D, and their sticky bits. The
+/// FMAC's flags never touch them (only FSSET's sticky bits do), so they
+/// stay in the status register while the rest moves through the pipeline.
+pub const DIVIDER_STATUS: u32 = 0xC30;
 
-/// Flags on their way through the FMAC pipeline.
-#[derive(Clone, Copy, Debug, Default)]
-struct FlagWrite {
-    /// The cycle from which they are visible.
-    ready: u64,
-    /// Which of the flags below it carries ([`FlagWrite::MAC`], ...).
-    what: u8,
-    /// MAC flags and the status's Z and S bits, from arithmetic.
-    mac: u32,
-    current: u32,
-    /// The status's sticky bits from FSSET, with Z, S, U and O as they
-    /// ran when it issued (as PCSX2 lands an FSSET).
-    sticky: u32,
-    /// The clipping flags, from CLIP or FCSET.
-    clip: u32,
+/// The flags visible at one cycle: the MAC flags, the status bits the
+/// FMAC owns (everything but [`DIVIDER_STATUS`]) and the clipping flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Visible {
+    /// MAC flags.
+    pub mac: u32,
+    /// Status bits 0-3 and 6-9.
+    pub status: u32,
+    /// Clipping flags.
+    pub clip: u32,
+    /// An FSSET that lands as these become visible: bit 31 and the sticky
+    /// I and D bits it sets (the only status bits outside `status` it
+    /// changes). Zero otherwise.
+    pub fsset: u32,
 }
 
-impl FlagWrite {
-    const MAC: u8 = 1;
-    const STICKY: u8 = 2;
-    const CLIP: u8 = 4;
-}
+impl Visible {
+    /// The flags as `regs` hold them.
+    #[must_use]
+    pub const fn of(regs: &Regs) -> Self {
+        Self {
+            mac: regs.mac,
+            status: regs.status & !DIVIDER_STATUS & 0xFFF,
+            clip: regs.clip,
+            fsset: 0,
+        }
+    }
 
-/// The flags as the latest instruction left them, before they are
-/// visible: what the next CLIP shifts and FSSET keeps.
-#[derive(Clone, Copy, Debug, Default)]
-struct Running {
-    mac: u32,
-    current: u32,
-    clip: u32,
+    /// These flags with an arithmetic result's MAC flags and Z, S landed.
+    #[allow(clippy::inline_always, reason = "on every FMAC pair")]
+    #[inline(always)]
+    #[must_use]
+    pub const fn with_mac(self, mac: u32, current: u32) -> Self {
+        Self {
+            mac,
+            status: (self.status & 0x3C0) | current | (current << 6),
+            ..self
+        }
+    }
+
+    /// Makes these flags the ones `regs` show.
+    fn show(self, regs: &mut Regs) {
+        regs.mac = self.mac;
+        regs.clip = self.clip;
+        regs.status = (regs.status & DIVIDER_STATUS) | self.status;
+    }
+
+    /// Lands an FSSET carried here on `regs`' sticky I and D bits.
+    fn land_fsset(self, regs: &mut Regs) {
+        if self.fsset != 0 {
+            regs.status = (regs.status & !0xC00) | (self.fsset & 0xC00);
+        }
+    }
 }
 
 /// Where a program stands between two pairs.
+///
+/// Flags travel through the FMAC pipeline as what they will look like:
+/// `flags[k]` is visible from cycle `cycle + k` on, and `flags[3]` once
+/// everything under way has landed. A pair that sets flags makes
+/// `flags[3]` with them the visible flags four cycles on; each cycle
+/// shifts the window by one. The registers always show `flags[0]`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct State {
     /// The next pair's byte address in micro memory.
@@ -432,12 +490,7 @@ pub struct State {
     delayed: Option<u32>,
     /// The pair before had the E bit: the next one is the last.
     ending: bool,
-    /// Flags not yet visible: a ring of `pending` from `oldest` (at most
-    /// one a half a cycle, visible after four, so never more than eight).
-    flags: [FlagWrite; FLAG_SLOTS],
-    oldest: usize,
-    pending: usize,
-    running: Running,
+    flags: [Visible; FLAG_LATENCY],
 }
 
 impl State {
@@ -447,48 +500,209 @@ impl State {
     pub fn new(pc: u32, regs: &Regs) -> Self {
         Self {
             pc,
-            running: Running {
-                mac: regs.mac,
-                current: regs.status & 0xF,
-                clip: regs.clip,
-            },
+            flags: [Visible::of(regs); FLAG_LATENCY],
             ..Self::default()
         }
     }
 
-    #[inline]
-    fn push_flags(&mut self, w: FlagWrite) {
-        if self.pending == FLAG_SLOTS {
-            self.oldest = (self.oldest + 1) % FLAG_SLOTS;
-            self.pending -= 1;
+    /// Moves the flags `by` cycles on (a stall), landing what becomes
+    /// visible.
+    fn advance(&mut self, regs: &mut Regs, by: u64) {
+        let by = usize::try_from(by)
+            .unwrap_or(usize::MAX)
+            .min(FLAG_LATENCY - 1);
+        if by == 0 {
+            return;
         }
-        self.flags[(self.oldest + self.pending) % FLAG_SLOTS] = w;
-        self.pending += 1;
+        for w in &self.flags[1..=by] {
+            w.land_fsset(regs);
+        }
+        let last = Visible {
+            fsset: 0,
+            ..self.flags[FLAG_LATENCY - 1]
+        };
+        self.flags = std::array::from_fn(|k| self.flags.get(k + by).copied().unwrap_or(last));
+        self.flags[0].show(regs);
     }
 
-    /// Makes visible the flags whose time has come (all of them with
-    /// `all`).
-    #[inline]
-    fn land_flags(&mut self, regs: &mut Regs, all: bool) {
-        while self.pending > 0 {
-            let w = &self.flags[self.oldest];
-            if !all && w.ready > self.cycle {
-                break;
-            }
-            if w.what & FlagWrite::MAC != 0 {
-                regs.mac = w.mac;
-                regs.status = (regs.status & 0xFF0) | w.current | (w.current << 6);
-            }
-            if w.what & FlagWrite::STICKY != 0 {
-                regs.status = (regs.status & (status::I | status::D)) | w.sticky;
-            }
-            if w.what & FlagWrite::CLIP != 0 {
-                regs.clip = w.clip;
-            }
-            self.oldest = (self.oldest + 1) % FLAG_SLOTS;
-            self.pending -= 1;
+    /// Waits until cycle `ready` if it is later.
+    fn stall(&mut self, regs: &mut Regs, ready: u64) {
+        if ready > self.cycle {
+            self.advance(regs, ready - self.cycle);
+            self.cycle = ready;
         }
     }
+
+    /// Ends a pair whose flags, landed four cycles on, are `next`.
+    fn issue(&mut self, regs: &mut Regs, next: Visible) {
+        let [_, a, b, c] = self.flags;
+        a.land_fsset(regs);
+        a.show(regs);
+        self.flags = [a, b, c, next];
+    }
+
+    /// Lands everything under way (the program has ended).
+    fn land_all(&mut self, regs: &mut Regs) {
+        for w in &self.flags[1..] {
+            w.land_fsset(regs);
+        }
+        let last = self.flags[FLAG_LATENCY - 1];
+        last.show(regs);
+        self.flags = [Visible { fsset: 0, ..last }; FLAG_LATENCY];
+    }
+}
+
+/// The pipeline as translated microcode keeps it in locals between pairs.
+#[derive(Clone, Copy, Debug)]
+pub struct Pipe {
+    /// Pairs run.
+    pub cycle: u64,
+    /// The divider's result under way.
+    pub q: Option<Pending>,
+    /// The EFU's result under way.
+    pub p: Option<Pending>,
+    /// The flags visible from `cycle + k` on (see [`State`]); `flags[0]`
+    /// is what the registers show.
+    pub flags: [Visible; FLAG_LATENCY],
+}
+
+impl State {
+    /// The pipeline, if translated code can take over here: no delay slot
+    /// or E bit under way, and no FSSET in flight.
+    #[must_use]
+    pub fn pipe(&self) -> Option<Pipe> {
+        (self.delayed.is_none() && !self.ending && self.flags[1..].iter().all(|w| w.fsset == 0))
+            .then_some(Pipe {
+                cycle: self.cycle,
+                q: self.q,
+                p: self.p,
+                flags: self.flags,
+            })
+    }
+
+    /// Translated code hands back at the start of the pair at `pc`.
+    pub fn resume(&mut self, pc: u32, pipe: Pipe) {
+        *self = Self {
+            pc,
+            cycle: pipe.cycle,
+            q: pipe.q,
+            p: pipe.p,
+            delayed: None,
+            ending: false,
+            flags: pipe.flags,
+        };
+    }
+}
+
+impl Visible {
+    /// Makes these flags the ones `regs` show (translated code, which
+    /// carries no FSSET).
+    pub fn shown(self, regs: &mut Regs) {
+        self.show(regs);
+    }
+}
+
+/// The quadword at quadword address `q` of data memory (`N` bytes; the
+/// address wraps).
+#[allow(clippy::inline_always, reason = "on every load")]
+#[inline(always)]
+#[must_use]
+pub fn load_q<const N: usize>(data: &[u8; N], q: u32) -> [u32; 4] {
+    let at = (q.wrapping_mul(16) as usize) & (N - 16);
+    let mut b = [0; 16];
+    b.copy_from_slice(&data[at..at + 16]);
+    let q = u128::from_le_bytes(b);
+    [
+        q as u32,
+        (q >> 32) as u32,
+        (q >> 64) as u32,
+        (q >> 96) as u32,
+    ]
+}
+
+/// Writes `value`'s components in `dest` to the quadword at quadword
+/// address `q` of data memory.
+#[allow(clippy::inline_always, reason = "on every store")]
+#[inline(always)]
+pub fn store_q<const N: usize>(data: &mut [u8; N], q: u32, value: [u32; 4], dest: u32) {
+    let at = (q.wrapping_mul(16) as usize) & (N - 16);
+    let quad = &mut data[at..at + 16];
+    for (i, word) in quad.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        if in_dest(dest, i) {
+            word.copy_from_slice(&value[i].to_le_bytes());
+        }
+    }
+}
+
+/// CLIP: the clipping flags `prev` shifted by six, with the judgement of
+/// `a`'s x, y and z against ±|w| (`w`'s bits).
+#[allow(clippy::inline_always, reason = "translations inline it")]
+#[inline(always)]
+#[must_use]
+pub fn clip(prev: u32, a: [u32; 4], w: u32) -> u32 {
+    let limit = float::value(w).abs();
+    let mut bits = 0;
+    for (i, &x) in a.iter().take(3).enumerate() {
+        let x = float::value(x);
+        bits |= u32::from(x > limit) << (2 * i);
+        bits |= u32::from(x < -limit) << (2 * i + 1);
+    }
+    ((prev << 6) | bits) & 0x00FF_FFFF
+}
+
+/// DIV, SQRT or RSQRT of `a` by `b` issued at `cycle`: Q's next value.
+#[must_use]
+pub fn divide(op: LowerOp, a: u32, b: u32, cycle: u64) -> Pending {
+    let (value, f) = match op {
+        LowerOp::Div => float::div(a, b),
+        LowerOp::Sqrt => float::sqrt(b),
+        _ => float::rsqrt(a, b),
+    };
+    let status =
+        if f.invalid { status::I } else { 0 } | if f.divide_by_zero { status::D } else { 0 };
+    let latency = if op == LowerOp::Rsqrt {
+        RSQRT_LATENCY
+    } else {
+        DIV_LATENCY
+    };
+    Pending {
+        value,
+        ready: cycle + latency,
+        status,
+    }
+}
+
+/// An EFU operation on `v` (field `f` of it) issued at `cycle`: P's next
+/// value.
+#[must_use]
+pub fn efu_at(op: LowerOp, v: [u32; 4], f: u32, cycle: u64) -> Pending {
+    let (value, latency) = efu(op, v, f);
+    Pending {
+        value,
+        ready: cycle + latency,
+        status: 0,
+    }
+}
+
+/// RNEXT: the random-number register's next value.
+#[must_use]
+pub const fn rnext(x: u32) -> u32 {
+    let feedback = ((x >> 4) & 1) ^ ((x >> 22) & 1);
+    0x3F80_0000 | (((x << 1) ^ feedback) & 0x007F_FFFF)
+}
+
+/// Runs the pair at `s.pc` through the interpreter: true if it was the
+/// program's last.
+pub fn step(unit: &mut Unit<'_>, s: &mut State) -> bool {
+    let at = s.pc as usize;
+    let word = |k: usize| {
+        let b = &unit.code[at + 4 * k..at + 4 * k + 4];
+        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    };
+    let (lower, upper) = (word(0), word(1));
+    let (pair, class) = unit.cache.get(unit.code.len(), s.pc, upper, lower);
+    let pc = s.pc;
+    exec(unit, s, pc, pair, class)
 }
 
 /// Translated microcode: the function that runs it, and the bytes it was
@@ -499,6 +713,8 @@ pub struct Translation {
     pub address: u32,
     /// The microcode it runs.
     pub code: &'static [u8],
+    /// The byte addresses `run` takes over at (its blocks' first pairs).
+    pub entries: &'static [u32],
     /// Runs pairs from `State::pc`, which lies in `code`, until the program
     /// ends (true), or it leaves `code` or reaches [`MAX_PAIRS`] (false).
     pub run: fn(&mut Unit<'_>, &mut State) -> bool,
@@ -512,11 +728,11 @@ pub fn run(unit: &mut Unit<'_>, pc: u32) -> Run {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-use float::x4 as lanes;
+pub use float::x4 as lanes;
 /// The four-lane arithmetic: host single precision in the VU environment
 /// where there is one, the exact `f64` forms elsewhere.
 #[cfg(target_arch = "x86_64")]
-use float::x4::rtz as lanes;
+pub use float::x4::rtz as lanes;
 
 fn run_program(unit: &mut Unit<'_>, pc: u32) -> Run {
     static DUMP: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
@@ -550,15 +766,7 @@ fn run_program(unit: &mut Unit<'_>, pc: u32) -> Run {
         let ended = if let Some(t) = unit.translation(s.pc) {
             (t.run)(unit, &mut s)
         } else {
-            let at = s.pc as usize;
-            let word = |k: usize| {
-                let b = &unit.code[at + 4 * k..at + 4 * k + 4];
-                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-            };
-            let (lower, upper) = (word(0), word(1));
-            let (pair, class) = unit.cache.get(unit.code.len(), s.pc, upper, lower);
-            let pc = s.pc;
-            exec(unit, &mut s, pc, pair, class)
+            step(unit, &mut s)
         };
         if ended {
             return Run {
@@ -571,18 +779,12 @@ fn run_program(unit: &mut Unit<'_>, pc: u32) -> Run {
 
 /// Runs the pair `pair` at `pc` (where `s` stands), whose upper operation
 /// is `class`: true if it was the program's last.
-///
-/// Translated microcode calls it with each pair's words as constants, so
-/// the compiler keeps only what that pair does.
 #[allow(
     clippy::too_many_lines,
     clippy::many_single_char_names,
     clippy::similar_names,
-    clippy::inline_always,
-    reason = "the instruction set, one arm each, with the manual's field names; \
-              always inlined so that translations specialise it"
+    reason = "the instruction set, one arm each, with the manual's field names"
 )]
-#[inline(always)]
 pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Upper) -> bool {
     let code_mask = unit.code.len() as u32 - 1;
     let data_mask = unit.data.len() as u32 - 1;
@@ -606,19 +808,18 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
             LowerOp::Waitq => {
                 if let Some(p) = s.q.take() {
                     land_q(p, unit.regs);
-                    s.cycle = s.cycle.max(p.ready);
+                    s.stall(unit.regs, p.ready);
                 }
             }
             LowerOp::Waitp => {
                 if let Some(p) = s.p.take() {
                     unit.regs.p = p.value;
-                    s.cycle = s.cycle.max(p.ready);
+                    s.stall(unit.regs, p.ready);
                 }
             }
             _ => {}
         }
     }
-    s.land_flags(unit.regs, false);
     let r = &*unit.regs;
 
     // Upper half.
@@ -690,15 +891,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
         Upper::Ftoi(scale) => upper_vf = Some((ft, float::x4::to_fixed(r.vf[fs], scale))),
         Upper::Abs => upper_vf = Some((ft, map4!(r.vf[fs], |x| x & 0x7FFF_FFFF))),
         Upper::Clip => {
-            let a = r.vf[fs];
-            let limit = float::value(r.vf[ft][3]).abs();
-            let mut bits = 0;
-            for (i, &x) in a.iter().take(3).enumerate() {
-                let x = float::value(x);
-                bits |= u32::from(x > limit) << (2 * i);
-                bits |= u32::from(x < -limit) << (2 * i + 1);
-            }
-            upper_clip = Some(((s.running.clip << 6) | bits) & 0x00FF_FFFF);
+            upper_clip = Some(clip(s.flags[FLAG_LATENCY - 1].clip, r.vf[fs], r.vf[ft][3]));
         }
         Upper::Nop => {}
     }
@@ -786,27 +979,10 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
                 // A new division waits for the one under way.
                 if let Some(p) = s.q.take() {
                     land_q(p, unit.regs);
-                    s.cycle = s.cycle.max(p.ready);
+                    s.stall(unit.regs, p.ready);
                 }
                 let r = &*unit.regs;
-                let (a, b) = (r.vf[lfs][fsf], r.vf[lft][ftf]);
-                let (value, f) = match op {
-                    L::Div => float::div(a, b),
-                    L::Sqrt => float::sqrt(b),
-                    _ => float::rsqrt(a, b),
-                };
-                let st = if f.invalid { status::I } else { 0 }
-                    | if f.divide_by_zero { status::D } else { 0 };
-                let latency = if op == L::Rsqrt {
-                    RSQRT_LATENCY
-                } else {
-                    DIV_LATENCY
-                };
-                s.q = Some(Pending {
-                    value,
-                    ready: s.cycle + latency,
-                    status: st,
-                });
+                s.q = Some(divide(op, r.vf[lfs][fsf], r.vf[lft][ftf], s.cycle));
             }
             L::Mfp => writes.push(Write::Vf(lft, [r.p; 4], ldest)),
             op @ (L::Esadd
@@ -824,23 +1000,16 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
             | L::Eexp) => {
                 if let Some(p) = s.p.take() {
                     unit.regs.p = p.value;
-                    s.cycle = s.cycle.max(p.ready);
+                    s.stall(unit.regs, p.ready);
                 }
                 let r = &*unit.regs;
-                let (value, latency) = efu(op, r.vf[lfs], r.vf[lfs][fsf]);
-                s.p = Some(Pending {
-                    value,
-                    ready: s.cycle + latency,
-                    status: 0,
-                });
+                s.p = Some(efu_at(op, r.vf[lfs], r.vf[lfs][fsf], s.cycle));
             }
             L::Rinit => new_r = Some(0x3F80_0000 | (r.vf[lfs][fsf] & 0x007F_FFFF)),
             L::Rxor => new_r = Some(0x3F80_0000 | ((r.r ^ r.vf[lfs][fsf]) & 0x007F_FFFF)),
             L::Rget => writes.push(Write::Vf(lft, [r.r; 4], ldest)),
             L::Rnext => {
-                let x = r.r;
-                let feedback = ((x >> 4) & 1) ^ ((x >> 22) & 1);
-                let next = 0x3F80_0000 | (((x << 1) ^ feedback) & 0x007F_FFFF);
+                let next = rnext(r.r);
                 new_r = Some(next);
                 writes.push(Write::Vf(lft, [next; 4], ldest));
             }
@@ -925,24 +1094,6 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     if let Some(v) = new_r {
         regs.r = v;
     }
-    let ready = s.cycle + FLAG_LATENCY;
-    if let Some(v) = new_clip {
-        s.running.clip = v;
-        s.push_flags(FlagWrite {
-            ready,
-            what: FlagWrite::CLIP,
-            clip: v,
-            ..FlagWrite::default()
-        });
-    }
-    if let Some(v) = new_status {
-        s.push_flags(FlagWrite {
-            ready,
-            what: FlagWrite::STICKY,
-            sticky: v | s.running.current,
-            ..FlagWrite::default()
-        });
-    }
     if let Some((reg, value)) = upper_vf
         && reg != 0
     {
@@ -951,25 +1102,30 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     if let Some(acc) = upper_acc {
         regs.acc = merge(regs.acc, acc, dest);
     }
-    // The upper half's flags land after the lower's: with an FCSET and a
-    // CLIP in one pair, the CLIP's flags (shifted from those before the
-    // pair) win, as an upper write does.
-    if upper_flags.is_some() || upper_clip.is_some() {
-        let mut w = FlagWrite {
-            ready,
-            ..FlagWrite::default()
-        };
-        if let Some((mac, current)) = upper_flags {
-            s.running.mac = mac;
-            s.running.current = current;
-            (w.what, w.mac, w.current) = (FlagWrite::MAC, mac, current);
-        }
-        if let Some(clip) = upper_clip {
-            s.running.clip = clip;
-            (w.what, w.clip) = (w.what | FlagWrite::CLIP, clip);
-        }
-        s.push_flags(w);
+    // The flags this pair sets, visible four cycles on: the lower half's
+    // first, then the upper's, so with an FCSET and a CLIP in one pair the
+    // CLIP's flags (shifted from those before the pair) win.
+    let running = s.flags[FLAG_LATENCY - 1];
+    let mut next = Visible {
+        fsset: 0,
+        ..running
+    };
+    if let Some(v) = new_clip {
+        next.clip = v;
     }
+    if let Some(v) = new_status {
+        // FSSET keeps Z, S, U and O as the latest instruction left them.
+        let sticky = v | (running.status & 0xF);
+        next.status = sticky & 0x3CF;
+        next.fsset = 0x8000_0000 | (sticky & 0xC00);
+    }
+    if let Some((mac, current)) = upper_flags {
+        next = next.with_mac(mac, current);
+    }
+    if let Some(clip) = upper_clip {
+        next.clip = clip;
+    }
+    s.issue(unit.regs, next);
     if let Some(address) = kick
         && let Some(link) = unit.vu1.as_mut()
     {
@@ -980,7 +1136,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     if s.ending {
         // The pair after the E bit has run: the program is over.
         unit.regs.tpc = next_pc;
-        s.land_flags(unit.regs, true);
+        s.land_all(unit.regs);
         if let Some(p) = s.q {
             land_q(p, unit.regs);
         }
@@ -1023,7 +1179,9 @@ fn report_runaway(unit: &Unit<'_>, start: u32, pc: u32) {
 }
 
 /// A division's result lands in Q, with its status flags.
-fn land_q(p: Pending, regs: &mut Regs) {
+#[allow(clippy::inline_always, reason = "translations inline it")]
+#[inline(always)]
+pub fn land_q(p: Pending, regs: &mut Regs) {
     regs.q = p.value;
     regs.status = (regs.status & !(status::I | status::D))
         | p.status
@@ -1032,7 +1190,8 @@ fn land_q(p: Pending, regs: &mut Regs) {
 }
 
 /// An EFU operation's result and latency.
-fn efu(op: LowerOp, v: [u32; 4], f: u32) -> (u32, u64) {
+#[must_use]
+pub fn efu(op: LowerOp, v: [u32; 4], f: u32) -> (u32, u64) {
     use LowerOp as L;
     let x = |i: usize| float::value(v[i]);
     let s = float::value(f);
@@ -1056,7 +1215,7 @@ fn efu(op: LowerOp, v: [u32; 4], f: u32) -> (u32, u64) {
 
 /// Sends the GIF packet at quadword `address` of VU1 data memory to the GS
 /// on PATH1: tags and their data up to the end of the tag with EOP set.
-fn xgkick(data: &[u8], address: u32, gs: &mut dyn Sink) {
+pub fn xgkick(data: &[u8], address: u32, gs: &mut dyn Sink) {
     let mask = (data.len() / 16 - 1) as u32;
     let read = |q: u32| {
         let at = ((q & mask) * 16) as usize;

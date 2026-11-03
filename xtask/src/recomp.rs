@@ -213,6 +213,7 @@ fn vu_crate(
          #![allow(warnings, clippy::all, clippy::pedantic, missing_docs, reason = \"generated code\")]\n\n\
          {vu_source}"
     );
+
     let manifest = format!(
         "[package]\nname = \"{vu_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
          license = \"GPL-3.0-or-later\"\npublish = false\n\n\

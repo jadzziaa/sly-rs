@@ -162,6 +162,10 @@ enum Command {
         /// interpreter run, no comparison.
         #[arg(long)]
         translated_only: bool,
+        /// Make translations hand back to the interpreter's state after
+        /// every block (a check of the hand-over).
+        #[arg(long)]
+        one_block: bool,
     },
     /// List the programs of a VU1 recording, or step one through the
     /// interpreter, printing each pair and the registers it changed.
@@ -180,6 +184,10 @@ enum Command {
         /// (hex) and how many (`238,16`).
         #[arg(long, value_parser = parse_range)]
         data: Option<(usize, usize)>,
+        /// Count the pairs run at each address over every program, and
+        /// list the hottest with the instructions there.
+        #[arg(long)]
+        profile: bool,
     },
     /// Play the game in a window, in real time, with the keyboard or a
     /// gamepad. Keys: WASD left stick, IJKL right stick, arrows D-pad,
@@ -350,18 +358,29 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             path,
             repeat,
             translated_only,
-        } => vu_bench::bench(
-            &path,
-            repeat,
-            translated_only,
-            recompiled.map_or(&[], |r| r.vu),
-        ),
+            one_block,
+        } => {
+            ps2_vu::micro::ONE_BLOCK.store(one_block, std::sync::atomic::Ordering::Relaxed);
+            vu_bench::bench(
+                &path,
+                repeat,
+                translated_only,
+                recompiled.map_or(&[], |r| r.vu),
+            )
+        }
         Command::VuTrace {
             path,
             program,
             word,
             data,
-        } => vu_bench::trace(&path, program, word, data),
+            profile,
+        } => {
+            if profile {
+                vu_bench::profile(&path)
+            } else {
+                vu_bench::trace(&path, program, word, data)
+            }
+        }
         Command::Play {
             game,
             record,

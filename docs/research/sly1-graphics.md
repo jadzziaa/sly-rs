@@ -17,9 +17,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T21:52:57Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:07:08Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T21:52:57Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -280,6 +280,12 @@ gameplay programs: the interpreter from 16.5 to 10.7 ns a pair,
 translated microcode from 11.5 to 7.8 ns. Division, square root and the
 EFU compute in `f64` inside that environment and so round toward zero
 there too, which moved the replay's hashes.
+
+**Specialised translation** (rac-rs's approach, adapted): each pair
+becomes its own statements, with the registers, the pipeline and the
+flags in locals; translated microcode from 7.8 to about 2.5 ns a pair,
+and the prologue's workload from 67.6% to 76.5% of console speed. See
+[vu-translation.md](vu-translation.md).
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals

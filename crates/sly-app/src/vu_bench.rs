@@ -94,6 +94,19 @@ pub(crate) fn bench(
         rec.starts.len(),
         rec.codes.len()
     )?;
+    // A digest of every program's outcome through the interpreter, to
+    // compare builds.
+    let mut digest = std::hash::DefaultHasher::new();
+    let mut cache = Cache::default();
+    for s in &rec.starts {
+        let o = run(&rec, s, &mut cache, &[]).0;
+        std::hash::Hash::hash(&(o.registers, o.data, o.packets.0, o.pairs), &mut digest);
+    }
+    writeln!(
+        out,
+        "interpreted outcomes digest {:016x}",
+        std::hash::Hasher::finish(&digest)
+    )?;
     let mut ways = Vec::new();
     if !translated_only {
         ways.push(("interpreted", &[][..]));
@@ -101,7 +114,7 @@ pub(crate) fn bench(
     if !translations.is_empty() {
         ways.push(("translated", translations));
     }
-    for (name, translations) in ways {
+    for &(name, translations) in &ways {
         let mut best = Duration::MAX;
         let mut cache = Cache::default();
         for _ in 0..repeat.max(1) {
@@ -119,7 +132,10 @@ pub(crate) fn bench(
             best.as_secs_f64() * 1e9 / pairs.max(1) as f64
         )?;
     }
-    if !translations.is_empty() && !translated_only {
+    if translated_only {
+        return Ok(());
+    }
+    for &(name, translations) in ways.iter().skip(1) {
         let (mut a, mut b) = (Cache::default(), Cache::default());
         for (k, s) in rec.starts.iter().enumerate() {
             let interpreted = run(&rec, s, &mut a, &[]).0;
@@ -131,7 +147,7 @@ pub(crate) fn bench(
                     .zip(&translated.registers)
                     .position(|(x, y)| x != y);
                 bail!(
-                    "program {k} (at {:#06x}) differs: register word {first:?}, data {}, packets {}, pairs {} / {}",
+                    "{name}: program {k} (at {:#06x}) differs: register word {first:?}, data {}, packets {}, pairs {} / {}",
                     s.pc,
                     interpreted.data == translated.data,
                     interpreted.packets == translated.packets,
@@ -140,7 +156,7 @@ pub(crate) fn bench(
                 );
             }
         }
-        writeln!(out, "every program gives the same result both ways")?;
+        writeln!(out, "{name}: every program gives the interpreter's result")?;
     }
     Ok(())
 }
@@ -224,6 +240,97 @@ pub(crate) fn trace(
             let [x, y, z, w] = words(q);
             writeln!(out, "  {i:4}: {w:08x} {z:08x} {y:08x} {x:08x}")?;
         }
+    }
+    Ok(())
+}
+
+/// `vu-trace --profile`: pairs run at each address of each micro memory,
+/// over every program, and the hottest addresses with their pairs.
+#[allow(clippy::cast_precision_loss, reason = "a report")]
+pub(crate) fn profile(path: &Path) -> Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let rec = Recording::from_bytes(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+    let mut counts: Vec<Vec<u64>> = rec.codes.iter().map(|c| vec![0; c.len() / 8]).collect();
+    for s in &rec.starts {
+        let code = &rec.codes[s.code];
+        let mut regs = s.regs.clone();
+        let mut data = s.data.clone();
+        let mut packets = Packets::default();
+        let mut cache = Cache::default();
+        let mut unit = Unit {
+            regs: &mut regs,
+            code,
+            data: &mut data,
+            vu1: Some(Vu1Link {
+                itop: s.itop,
+                top: s.top,
+                gs: &mut packets,
+            }),
+            cache: &mut cache,
+            translations: &[],
+            code_writes: 0,
+        };
+        let mut state = micro::State::new(s.pc, &s.regs);
+        loop {
+            let pc = state.pc;
+            counts[s.code][pc as usize / 8] += 1;
+            let mut raw = [0; 8];
+            raw.copy_from_slice(&code[pc as usize..pc as usize + 8]);
+            let pair = micro::Pair::decode(u64::from_le_bytes(raw));
+            let class = micro::upper_class(pair.upper_op());
+            if micro::exec(&mut unit, &mut state, pc, pair, class) || state.cycle > micro::MAX_PAIRS
+            {
+                break;
+            }
+        }
+    }
+    let total: u64 = counts.iter().flatten().sum();
+    let mut out = io::stdout().lock();
+    writeln!(out, "{total} pairs")?;
+    // Pairs run by each instruction, upper and lower.
+    let mut ops: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for (k, c) in counts.iter().enumerate() {
+        for (i, &n) in c.iter().enumerate().filter(|(_, n)| **n > 0) {
+            let mut raw = [0; 8];
+            raw.copy_from_slice(&rec.codes[k][8 * i..8 * i + 8]);
+            let pair = micro::Pair::decode(u64::from_le_bytes(raw));
+            let text = pair.display(0).to_string();
+            for half in text.split(" | ") {
+                let name = half.split([' ', '.']).next().unwrap_or("");
+                *ops.entry(name.to_owned()).or_default() += n;
+            }
+        }
+    }
+    let mut ops: Vec<_> = ops.into_iter().collect();
+    ops.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (name, n) in ops {
+        writeln!(out, "op {name} {:.3}%", n as f64 * 100.0 / total as f64)?;
+    }
+    for (k, c) in counts.iter().enumerate() {
+        let code = &rec.codes[k];
+        let mut covered = 0;
+        for (i, &n) in c.iter().enumerate() {
+            // Addresses run at least 1/2000 of all pairs, in address order.
+            if n * 2000 < total {
+                continue;
+            }
+            covered += n;
+            let at = 8 * i;
+            let mut raw = [0; 8];
+            raw.copy_from_slice(&code[at..at + 8]);
+            let pair = micro::Pair::decode(u64::from_le_bytes(raw));
+            writeln!(
+                out,
+                "{k} {at:#06x} {:5.2}% {}",
+                n as f64 * 100.0 / total as f64,
+                pair.display(u32::try_from(at).unwrap_or(0))
+            )?;
+        }
+        writeln!(
+            out,
+            "memory {k}: listed {:.1}% of all pairs",
+            covered as f64 * 100.0 / total as f64
+        )?;
     }
     Ok(())
 }

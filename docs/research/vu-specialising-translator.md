@@ -3,8 +3,8 @@ type: Proposal
 title: A specialising VU1 translator
 description: Why VU1 still costs 7.8 ns a pair after the float switch, and the design of a translator that emits per-pair code with registers in locals and flag timing resolved at generation time (as rac-rs does), with its budget, steps and checks.
 tags: [proposal, vu, translation, performance, phase-7]
-status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T22:30:00Z }
+status: deprecated
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:07:08Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: measurements
@@ -16,6 +16,14 @@ sources:
 ---
 
 # A specialising VU1 translator
+
+**Carried out on 2026-11-03**: what was built, what changed from this
+design and what it measured are in
+[vu-translation.md](vu-translation.md). The main change: Sly 1's flag
+reads cross blocks (the 3D loop's `fsand` reads a `msuby` in an earlier
+block), so flags travel as four snapshots that every block carries in
+locals, not as constants within a block; and waits move the flags on in
+place instead of handing the pair to the interpreter.
 
 ## Where it stands
 
