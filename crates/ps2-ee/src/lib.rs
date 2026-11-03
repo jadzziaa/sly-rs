@@ -17,6 +17,7 @@
     reason = "guest register values"
 )]
 
+pub mod dma;
 pub mod hw;
 pub mod kernel;
 
@@ -224,6 +225,7 @@ impl Machine {
             .min(alarm)
             .min(self.iop_booted_at)
             .min(self.next_iop_slice())
+            .min(self.hw.borrow().next_dma().unwrap_or(u64::MAX))
     }
 
     /// Raises the events due at the current cycle. Field k runs from
@@ -237,6 +239,9 @@ impl Machine {
         {
             self.iop_error = Some(error);
         }
+        if self.hw.borrow().next_dma().is_some_and(|due| due <= now) {
+            self.hw.borrow_mut().finish_dma(now);
+        }
         if now >= self.next_vblank_start {
             // V-blank start: interrupt, GS CSR (V-sync bit, field flip), the
             // kernel's V-sync flag.
@@ -244,7 +249,7 @@ impl Machine {
                 let mut hw = self.hw.borrow_mut();
                 hw.raise_intc(intc::VBLANK_START);
                 hw.gs_csr ^= 1 << 13;
-                hw.gs_csr |= 1 << 3;
+                hw.gs_event(3);
                 hw.gs_csr
             };
             if let Some((flag, csr_at)) = self.kernel.vsync_flag() {

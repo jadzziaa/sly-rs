@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:54:34Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:00:08Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -594,9 +594,12 @@ given: the gates are the schedule.
     - The SPU2 is registers, sound memory and DMA only: no voices yet.
     - PCSX2 cannot check the timer functions 989SND uses (the BIOS's
       `TIMRMAN` lacks them); the game exercises them instead.
-  - Next: DMA channels and the GS events their packets cause (FINISH, then
-    V-sync waits), pad and memory card servers, the libmpeg hook, the
-    anticrack test, the replay format and the gate.
+  - DMA transfers now complete at modelled times and set the GS events
+    their GIF packets ask for (PATH3 and VIF1 DIRECT); Sly 1 gets past its
+    first FINISH wait and runs one frame per field.
+  - Next: an observable for the title screen, pad and memory card servers,
+    modelled disc timing, the libmpeg hook, the anticrack test, the replay
+    format and the gate.
 
 ### Phase 6 - Graphics
 

@@ -13,6 +13,8 @@ use ps2_core::{Mmio, Regions};
 
 /// INTC causes.
 pub mod intc {
+    /// The GS (its CSR events, unless the IMR masks them).
+    pub const GS: u32 = 0;
     /// V-blank start.
     pub const VBLANK_START: u32 = 2;
     /// V-blank end.
@@ -70,6 +72,10 @@ pub struct Hardware {
     pub dma_kicks: BTreeMap<&'static str, u64>,
     /// Bytes written to the EE's debug console port (`0x1000F180`).
     pub console: Vec<u8>,
+    /// DMA transfers under way.
+    pub transfers: Vec<crate::dma::Transfer>,
+    /// The GS's SIGNAL and LABEL registers, as packets last set them.
+    pub gs_signal_label: (u64, u64),
 }
 
 impl Hardware {
@@ -90,6 +96,46 @@ impl Hardware {
             seen: BTreeSet::new(),
             dma_kicks: BTreeMap::new(),
             console: Vec::new(),
+            transfers: Vec::new(),
+            gs_signal_label: (0, 0),
+        }
+    }
+
+    /// A GS event (CSR bit `bit`: 0 SIGNAL, 1 FINISH, 3 V-sync): sets it,
+    /// and raises the GS interrupt unless the IMR masks it.
+    pub fn gs_event(&mut self, bit: u32) {
+        self.gs_csr |= 1 << bit;
+        if self.gs_imr & (1 << (bit + 8)) == 0 {
+            self.raise_intc(intc::GS);
+        }
+    }
+
+    /// When the next DMA transfer completes.
+    #[must_use]
+    pub fn next_dma(&self) -> Option<u64> {
+        self.transfers.iter().map(|t| t.due).min()
+    }
+
+    /// Completes the transfers due by `now`.
+    pub fn finish_dma(&mut self, now: u64) {
+        let (due, rest): (Vec<_>, Vec<_>) = self.transfers.iter().partition(|t| t.due <= now);
+        self.transfers = rest;
+        for t in due {
+            let chcr = DMA_CHANNELS[t.channel].0;
+            if let Some(value) = self.regs.get_mut(&chcr) {
+                *value &= !0x100;
+            }
+            self.complete_dma(t.channel);
+            if let Some(signal) = t.gs.signal {
+                self.gs_signal_label.0 = signal;
+                self.gs_event(0);
+            }
+            if let Some(label) = t.gs.label {
+                self.gs_signal_label.1 = label;
+            }
+            if t.gs.finish {
+                self.gs_event(1);
+            }
         }
     }
 
@@ -239,7 +285,7 @@ impl Mmio for HardwareHandle {
         }
     }
 
-    fn write(&mut self, _: &mut Regions, address: u32, bytes: u32, value: u128) -> bool {
+    fn write(&mut self, regions: &mut Regions, address: u32, bytes: u32, value: u128) -> bool {
         let mut hw = self.0.borrow_mut();
         if address != 0x1000_F180 {
             hw.note(address, Some(value), bytes);
@@ -275,18 +321,28 @@ impl Mmio for HardwareHandle {
                 hw.timers[index] = (value32, now, count, hw.timers[index].3);
             }
             _ => {
+                hw.regs.insert(address, value);
                 if let Some(channel) = DMA_CHANNELS.iter().position(|(base, _)| *base == address)
                     && value32 & 0x100 != 0
                 {
                     let name = DMA_CHANNELS[channel].1;
                     *hw.dma_kicks.entry(name).or_default() += 1;
+                    let reg = |hw: &Hardware, offset: u32| {
+                        hw.regs.get(&(address + offset)).copied().unwrap_or(0) as u32
+                    };
+                    let (madr, qwc, tadr) = (reg(&hw, 0x10), reg(&hw, 0x20), reg(&hw, 0x30));
+                    let moves = crate::dma::moves(regions, value32, madr, qwc, tadr);
+                    let gs = crate::dma::gs_events(regions, channel, &moves);
+                    let due = hw.clock.get() + crate::dma::duration(&moves);
                     let count = hw.dma_kicks[name];
-                    if count.is_power_of_two() {
-                        tracing::debug!(target: "ee::dma", "{name} kick #{count} (CHCR {value32:#x}): completed without a transfer");
+                    if count.is_power_of_two() || gs != crate::dma::GsEvents::default() {
+                        tracing::debug!(target: "ee::dma", "{name} kick #{count} (CHCR {value32:#x}): {} quadwords, {} tags, {gs:?}", moves.qwords(), moves.tags);
                     }
-                    hw.complete_dma(channel);
+                    hw.transfers.push(crate::dma::Transfer { channel, due, gs });
+                    // The machine's next event changed: recompiled code
+                    // must hand back so it is taken at the exact cycle.
+                    return true;
                 }
-                hw.regs.insert(address, value);
             }
         }
         hw.intc_pending() != 0 || hw.dmac_pending() != 0

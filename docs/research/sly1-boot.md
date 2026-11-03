@@ -1,9 +1,9 @@
 ---
 type: Finding
 title: How Sly 1 boots in the interpreter
-description: The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver running on the emulated IOP and loading its banks - and where it stops now (its first frame's GS FINISH wait).
+description: The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver running on the emulated IOP and loading its banks, DMA and GS FINISH events - up to the frame loop it runs now.
 tags: [finding, boot, sly1, kernel, sif, rpc, iop, sound, phase-3, phase-5]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:54:34Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:00:08Z }
 sources:
   - id: run
     resource: sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02
@@ -21,7 +21,7 @@ sources:
     resource: games/sly1/symbols.tsv
     title: Sly 1 function names (TheOnlyZac/sly1, CC0)
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:54:34Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T01:00:08Z }
 ---
 
 # How Sly 1 boots in the interpreter
@@ -86,22 +86,30 @@ instructions per second, about 0.6 times real time.
       core 0's STATX bit 7 before signalling 989SND.
     - Both banks are in by about field 16.
 11. **First frame**: the game decompresses data it read through `cdvdfsv`,
-    kicks VIF0, VIF1 and GIF DMA, sets the GS CSR's FINISH enable and waits
-    on a semaphore its GS interrupt handler signals.
+    sets the GS CSR's FINISH enable, unmasks it in the IMR and sends a
+    packet ending in a FINISH write. It then waits on a semaphore its GS
+    interrupt handler signals.
+    - FINISH arrives through both paths: a GIF chain (the first is 8,518
+      quadwords over 234 tags) and VIF1 DIRECT packets.
+    - DMA transfers complete at a modelled time: two cycles per quadword,
+      eight per tag. The data goes nowhere yet.
+12. **Frame loop**: from there the game runs one frame per field, each
+    kicking VIF0, VIF1, GIF and scratchpad DMA (about 587 frames in 600
+    fields), with its UI code among the busiest functions
+    (`RepositionBlotDependents`).
 
 ## Graphics, in passing
 
-Start-up kicks the GIF DMA channel five times. Phase 3 completes each kick at
-once without moving data. A packet that sets GS state a later wait depends on
-(`SIGNAL`/`FINISH` bits in the CSR, polled by `sceGsSyncV` and the like)
-would go unnoticed until phase 6 replays these transfers.
+DMA transfers are followed through memory and their GIF packets read only
+for GS events (SIGNAL, FINISH, LABEL). Nothing is drawn: phase 6 renders
+the packets.
 
-## Where it stops now
+## Where it is now
 
-At step 11: the GS FINISH event (and the GIF transfer before it) is not
-modelled, so the semaphore is never signalled and every EE thread waits.
-Making DMA channels complete as sinks at modelled times, with the GS
-events their packets cause, is the next part of phase 5.
+In a steady frame loop (step 12). What the frames show cannot be seen until
+phase 6; telling the title screen apart needs an observable from the game's
+state (a decompilation symbol or a RAM address), the next part of phase 5
+along with the pad, the memory card and modelled disc timing.
 
 The phase 3 gate test still runs this boot twice for 300 fields and checks
 that both runs end with the same state hash, now including the IOP's

@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-02
+* **Update**: [Phase 5](plan.md): DMA transfers complete at modelled times with their GS events; Sly 1 runs [its frame loop](research/sly1-boot.md).
 * **Update**: [Phase 5](plan.md) under way: LIBSD and 989SND run on an emulated IOP (R3000 interpreter, IRX loader, kernel HLE, SPU2 DMA); the [boot](research/sly1-boot.md) now gets past the sound driver to the first frame's GS FINISH wait.
 * **Update**: Hosted CI: GitHub Actions runs `cargo xtask ci` on pushes to main and pull requests ([plan](plan.md), phase 0 status).
 * **Update**: Decided O7: the repository goes public after auditing its history against the [ground rules](plan.md); NOTICE.md credits ps2sdk and the ps2dev toolchain.

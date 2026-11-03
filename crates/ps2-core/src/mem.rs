@@ -96,8 +96,9 @@ pub trait Mmio {
     /// A read of `bytes` (1, 2, 4, 8 or 16) at `address`.
     fn read(&mut self, regions: &mut Regions, address: u32, bytes: u32) -> u128;
     /// A write of `bytes` at `address`. True if an interrupt may be taken
-    /// after it (an enabled cause is pending): recompiled code then hands
-    /// control back to the machine at the next instruction boundary.
+    /// after it (an enabled cause is pending) or the machine's next event
+    /// changed (a DMA transfer started): recompiled code then hands control
+    /// back to the machine at the next instruction boundary.
     fn write(&mut self, regions: &mut Regions, address: u32, bytes: u32, value: u128) -> bool;
     /// The clock at the instruction about to access a register. The
     /// interpreter keeps the machine's clock current itself; recompiled code
