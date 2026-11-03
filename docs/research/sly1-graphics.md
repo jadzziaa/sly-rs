@@ -17,9 +17,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:33Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T15:59:56Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:41Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T15:59:56Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -241,6 +241,33 @@ through our GS alone, a repeatable benchmark of drawing.
 The last row costs 2.5 s, from two sources not yet separated: queueing
 each FMAC instruction's flags, and the sky, moon and Eiffel Tower, which
 are drawn now.
+
+**Gameplay is VU1-bound.** The user's prologue recording (19,180 fields)
+runs headless at 56% of console speed, 59.7% with the game built for the
+host CPU (`generated/<game>/.cargo/config.toml`, `target-cpu=native`;
+results are bit-identical, as lockstep and the replays confirm). VU1
+takes 84.5% of host time in gameplay: about 1.4 million pairs a field.
+On 6,000 recorded gameplay programs (`vu-bench --translated-only`),
+translated microcode takes 12.4 ns a pair (11.5 native), about 300 host
+instructions; callgrind puts about 40% of that in `exec`'s generic
+per-pair work (pending Q and P, the flag queue, branch bookkeeping), 28%
+in the float emulation, 16% in the pieces' `match` dispatch. Tried and
+dropped, as no faster: straight-line code per basic block (11.5 ns either
+way), and adds in single precision with an exact TwoSum correction (the
+lane logic did not vectorise; slower). The float operations alone cost
+4 ns (`mul`), 8 ns (`add`) and 16 ns (`madd`) for four lanes
+(`cargo bench -p ps2-core`).
+
+What rac-rs does instead ([rac-rs.md](rac-rs.md); read from its source):
+its VU1 generator specialises each pc over the whole timing state (VF
+ready cycles, Q, the flag queue, a pending branch), so every stall and
+flag landing is a constant; keeps the registers in SSE locals within
+basic blocks; stores raw results and builds MAC and status words only
+where read; bails to the interpreter, its pipeline rebuilt, for anything
+rare; and computes VU floats with one SSE instruction each under a
+round-toward-zero, flush-to-zero MXCSR with operands clamped: PCSX2's
+default model, without the guard-bit truncation sly-rs models. Its main
+3D does not go through VU1 at all (a renderer of its own).
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals

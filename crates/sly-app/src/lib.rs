@@ -158,6 +158,10 @@ enum Command {
         /// Times to run it (the best is reported).
         #[arg(long, default_value_t = 3)]
         repeat: u32,
+        /// Time the translated microcode alone (for profiling it): no
+        /// interpreter run, no comparison.
+        #[arg(long)]
+        translated_only: bool,
     },
     /// List the programs of a VU1 recording, or step one through the
     /// interpreter, printing each pair and the registers it changed.
@@ -342,9 +346,16 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             },
             recompiled.filter(|_| !interpret),
         ),
-        Command::VuBench { path, repeat } => {
-            vu_bench::bench(&path, repeat, recompiled.map_or(&[], |r| r.vu))
-        }
+        Command::VuBench {
+            path,
+            repeat,
+            translated_only,
+        } => vu_bench::bench(
+            &path,
+            repeat,
+            translated_only,
+            recompiled.map_or(&[], |r| r.vu),
+        ),
         Command::VuTrace {
             path,
             program,

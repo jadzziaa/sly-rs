@@ -74,14 +74,19 @@ fn run(
 }
 
 #[allow(clippy::cast_precision_loss, reason = "a report")]
-pub(crate) fn bench(path: &Path, repeat: u32, translations: &'static [Translation]) -> Result<()> {
+pub(crate) fn bench(
+    path: &Path,
+    repeat: u32,
+    translated_only: bool,
+    translations: &'static [Translation],
+) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let rec = Recording::from_bytes(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))?;
     let mut out = io::stdout().lock();
     let pairs: u64 = rec
         .starts
         .iter()
-        .map(|s| run(&rec, s, &mut Cache::default(), &[]).0.pairs)
+        .map(|s| run(&rec, s, &mut Cache::default(), translations).0.pairs)
         .sum();
     writeln!(
         out,
@@ -89,7 +94,10 @@ pub(crate) fn bench(path: &Path, repeat: u32, translations: &'static [Translatio
         rec.starts.len(),
         rec.codes.len()
     )?;
-    let mut ways = vec![("interpreted", &[][..])];
+    let mut ways = Vec::new();
+    if !translated_only {
+        ways.push(("interpreted", &[][..]));
+    }
     if !translations.is_empty() {
         ways.push(("translated", translations));
     }
@@ -111,7 +119,7 @@ pub(crate) fn bench(path: &Path, repeat: u32, translations: &'static [Translatio
             best.as_secs_f64() * 1e9 / pairs.max(1) as f64
         )?;
     }
-    if !translations.is_empty() {
+    if !translations.is_empty() && !translated_only {
         let (mut a, mut b) = (Cache::default(), Cache::default());
         for (k, s) in rec.starts.iter().enumerate() {
             let interpreted = run(&rec, s, &mut a, &[]).0;

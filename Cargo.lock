@@ -1421,6 +1421,7 @@ dependencies = [
 name = "ps2-core"
 version = "0.1.0"
 dependencies = [
+ "divan",
  "ps2-isa",
 ]
 

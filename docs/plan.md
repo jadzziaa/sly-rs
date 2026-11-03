@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T15:04:14Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T15:59:56Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -790,9 +790,12 @@ given: the gates are the schedule.
     not in SDL's controller database and Linux reports its X and Y
     swapped: `[play.gamepad]` remaps gamepad buttons, and `play` says at
     start whether a pad is in the database.
-  - Speed in play: that recording runs headless at 56% of console speed.
-    VU1 takes 84.5% of host time in gameplay (1.4 million pairs a field
-    at about 16.5 ns each); the title, measured before, runs at 124%.
+  - Speed in play: that recording runs headless at 56% of console speed,
+    59.7% with the game built for the host CPU. VU1 takes 84.5% of host
+    time in gameplay (1.4 million pairs a field); the title runs at 124%.
+    Tuning `exec` in place gains little; the way forward is a specialising
+    VU translator as rac-rs has ([research/sly1-graphics.md](research/sly1-graphics.md)),
+    with a decision on the float model to come.
   - Open from that test: Sly's shadow in the opening cutscene (to compare
     with PCSX2), pressure mode (the real game reaches mode 0x79, Shock2;
     ours stays at 0x73, Shock).

@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: VU1 speed measured and compared with rac-rs; the generated game builds for the host CPU ([graphics](research/sly1-graphics.md)).
 * **Update**: `[play.gamepad]` remaps gamepad buttons; the prologue plays through; gameplay runs at 56% of console speed headless, VU1 taking 84.5% of host time ([plan](plan.md)).
 * **Update**: The pad reports a configurable DualShock 2 (modeConfig 2), so Sly 1 asks for analog mode and the left stick moves Sly after the binocucom ([boot](research/sly1-boot.md)); interface states renamed from UpdateUi.
 * **Update**: `play` deinterlaces adaptively, with field parity from the GS: still 2D no longer jumps a line every field ([plan](plan.md)).

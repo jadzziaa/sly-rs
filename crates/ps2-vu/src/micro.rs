@@ -325,20 +325,18 @@ fn load(data: &[u8], at: u32) -> [u32; 4] {
 #[inline(always)]
 fn flags(out: [u32; 4], overflow: [u32; 4], underflow: [u32; 4], dest: u32) -> (u32, u32) {
     // Each group's four lane bits, x in bit 3 as `dest`'s.
-    let lanes = |bit: &dyn Fn(usize) -> u32| (bit(0) << 3) | (bit(1) << 2) | (bit(2) << 1) | bit(3);
-    let groups = [
-        lanes(&|i| u32::from(out[i] << 1 == 0)),
-        lanes(&|i| out[i] >> 31),
-        lanes(&|i| underflow[i] & 1),
-        lanes(&|i| overflow[i] & 1),
-    ]
-    .map(|g| g & dest);
-    let mac = groups[0] | (groups[1] << 4) | (groups[2] << 8) | (groups[3] << 12);
+    let lanes =
+        |v: [u32; 4]| ((v[0] & 1) << 3) | ((v[1] & 1) << 2) | ((v[2] & 1) << 1) | (v[3] & 1);
+    let zero = lanes(out.map(|x| u32::from(x << 1 == 0))) & dest;
+    let sign = lanes(out.map(|x| x >> 31)) & dest;
+    let under = lanes(underflow) & dest;
+    let over = lanes(overflow) & dest;
+    let mac = zero | (sign << 4) | (under << 8) | (over << 12);
     // Z, S, U, O: whether any component set each group.
-    let current = u32::from(groups[0] != 0)
-        | (u32::from(groups[1] != 0) << 1)
-        | (u32::from(groups[2] != 0) << 2)
-        | (u32::from(groups[3] != 0) << 3);
+    let current = u32::from(zero != 0)
+        | (u32::from(sign != 0) << 1)
+        | (u32::from(under != 0) << 2)
+        | (u32::from(over != 0) << 3);
     (mac, current)
 }
 
@@ -387,18 +385,30 @@ const RSQRT_LATENCY: u64 = 13;
 /// Cycles from an FMAC instruction's issue until its flags are visible.
 const FLAG_LATENCY: u64 = 4;
 
+/// Room for flags under way (a power of two).
+const FLAG_SLOTS: usize = 8;
+
 /// Flags on their way through the FMAC pipeline.
 #[derive(Clone, Copy, Debug, Default)]
 struct FlagWrite {
     /// The cycle from which they are visible.
     ready: u64,
+    /// Which of the flags below it carries ([`FlagWrite::MAC`], ...).
+    what: u8,
     /// MAC flags and the status's Z, S, U and O bits, from arithmetic.
-    mac: Option<(u32, u32)>,
+    mac: u32,
+    current: u32,
     /// The status's sticky bits from FSSET, with Z, S, U and O as they
     /// ran when it issued (as PCSX2 lands an FSSET).
-    sticky: Option<u32>,
+    sticky: u32,
     /// The clipping flags, from CLIP or FCSET.
-    clip: Option<u32>,
+    clip: u32,
+}
+
+impl FlagWrite {
+    const MAC: u8 = 1;
+    const STICKY: u8 = 2;
+    const CLIP: u8 = 4;
 }
 
 /// The flags as the latest instruction left them, before they are
@@ -426,7 +436,7 @@ pub struct State {
     ending: bool,
     /// Flags not yet visible: a ring of `pending` from `oldest` (at most
     /// one a half a cycle, visible after four, so never more than eight).
-    flags: [FlagWrite; 8],
+    flags: [FlagWrite; FLAG_SLOTS],
     oldest: usize,
     pending: usize,
     running: Running,
@@ -448,13 +458,13 @@ impl State {
         }
     }
 
+    #[inline]
     fn push_flags(&mut self, w: FlagWrite) {
-        let n = self.flags.len();
-        if self.pending == n {
-            self.oldest = (self.oldest + 1) % n;
+        if self.pending == FLAG_SLOTS {
+            self.oldest = (self.oldest + 1) % FLAG_SLOTS;
             self.pending -= 1;
         }
-        self.flags[(self.oldest + self.pending) % n] = w;
+        self.flags[(self.oldest + self.pending) % FLAG_SLOTS] = w;
         self.pending += 1;
     }
 
@@ -463,22 +473,22 @@ impl State {
     #[inline]
     fn land_flags(&mut self, regs: &mut Regs, all: bool) {
         while self.pending > 0 {
-            let w = self.flags[self.oldest];
+            let w = &self.flags[self.oldest];
             if !all && w.ready > self.cycle {
                 break;
             }
-            self.oldest = (self.oldest + 1) % self.flags.len();
+            if w.what & FlagWrite::MAC != 0 {
+                regs.mac = w.mac;
+                regs.status = (regs.status & 0xFF0) | w.current | (w.current << 6);
+            }
+            if w.what & FlagWrite::STICKY != 0 {
+                regs.status = (regs.status & (status::I | status::D)) | w.sticky;
+            }
+            if w.what & FlagWrite::CLIP != 0 {
+                regs.clip = w.clip;
+            }
+            self.oldest = (self.oldest + 1) % FLAG_SLOTS;
             self.pending -= 1;
-            if let Some((mac, current)) = w.mac {
-                regs.mac = mac;
-                regs.status = (regs.status & 0xFF0) | current | (current << 6);
-            }
-            if let Some(st) = w.sticky {
-                regs.status = (regs.status & (status::I | status::D)) | st;
-            }
-            if let Some(clip) = w.clip {
-                regs.clip = clip;
-            }
         }
     }
 }
@@ -915,14 +925,16 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
         s.running.clip = v;
         s.push_flags(FlagWrite {
             ready,
-            clip: Some(v),
+            what: FlagWrite::CLIP,
+            clip: v,
             ..FlagWrite::default()
         });
     }
     if let Some(v) = new_status {
         s.push_flags(FlagWrite {
             ready,
-            sticky: Some(v | s.running.current),
+            what: FlagWrite::STICKY,
+            sticky: v | s.running.current,
             ..FlagWrite::default()
         });
     }
@@ -938,20 +950,20 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     // CLIP in one pair, the CLIP's flags (shifted from those before the
     // pair) win, as an upper write does.
     if upper_flags.is_some() || upper_clip.is_some() {
-        let mac = upper_flags;
-        if let Some((m, current)) = mac {
-            s.running.mac = m;
+        let mut w = FlagWrite {
+            ready,
+            ..FlagWrite::default()
+        };
+        if let Some((mac, current)) = upper_flags {
+            s.running.mac = mac;
             s.running.current = current;
+            (w.what, w.mac, w.current) = (FlagWrite::MAC, mac, current);
         }
         if let Some(clip) = upper_clip {
             s.running.clip = clip;
+            (w.what, w.clip) = (w.what | FlagWrite::CLIP, clip);
         }
-        s.push_flags(FlagWrite {
-            ready,
-            mac,
-            clip: upper_clip,
-            ..FlagWrite::default()
-        });
+        s.push_flags(w);
     }
     if let Some(address) = kick
         && let Some(link) = unit.vu1.as_mut()

@@ -648,6 +648,70 @@ mod tests {
         }
     }
 
+    #[test]
+    fn single_precision_add_agrees_where_it_is_hardest() {
+        // Every exponent pair near overflow, near the smallest normal and
+        // across the whole range, with mantissas that cancel, carry or
+        // round half-way, both signs.
+        let mut state = 0x243F_6A88_85A3_08D3u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let flags = |f: Flags| (u32::from(f.overflow), u32::from(f.underflow));
+        let exponents: Vec<u32> = (0..=255)
+            .filter(|e| *e < 30 || *e > 225 || e % 7 == 0)
+            .collect();
+        for &ea in &exponents {
+            for &eb in &exponents {
+                for k in 0..24 {
+                    let r = next();
+                    let ma = match k % 4 {
+                        0 => 0x7F_FFFF,
+                        1 => 0,
+                        _ => (r as u32) & 0x7F_FFFF,
+                    };
+                    let mb = match k % 6 {
+                        0 => ma,
+                        1 => ma ^ 1,
+                        2 => 0x40_0000,
+                        _ => ((r >> 32) as u32) & 0x7F_FFFF,
+                    };
+                    let a = ((r >> 62) as u32) << 31 | ea << 23 | ma;
+                    let b = ((r >> 61) as u32 & 1) << 31 | eb << 23 | mb;
+                    let (four, one) = (x4::add([a; 4], [b; 4]), add(a, b));
+                    assert_eq!(
+                        (four.0[0], four.1[0], four.2[0]),
+                        (one.0, flags(one.1).0, flags(one.1).1),
+                        "add {a:#x} {b:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A long run of random operands (`cargo test --release -- --ignored`).
+    #[test]
+    #[ignore = "slow: run before changing add"]
+    fn single_precision_add_agrees_at_length() {
+        let mut state = 0x1319_8A2E_0370_7344u64;
+        let flags = |f: Flags| (u32::from(f.overflow), u32::from(f.underflow));
+        for _ in 0..50_000_000u32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let (a, b) = (state as u32, (state >> 32) as u32);
+            let (four, one) = (x4::add([a; 4], [b; 4]), add(a, b));
+            assert_eq!(
+                (four.0[0], four.1[0], four.2[0]),
+                (one.0, flags(one.1).0, flags(one.1).1),
+                "add {a:#x} {b:#x}"
+            );
+        }
+    }
+
     const ONE: u32 = 0x3F80_0000;
     const TWO: u32 = 0x4000_0000;
 

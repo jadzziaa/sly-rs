@@ -14,3 +14,10 @@ ps2-isa.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "float"
+harness = false
