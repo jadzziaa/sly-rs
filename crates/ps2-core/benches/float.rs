@@ -29,7 +29,7 @@ fn add(b: Bencher<'_, '_>) {
     let v = vectors(N + 1);
     b.counter(divan::counter::ItemsCount::new(N)).bench(|| {
         v.windows(2)
-            .fold(0, |m, w| m ^ black_box(x4::add(w[0], w[1])).0[0])
+            .fold(0, |m, w| m ^ black_box(x4::add(w[0], w[1]))[0])
     });
 }
 
@@ -38,7 +38,7 @@ fn mul(b: Bencher<'_, '_>) {
     let v = vectors(N + 1);
     b.counter(divan::counter::ItemsCount::new(N)).bench(|| {
         v.windows(2)
-            .fold(0, |m, w| m ^ black_box(x4::mul(w[0], w[1])).0[0])
+            .fold(0, |m, w| m ^ black_box(x4::mul(w[0], w[1]))[0])
     });
 }
 
@@ -47,6 +47,6 @@ fn madd(b: Bencher<'_, '_>) {
     let v = vectors(N + 2);
     b.counter(divan::counter::ItemsCount::new(N)).bench(|| {
         v.windows(3)
-            .fold(0, |m, w| m ^ black_box(x4::madd(w[0], w[1], w[2])).0[0])
+            .fold(0, |m, w| m ^ black_box(x4::madd(w[0], w[1], w[2]))[0])
     });
 }

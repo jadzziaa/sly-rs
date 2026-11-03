@@ -14,6 +14,76 @@
 //!
 //! Every operation computes in `f64`, where these inputs give the exact
 //! result, then rounds once.
+//!
+//! The VUs follow PCSX2's model instead ([`vu`], [`x4`]): add and subtract
+//! round the exact result toward zero, with no guard-bit truncation, and
+//! only the zero and sign flags are kept (PCSX2 sets no overflow or
+//! underflow MAC flags, and Sly reads none). It is what SSE computes under
+//! round-toward-zero with denormals flushed, which lets translated VU code
+//! run on the host's single-precision vector instructions.
+
+/// The VUs' arithmetic, one lane: PCSX2's model (see the module's notes).
+pub mod vu {
+    use super::{MAX, chop, value};
+
+    /// `x + y` (the doubles of two singles) rounded toward zero to a
+    /// single, from their sum to the nearest double and its rounding error
+    /// (Knuth's `TwoSum`, exact): the sum chopped, one step further toward
+    /// zero when it landed on a single and the true sum lies just inside
+    /// it. Exact whatever the host's rounding mode, and what SSE gives
+    /// under round-toward-zero with denormals flushed.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn sum(x: f64, y: f64) -> u32 {
+        let s = x + y;
+        let back = s - x;
+        let error = (x - (s - back)) + (y - back);
+        let bits = chop(s).0;
+        let sign = bits & 0x8000_0000;
+        let magnitude = bits & 0x7FFF_FFFF;
+        // On a single: no bits below a single's last place.
+        let on_single = s.to_bits().trailing_zeros() >= 29;
+        let inward = (error != 0.0) & (error.is_sign_negative() != s.is_sign_negative());
+        let in_range = (magnitude >= 0x0080_0000) & (s.abs() <= f64::from(f32::from_bits(MAX)));
+        let magnitude = magnitude - u32::from(on_single & inward & in_range);
+        sign | if magnitude < 0x0080_0000 {
+            0
+        } else {
+            magnitude
+        }
+    }
+
+    /// `a + b`.
+    #[must_use]
+    pub fn add(a: u32, b: u32) -> u32 {
+        sum(value(a), value(b))
+    }
+
+    /// `a - b`.
+    #[must_use]
+    pub fn sub(a: u32, b: u32) -> u32 {
+        add(a, b ^ 0x8000_0000)
+    }
+
+    /// `a * b` (the product of two singles is exact in a double).
+    #[must_use]
+    pub fn mul(a: u32, b: u32) -> u32 {
+        chop(value(a) * value(b)).0
+    }
+
+    /// `acc + a * b`, the product rounded first.
+    #[must_use]
+    pub fn madd(acc: u32, a: u32, b: u32) -> u32 {
+        add(acc, mul(a, b))
+    }
+
+    /// `acc - a * b`, the product rounded first.
+    #[must_use]
+    pub fn msub(acc: u32, a: u32, b: u32) -> u32 {
+        sub(acc, mul(a, b))
+    }
+}
 
 /// The largest PS2 single, as bits.
 pub const MAX: u32 = 0x7F7F_FFFF;
@@ -353,81 +423,46 @@ pub mod x4 {
         (r, o, u)
     }
 
-    /// [`super::aligned`], per lane.
-    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
-    #[inline(always)]
-    fn aligned(a: V, b: V) -> (V, V) {
-        let (mut ka, mut kb) = ([u32::MAX; 4], [u32::MAX; 4]);
-        for i in 0..4 {
-            let (ea, eb) = ((a[i] >> 23) & 0xFF, (b[i] >> 23) & 0xFF);
-            let difference = ea.max(eb) - ea.min(eb);
-            let keep = if difference >= 24 {
-                0x8000_0000
-            } else {
-                !((1u32 << difference.min(31)) - 1)
-            };
-            let keep = if ea == 0 || eb == 0 { u32::MAX } else { keep };
-            if ea >= eb {
-                kb[i] = keep;
-            } else {
-                ka[i] = keep;
-            }
-        }
-        (
-            std::array::from_fn(|i| a[i] & ka[i]),
-            std::array::from_fn(|i| b[i] & kb[i]),
-        )
-    }
-
-    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
-    #[inline(always)]
-    fn zip(a: [f64; 4], b: [f64; 4], f: impl Fn(f64, f64) -> f64) -> [f64; 4] {
-        [f(a[0], b[0]), f(a[1], b[1]), f(a[2], b[2]), f(a[3], b[3])]
-    }
-
-    /// [`super::add`], per lane.
+    /// [`super::vu::add`], per lane.
     #[allow(clippy::inline_always, reason = "the VUs' hot path")]
     #[inline(always)]
     #[must_use]
-    pub fn add(a: V, b: V) -> Out {
-        let (a, b) = aligned(a, b);
-        chop(zip(values(a), values(b), |x, y| x + y))
+    pub fn add(a: V, b: V) -> V {
+        let (x, y) = (values(a), values(b));
+        std::array::from_fn(|i| super::vu::sum(x[i], y[i]))
     }
 
-    /// [`super::sub`], per lane.
+    /// [`super::vu::sub`], per lane.
     #[allow(clippy::inline_always, reason = "the VUs' hot path")]
     #[inline(always)]
     #[must_use]
-    pub fn sub(a: V, b: V) -> Out {
+    pub fn sub(a: V, b: V) -> V {
         add(a, b.map(|x| x ^ 0x8000_0000))
     }
 
-    /// [`super::mul`], per lane.
+    /// [`super::vu::mul`], per lane.
     #[allow(clippy::inline_always, reason = "the VUs' hot path")]
     #[inline(always)]
     #[must_use]
-    pub fn mul(a: V, b: V) -> Out {
-        chop(zip(values(a), values(b), |x, y| x * y))
+    pub fn mul(a: V, b: V) -> V {
+        let (x, y) = (values(a), values(b));
+        chop(std::array::from_fn(|i| x[i] * y[i])).0
     }
 
-    /// [`super::madd`], per lane.
+    /// [`super::vu::madd`], per lane.
     #[allow(clippy::inline_always, reason = "the VUs' hot path")]
     #[inline(always)]
     #[must_use]
-    pub fn madd(acc: V, a: V, b: V) -> Out {
-        let (product, o1, _) = mul(a, b);
-        let (sum, o2, u2) = add(acc, product);
-        (sum, std::array::from_fn(|i| o1[i] | o2[i]), u2)
+    pub fn madd(acc: V, a: V, b: V) -> V {
+        add(acc, mul(a, b))
     }
 
-    /// [`super::msub`], per lane.
+    /// [`super::vu::msub`], per lane.
     #[allow(clippy::inline_always, reason = "the VUs' hot path")]
     #[inline(always)]
     #[must_use]
-    pub fn msub(acc: V, a: V, b: V) -> Out {
-        let (product, o1, _) = mul(a, b);
-        let (difference, o2, u2) = sub(acc, product);
-        (difference, std::array::from_fn(|i| o1[i] | o2[i]), u2)
+    pub fn msub(acc: V, a: V, b: V) -> V {
+        sub(acc, mul(a, b))
     }
 
     /// ITOF: each lane as a signed integer with `scale` fraction bits,
@@ -580,22 +615,16 @@ mod tests {
             b[0] = a[0] ^ 0x8000_0000;
             b[1] = a[1].wrapping_add(1);
             for i in 0..4 {
-                let check = |name: &str, four: x4::Out, one: (u32, Flags)| {
-                    let (r, o, u) = four;
-                    assert_eq!(
-                        (r[i], o[i], u[i]),
-                        (one.0, flags(one.1).0, flags(one.1).1),
-                        "{name} {:#x} {:#x} {:#x}",
-                        acc[i],
-                        a[i],
-                        b[i]
-                    );
-                };
-                check("add", x4::add(a, b), add(a[i], b[i]));
-                check("sub", x4::sub(a, b), sub(a[i], b[i]));
-                check("mul", x4::mul(a, b), mul(a[i], b[i]));
-                check("madd", x4::madd(acc, a, b), madd(acc[i], a[i], b[i]));
-                check("msub", x4::msub(acc, a, b), msub(acc[i], a[i], b[i]));
+                let lanes = [
+                    ("add", x4::add(a, b), vu::add(a[i], b[i])),
+                    ("sub", x4::sub(a, b), vu::sub(a[i], b[i])),
+                    ("mul", x4::mul(a, b), vu::mul(a[i], b[i])),
+                    ("madd", x4::madd(acc, a, b), vu::madd(acc[i], a[i], b[i])),
+                    ("msub", x4::msub(acc, a, b), vu::msub(acc[i], a[i], b[i])),
+                ];
+                for (name, four, one) in lanes {
+                    assert_eq!(four[i], one, "{name} {:#x} {:#x} {:#x}", acc[i], a[i], b[i]);
+                }
                 assert_eq!(x4::max(a, b)[i], max(a[i], b[i]));
                 for scale in [0, 4, 12, 15] {
                     let factor = f64::from(1u32 << scale);
@@ -648,11 +677,92 @@ mod tests {
         }
     }
 
+    /// The exact sum of two singles (read as [`value`] does) rounded
+    /// toward zero, with results below the smallest normal flushed and
+    /// those beyond `MAX` clamped: in integers, independently of `vu`.
+    fn add_reference(a: u32, b: u32) -> u32 {
+        let read = |x: u32| {
+            let exponent = (x >> 23) & 0xFF;
+            let sign = x & 0x8000_0000;
+            match exponent {
+                0 => sign,
+                0xFF => sign | MAX,
+                _ => x,
+            }
+        };
+        let (a, b) = (read(a), read(b));
+        // value = mantissa * 2^(exponent - 150)
+        let parts = |x: u32| {
+            let exponent = (x >> 23) & 0xFF;
+            let magnitude = if exponent == 0 {
+                0
+            } else {
+                i128::from((x & 0x7F_FFFF) | 0x80_0000)
+            };
+            let signed = if x >> 31 == 1 { -magnitude } else { magnitude };
+            (signed, i32::try_from(exponent).unwrap_or(0) - 150)
+        };
+        let ((ma, ea), (mb, eb)) = (parts(a), parts(b));
+        if ma == 0 && mb == 0 {
+            return a & b & 0x8000_0000;
+        }
+        let toward_zero = |sum: i128, low: i32| -> u32 {
+            if sum == 0 {
+                return 0;
+            }
+            let sign = if sum < 0 { 0x8000_0000 } else { 0 };
+            let mut m = sum.unsigned_abs();
+            let mut e = low;
+            let width = 128 - i32::try_from(m.leading_zeros()).unwrap_or(0);
+            if width > 24 {
+                m >>= width - 24;
+                e += width - 24;
+            } else {
+                m <<= 24 - width;
+                e -= 24 - width;
+            }
+            let biased = e + 150;
+            if biased >= 255 {
+                sign | MAX
+            } else if biased <= 0 {
+                sign
+            } else {
+                sign | u32::try_from(biased).unwrap_or(0) << 23
+                    | (u32::try_from(m).unwrap_or(0) & 0x7F_FFFF)
+            }
+        };
+        if ma == 0 || mb == 0 {
+            return if ma == 0 {
+                toward_zero(mb, eb)
+            } else {
+                toward_zero(ma, ea)
+            };
+        }
+        let (big, small) = if ea >= eb {
+            ((ma, ea), (mb, eb))
+        } else {
+            ((mb, eb), (ma, ea))
+        };
+        if big.1 - small.1 > 80 {
+            // The smaller one only decides on which side of the larger the
+            // sum falls: just inside it (toward zero) when signs differ.
+            let inside = (big.0 < 0) != (small.0 < 0);
+            let scaled = big.0 * 4 - if inside { big.0.signum() } else { 0 };
+            return toward_zero(scaled, big.1 - 2);
+        }
+        let sum = (big.0 << (big.1 - small.1)) + small.0;
+        toward_zero(sum, small.1)
+    }
+
+    fn check_add(a: u32, b: u32) {
+        assert_eq!(vu::add(a, b), add_reference(a, b), "add {a:#x} {b:#x}");
+    }
+
     #[test]
-    fn single_precision_add_agrees_where_it_is_hardest() {
-        // Every exponent pair near overflow, near the smallest normal and
-        // across the whole range, with mantissas that cancel, carry or
-        // round half-way, both signs.
+    fn vu_add_rounds_the_exact_sum_toward_zero() {
+        // Every exponent pair near overflow, near the smallest normal, far
+        // apart and across the range, with mantissas that cancel, carry or
+        // sit on a single's last place, both signs.
         let mut state = 0x243F_6A88_85A3_08D3u64;
         let mut next = || {
             state ^= state << 13;
@@ -660,7 +770,6 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let flags = |f: Flags| (u32::from(f.overflow), u32::from(f.underflow));
         let exponents: Vec<u32> = (0..=255)
             .filter(|e| *e < 30 || *e > 225 || e % 7 == 0)
             .collect();
@@ -681,34 +790,34 @@ mod tests {
                     };
                     let a = ((r >> 62) as u32) << 31 | ea << 23 | ma;
                     let b = ((r >> 61) as u32 & 1) << 31 | eb << 23 | mb;
-                    let (four, one) = (x4::add([a; 4], [b; 4]), add(a, b));
-                    assert_eq!(
-                        (four.0[0], four.1[0], four.2[0]),
-                        (one.0, flags(one.1).0, flags(one.1).1),
-                        "add {a:#x} {b:#x}"
-                    );
+                    check_add(a, b);
                 }
             }
+        }
+        // Cancellation to zero, signed zeros, and a tiny opposite operand
+        // just under a single.
+        for (a, b) in [
+            (0x3F80_0000, 0xBF80_0000),
+            (0x8000_0000, 0x8000_0000),
+            (0x0000_0000, 0x8000_0000),
+            (0x3F80_0000, 0x8080_0000),
+            (0x7F7F_FFFF, 0x0080_0000),
+            (0x7F7F_FFFF, 0xF3FF_FFFF),
+        ] {
+            check_add(a, b);
         }
     }
 
     /// A long run of random operands (`cargo test --release -- --ignored`).
     #[test]
-    #[ignore = "slow: run before changing add"]
-    fn single_precision_add_agrees_at_length() {
+    #[ignore = "slow: run before changing the VUs' add"]
+    fn vu_add_rounds_toward_zero_at_length() {
         let mut state = 0x1319_8A2E_0370_7344u64;
-        let flags = |f: Flags| (u32::from(f.overflow), u32::from(f.underflow));
         for _ in 0..50_000_000u32 {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            let (a, b) = (state as u32, (state >> 32) as u32);
-            let (four, one) = (x4::add([a; 4], [b; 4]), add(a, b));
-            assert_eq!(
-                (four.0[0], four.1[0], four.2[0]),
-                (one.0, flags(one.1).0, flags(one.1).1),
-                "add {a:#x} {b:#x}"
-            );
+            check_add(state as u32, (state >> 32) as u32);
         }
     }
 

@@ -132,13 +132,12 @@ pub(crate) fn execute(cpu: &mut Cpu, mem: &mut Memory, insn: Insn) -> Outcome {
                 cpu.vu0.acc,
             );
             let mut out = acc;
-            let mut flags = [float::Flags::default(); 4];
             for (i, (j, k)) in [(1, 2), (2, 0), (0, 1)].into_iter().enumerate() {
                 if in_dest(dest, i) {
-                    (out[i], flags[i]) = if insn.op() == Vopmula {
-                        float::mul(a[j], b[k])
+                    out[i] = if insn.op() == Vopmula {
+                        float::vu::mul(a[j], b[k])
                     } else {
-                        float::msub(acc[i], a[j], b[k])
+                        float::vu::msub(acc[i], a[j], b[k])
                     };
                 }
             }
@@ -147,7 +146,7 @@ pub(crate) fn execute(cpu: &mut Cpu, mem: &mut Memory, insn: Insn) -> Outcome {
             } else {
                 write_vf(cpu, fd, out, dest);
             }
-            set_flags(cpu, out, flags, dest);
+            set_flags(cpu, out, dest);
         }
         Vitof0 | Vitof4 | Vitof12 | Vitof15 | Vftoi0 | Vftoi4 | Vftoi12 | Vftoi15 => {
             let scale = match insn.op() {
@@ -320,7 +319,6 @@ fn fmac(
     let t = cpu.vu0.vf[ft as usize];
     let acc = cpu.vu0.acc;
     let mut out = if to_acc { acc } else { cpu.vu0.vf[fd as usize] };
-    let mut flags = [float::Flags::default(); 4];
     for i in (0..4).filter(|&i| in_dest(dest, i)) {
         let b = match operand {
             Operand::Ft => t[i],
@@ -328,14 +326,14 @@ fn fmac(
             Operand::Q => cpu.vu0.q,
             Operand::I => cpu.vu0.i,
         };
-        (out[i], flags[i]) = match arith {
-            Arith::Add => float::add(a[i], b),
-            Arith::Sub => float::sub(a[i], b),
-            Arith::Mul => float::mul(a[i], b),
-            Arith::Madd => float::madd(acc[i], a[i], b),
-            Arith::Msub => float::msub(acc[i], a[i], b),
-            Arith::Max => (float::max(a[i], b), float::Flags::default()),
-            Arith::Min => (float::min(a[i], b), float::Flags::default()),
+        out[i] = match arith {
+            Arith::Add => float::vu::add(a[i], b),
+            Arith::Sub => float::vu::sub(a[i], b),
+            Arith::Mul => float::vu::mul(a[i], b),
+            Arith::Madd => float::vu::madd(acc[i], a[i], b),
+            Arith::Msub => float::vu::msub(acc[i], a[i], b),
+            Arith::Max => float::max(a[i], b),
+            Arith::Min => float::min(a[i], b),
         };
     }
     if to_acc {
@@ -344,20 +342,19 @@ fn fmac(
         write_vf(cpu, fd, out, dest);
     }
     if !matches!(arith, Arith::Max | Arith::Min) {
-        set_flags(cpu, out, flags, dest);
+        set_flags(cpu, out, dest);
     }
 }
 
-/// Updates the MAC and status flags from the components in `dest`.
-fn set_flags(cpu: &mut Cpu, out: [u32; 4], flags: [float::Flags; 4], dest: u8) {
+/// Updates the MAC and status flags from the components in `dest`: zero
+/// and sign only, as PCSX2 keeps them (no overflow or underflow).
+fn set_flags(cpu: &mut Cpu, out: [u32; 4], dest: u8) {
     let mut mac = 0;
     for i in (0..4).filter(|&i| in_dest(dest, i)) {
         let bit = 3 - i;
         let value = out[i];
         mac |= u32::from(value << 1 == 0) << bit;
         mac |= u32::from(value >> 31 == 1) << (4 + bit);
-        mac |= u32::from(flags[i].underflow) << (8 + bit);
-        mac |= u32::from(flags[i].overflow) << (12 + bit);
     }
     cpu.vu0.mac = mac;
     let mut current = 0;

@@ -3,9 +3,9 @@ type: Finding
 title: The conformance program against PCSX2
 description: Our own PS2 test program (FPU, integer, MMI, unaligned loads and stores, VU0 macro mode) run in the interpreter and in PCSX2's recompiler and interpreter - which differences were our bugs and fixed, which are PCSX2's, and why PCSX2 cannot settle the float and VU0 questions.
 tags: [finding, conformance, pcsx2, float, mmi, vu0, phase-3]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T23:22:56Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T21:26:58Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-02T23:22:56Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T21:27:06Z }
 sources:
   - id: program
     resource: conformance/
@@ -113,10 +113,17 @@ remaining differences in the result vectors fall into three groups, all
 - `vdiv`, `vsqrt`, `vrsqrt`: PCSX2 chops; we round to nearest, as for the
   FPU. `vmulq` differs as a consequence, through Q.
 - `vadd`, `vsub`, `vmadd`/`vmsub` and their broadcast forms: the guard-bit
-  question again.
+  question again. **Settled for the VUs, 2026-11-03**: sly-rs now follows
+  PCSX2's model there (the exact result toward zero, no guard bits), as the
+  user decided for speed. Result vectors now agree with PCSX2's interpreter
+  in 1,142 of 1,200 VU0 lines (916 before; every `vadd`, `vaddi`, `vaddx`
+  and `vsub`), and with its recompiler in 982 (827). The EE's FPU keeps the
+  guard-bit rule.
 - Status and MAC flags: PCSX2's are not a reference. After a `vmula` whose
-  product overflows, PCSX2 reports no overflow bits in MAC; ours do, and
-  stay consistent with the status register.
+  product overflows, PCSX2 reports no overflow bits in MAC. The VUs now
+  keep only zero and sign flags, as PCSX2 does; Sly reads no others (its
+  microcode tests Z and S with `FSAND`, its EE code compares the whole MAC
+  word to 0xF0).
 
 ## What follows
 

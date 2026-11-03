@@ -319,24 +319,19 @@ fn load(data: &[u8], at: u32) -> [u32; 4] {
     ]
 }
 
-/// The MAC flags and the status's Z, S, U and O bits for results in
-/// `dest`.
+/// The MAC flags and the status's Z and S bits for results in `dest`
+/// (PCSX2's model keeps no overflow or underflow flags).
 #[allow(clippy::inline_always, reason = "translations specialise it by `dest`")]
 #[inline(always)]
-fn flags(out: [u32; 4], overflow: [u32; 4], underflow: [u32; 4], dest: u32) -> (u32, u32) {
+fn flags(out: [u32; 4], dest: u32) -> (u32, u32) {
     // Each group's four lane bits, x in bit 3 as `dest`'s.
     let lanes =
         |v: [u32; 4]| ((v[0] & 1) << 3) | ((v[1] & 1) << 2) | ((v[2] & 1) << 1) | (v[3] & 1);
     let zero = lanes(out.map(|x| u32::from(x << 1 == 0))) & dest;
     let sign = lanes(out.map(|x| x >> 31)) & dest;
-    let under = lanes(underflow) & dest;
-    let over = lanes(overflow) & dest;
-    let mac = zero | (sign << 4) | (under << 8) | (over << 12);
-    // Z, S, U, O: whether any component set each group.
-    let current = u32::from(zero != 0)
-        | (u32::from(sign != 0) << 1)
-        | (u32::from(under != 0) << 2)
-        | (u32::from(over != 0) << 3);
+    let mac = zero | (sign << 4);
+    // Z, S: whether any component set each group.
+    let current = u32::from(zero != 0) | (u32::from(sign != 0) << 1);
     (mac, current)
 }
 
@@ -395,7 +390,7 @@ struct FlagWrite {
     ready: u64,
     /// Which of the flags below it carries ([`FlagWrite::MAC`], ...).
     what: u8,
-    /// MAC flags and the status's Z, S, U and O bits, from arithmetic.
+    /// MAC flags and the status's Z and S bits, from arithmetic.
     mac: u32,
     current: u32,
     /// The status's sticky bits from FSSET, with Z, S, U and O as they
@@ -621,7 +616,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     );
     let bc = (upper & 3) as usize;
     let mut upper_acc: Option<[u32; 4]> = None;
-    // MAC flags and Z, S, U, O.
+    // MAC flags and Z, S.
     let mut upper_flags: Option<(u32, u32)> = None;
     let mut upper_clip: Option<u32> = None;
     let mut upper_vf: Option<(usize, [u32; 4])> = None;
@@ -637,15 +632,14 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
             let old = if to_acc { acc } else { r.vf[fd] };
             // All four lanes at once (the compiler vectorises them); the
             // lanes in `dest` are kept.
-            let none = [0; 4];
-            let (result, overflow, underflow) = match arith {
+            let result = match arith {
                 Arith::Add => float::x4::add(a, b),
                 Arith::Sub => float::x4::sub(a, b),
                 Arith::Mul => float::x4::mul(a, b),
                 Arith::Madd => float::x4::madd(acc, a, b),
                 Arith::Msub => float::x4::msub(acc, a, b),
-                Arith::Max => (float::x4::max(a, b), none, none),
-                Arith::Min => (float::x4::min(a, b), none, none),
+                Arith::Max => float::x4::max(a, b),
+                Arith::Min => float::x4::min(a, b),
             };
             let out = merge(old, result, dest);
             if to_acc {
@@ -654,19 +648,18 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
                 upper_vf = Some((fd, out));
             }
             if !matches!(arith, Arith::Max | Arith::Min) {
-                upper_flags = Some(flags(out, overflow, underflow, dest));
+                upper_flags = Some(flags(out, dest));
             }
         }
         op @ (Upper::Opmula | Upper::Opmsub) => {
             let (a, b, acc) = (r.vf[fs], r.vf[ft], r.acc);
             let mut out = if op == Upper::Opmula { acc } else { r.vf[fd] };
-            let mut f = [float::Flags::default(); 4];
             for (i, (j, k)) in [(1, 2), (2, 0), (0, 1)].into_iter().enumerate() {
                 if in_dest(dest, i) {
-                    (out[i], f[i]) = if op == Upper::Opmula {
-                        float::mul(a[j], b[k])
+                    out[i] = if op == Upper::Opmula {
+                        float::vu::mul(a[j], b[k])
                     } else {
-                        float::msub(acc[i], a[j], b[k])
+                        float::vu::msub(acc[i], a[j], b[k])
                     };
                 }
             }
@@ -675,11 +668,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
             } else {
                 upper_vf = Some((fd, out));
             }
-            let (overflow, underflow) = (
-                f.map(|f| u32::from(f.overflow)),
-                f.map(|f| u32::from(f.underflow)),
-            );
-            upper_flags = Some(flags(out, overflow, underflow, dest));
+            upper_flags = Some(flags(out, dest));
         }
         Upper::Itof(scale) => upper_vf = Some((ft, float::x4::from_fixed(r.vf[fs], scale))),
         Upper::Ftoi(scale) => upper_vf = Some((ft, float::x4::to_fixed(r.vf[fs], scale))),
