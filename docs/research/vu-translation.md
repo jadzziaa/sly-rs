@@ -10,9 +10,9 @@ sources:
   - id: plan
     resource: docs/plan.md, phase 6
     title: 'The plan: ahead-of-time translation of every .DVP overlay'
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:35:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:38:40Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
 ---
 
 # VU microcode translated ahead of time
@@ -48,8 +48,9 @@ of the two. Sly 1 enters its programs at 28 addresses.
   over a `match` on the pair's address, so it can start at any pair and
   follow branches inside the piece. The game's binary carries them in
   `generated/<game>/vu`, a crate depending on `ps2-vu` only.
-- **One semantics.** Each arm calls the interpreter's own `exec` with the
-  pair's words and operation class as constants. `exec`, the per-component
+- **One semantics**, the design's main property. Each arm calls the
+  interpreter's own `exec` with the pair's words and operation class as
+  constants. `exec`, the per-component
   loop and the float operations are always inlined, so the compiler keeps
   only what that pair does. The interpreter and the translations cannot
   disagree on what an instruction means; they share Q and P latencies,
@@ -82,7 +83,7 @@ On the 4000 recorded programs (2.1 million pairs), with no GS:
 
 | | ns a pair |
 | --- | --- |
-| Interpreter | 19.5 |
+| Interpreter | 19.5 (19.8 before the float changes below) |
 | Translated, first version (one function per program) | 13.0 |
 | Translated, in pieces, closures replaced by macros | 10.8 |
 

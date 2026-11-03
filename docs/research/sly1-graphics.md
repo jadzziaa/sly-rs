@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:35:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:38:40Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -132,7 +132,10 @@ replay. Earlier figures in this note (29.7 s, about
 35 ms a 3D field) timed the machine without waiting for the GS thread to
 catch up, and were too good. Every change left the results bit for bit the
 same: the whole of GS memory at field 1300 hashes the same, and the
-replay's state hashes are unchanged. The changes:
+replay's state hashes are unchanged. (Since VU translation the state hash
+also covers both VUs' memories and VU1's registers; the replay's
+checkpoints were re-recorded with the interpreter, and the recompiled
+build with translated microcode gives the same values.) The changes:
 
 - **The GS on its own thread.** Nothing the EE does depends on what the GS
   draws. A tag scanner finds the SIGNAL, FINISH and LABEL writes as packets
