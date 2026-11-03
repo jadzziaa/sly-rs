@@ -30,7 +30,7 @@ use ps2_core::cpu::cop0;
 use ps2_core::rec::{Ctx, Exit, Table};
 use ps2_core::{Cpu, Memory, Outcome, execute};
 use ps2_iop::{Action, IOP_PACKET_BUFFER, Iop, Transfer};
-use ps2_isa::ee::Insn;
+use ps2_isa::ee::{Insn, Op};
 
 use crate::hw::{Hardware, HardwareHandle, intc};
 use crate::kernel::{Effect, INTERRUPT_RETURN, Kernel, THREAD_EXIT};
@@ -122,9 +122,23 @@ pub struct Machine {
     table: Table,
     /// Native replacements, by function address.
     hooks: BTreeMap<u32, (&'static str, Hook)>,
+    /// A bit per word address modulo 4096, set where a hook may be: the
+    /// map is looked up only there.
+    hook_filter: [u64; 64],
+    /// Decoded instructions, by address modulo [`DECODED`] words; an
+    /// entry is used only while memory holds the same word.
+    decoded: Box<[Insn]>,
+    /// The last instruction `step` ran was a system call.
+    syscalled: bool,
+    /// The last instruction `step` ran may have changed whether an
+    /// interrupt can be taken (`ei`, `di`, `mtc0`) or started a VU.
+    attention: bool,
     /// Where instructions ran.
     pub stats: Stats,
 }
+
+/// Decoded instructions kept (a power of two).
+const DECODED: usize = 1 << 16;
 
 impl Machine {
     /// Loads `image` and prepares to start at its entry point, as the BIOS's
@@ -178,8 +192,35 @@ impl Machine {
             watches: BTreeMap::new(),
             table: Table::empty(),
             hooks: BTreeMap::new(),
+            hook_filter: [0; 64],
+            decoded: vec![Insn::decode(0); DECODED].into_boxed_slice(),
+            syscalled: false,
+            attention: false,
             stats: Stats::default(),
         })
+    }
+
+    /// The instruction at `pc`, decoded.
+    #[inline]
+    fn fetch(&mut self, pc: u32) -> Insn {
+        // Main RAM directly; anything else through the memory map.
+        let word = match self.mem.regions.ram.get(pc as usize..pc as usize + 4) {
+            Some(b) if (pc as usize) < ps2_core::mem::RAM_SIZE => {
+                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+            }
+            _ => self.mem.read32(pc),
+        };
+        let slot = &mut self.decoded[(pc as usize >> 2) & (DECODED - 1)];
+        if slot.word() != word {
+            *slot = Insn::decode(word);
+        }
+        *slot
+    }
+
+    /// Whether a hook may be at `pc`.
+    const fn maybe_hooked(&self, pc: u32) -> bool {
+        let bit = (pc >> 2) & 4095;
+        self.hook_filter[(bit >> 6) as usize] & (1 << (bit & 63)) != 0
     }
 
     /// Replaces the function at `address` with `hook`. Generated code must
@@ -187,6 +228,8 @@ impl Machine {
     /// call can never skip a hook.
     pub fn hook(&mut self, address: u32, name: &'static str, hook: Hook) {
         self.hooks.insert(address, (name, hook));
+        let bit = (address >> 2) & 4095;
+        self.hook_filter[(bit >> 6) as usize] |= 1 << (bit & 63);
     }
 
     /// Runs `table`'s generated code wherever it has some, the interpreter
@@ -440,7 +483,9 @@ impl Machine {
                 }
                 _ => {}
             }
-            if let Some(&(name, hook)) = self.hooks.get(&self.cpu.pc) {
+            if self.maybe_hooked(self.cpu.pc)
+                && let Some(&(name, hook)) = self.hooks.get(&self.cpu.pc)
+            {
                 // A hooked function: its work in one cycle, then back to $ra.
                 hook(&mut self.cpu, &mut self.mem);
                 self.cpu.pc = self.cpu.r32(31);
@@ -457,24 +502,44 @@ impl Machine {
                 }
                 continue;
             }
-            let before = self.cpu.cycles;
-            let syscall =
-                Insn::decode(self.mem.read32(self.cpu.pc)).op() == ps2_isa::ee::Op::Syscall;
-            if let Some(stop) = self.step() {
-                return stop;
-            }
-            let ran = self.cpu.cycles - before;
-            if syscall {
-                self.stats.kernel += ran;
-            } else {
-                self.stats.interpreted += ran;
-            }
-            if !self.table.is_empty() && self.stats.interpreted_at.len() < 4096 {
-                *self.stats.interpreted_at.entry(self.cpu.pc).or_default() += ran;
-            }
-            // Only the kernel and hardware writes schedule events.
-            if syscall || self.mem.mmio_writes != writes {
-                next_event = next_event.min(self.next_event());
+            // Instructions back to back while nothing the checks above
+            // look at can change: no event due, no IOP packet waiting
+            // (its delivery depends on RAM), no system call, hardware
+            // write or change to interrupt enabling, no hook or kernel
+            // return address. The interpreted machine alone: compiled
+            // code may start at any instruction.
+            let fast = self.table.is_empty() && !self.iop.pending();
+            let limit = next_event.min(end);
+            loop {
+                let before = self.cpu.cycles;
+                if let Some(stop) = self.step() {
+                    return stop;
+                }
+                let ran = self.cpu.cycles - before;
+                let syscall = self.syscalled;
+                if syscall {
+                    self.stats.kernel += ran;
+                } else {
+                    self.stats.interpreted += ran;
+                }
+                if !self.table.is_empty() && self.stats.interpreted_at.len() < 4096 {
+                    *self.stats.interpreted_at.entry(self.cpu.pc).or_default() += ran;
+                }
+                // Only the kernel and hardware writes schedule events.
+                if syscall || self.mem.mmio_writes != writes {
+                    next_event = next_event.min(self.next_event());
+                    break;
+                }
+                let pc = self.cpu.pc;
+                if !fast
+                    || self.attention
+                    || self.cpu.cycles >= limit
+                    || self.maybe_hooked(pc)
+                    || pc == INTERRUPT_RETURN
+                    || pc == THREAD_EXIT
+                {
+                    break;
+                }
             }
         }
         Stop::Budget
@@ -540,7 +605,9 @@ impl Machine {
         {
             *samples.entry(pc).or_default() += 1;
         }
-        let insn = Insn::decode(self.mem.read32(pc));
+        let insn = self.fetch(pc);
+        self.syscalled = false;
+        self.attention = matches!(insn.op(), Op::Ei | Op::Di | Op::Mtc0);
         self.cpu.cycles += 1;
         self.clock.set(self.cpu.cycles);
         match execute(&mut self.cpu, &mut self.mem, insn, pc) {
@@ -554,7 +621,8 @@ impl Machine {
                     self.cpu.pc = pc.wrapping_add(8);
                 } else {
                     let slot = pc.wrapping_add(4);
-                    let delay = Insn::decode(self.mem.read32(slot));
+                    let delay = self.fetch(slot);
+                    self.attention |= matches!(delay.op(), Op::Ei | Op::Di | Op::Mtc0);
                     // The clock counts the instruction running, the delay
                     // slot included, for hardware and `mfc0 Count` alike.
                     self.cpu.cycles += 1;
@@ -571,6 +639,7 @@ impl Machine {
                 }
             }
             Outcome::Syscall => {
+                self.syscalled = true;
                 self.cpu.pc = pc.wrapping_add(4);
                 let mut hw = self.hw.borrow_mut();
                 let effect = self.kernel.syscall(&mut self.cpu, &mut self.mem, &mut hw);
@@ -593,10 +662,12 @@ impl Machine {
                 }
             }
             Outcome::VuCall(address) => {
+                self.attention = true;
                 self.run_vu(false, address);
                 self.cpu.pc = pc.wrapping_add(4);
             }
             Outcome::Vu1Call(address) => {
+                self.attention = true;
                 self.run_vu(true, address);
                 self.cpu.pc = pc.wrapping_add(4);
             }

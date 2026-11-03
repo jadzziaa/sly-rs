@@ -65,6 +65,7 @@ pub(crate) fn run(
         None => sly_common::replay::run(&mut machine, fields, &presses),
     };
     // The GS draws on its own thread: the run is over once it has caught up.
+    let machine_time = started.elapsed();
     machine.hw.borrow_mut().gs.with(|_| ());
     let elapsed = started.elapsed();
     if let Some(path) = pictures.screenshot {
@@ -148,8 +149,10 @@ pub(crate) fn run(
     writeln!(out, "  GS memory hash {memory_hash:016x}")?;
     writeln!(
         out,
-        "  the machine waited for the GS {:.2} s",
-        hw.gs.waited.as_secs_f64()
+        "  the machine waited for the GS {:.2} s; it finished at {:.2} s, the GS {:.2} s later",
+        hw.gs.waited.as_secs_f64(),
+        machine_time.as_secs_f64(),
+        elapsed.saturating_sub(machine_time).as_secs_f64()
     )?;
     writeln!(
         out,
@@ -244,6 +247,15 @@ pub(crate) fn run(
         machine.iop.waiting()
     )?;
     let stats = &machine.stats;
+    if stats.entries == 0 {
+        writeln!(
+            out,
+            "  interpreted: {} instructions and {} system calls; the machine {:.1} ns each",
+            stats.interpreted,
+            stats.kernel,
+            machine_time.as_secs_f64() * 1e9 / (stats.interpreted + stats.kernel).max(1) as f64
+        )?;
+    }
     if stats.entries > 0 {
         let total = stats.compiled + stats.interpreted;
         writeln!(

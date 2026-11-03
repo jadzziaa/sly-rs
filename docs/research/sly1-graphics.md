@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:22:22Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:45:28Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:22:22Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:45:28Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -123,6 +123,7 @@ through our GS alone, a repeatable benchmark of drawing.
 | Recompiled, drawing queued to a drawer | 16.7 s | 18 ms a field | 16 ms a field |
 | Recompiled, four-lane VU float operations | 16.1 s | 15 ms a field | 17 ms a field |
 | Interpreted, four-lane VU float operations | 26.8 s | 32 ms a field | 31 ms a field |
+| Interpreted, faster EE | 23.4 s | | |
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals
@@ -239,14 +240,40 @@ build with translated microcode gives the same values.) The changes:
   the queued batches read, and a palette for a CLUT load; with uploads
   written out of order, it fails.
 
+- **The interpreted EE.** Sampled over the first 600 fields (boot, the
+  dialog, the title: EE work, little VU1), decoding took a third of the
+  main thread, half of it a second decode the run loop made to spot
+  system calls. Changes, all exact by construction:
+  - instructions decode once, through a cache by address used only while
+    memory holds the same word, fetched from main RAM directly;
+  - hooks are looked up only where a bitset says one may be;
+  - instructions run back to back while nothing the run loop checks can
+    change: until the next event or the end of the run, a system call, a
+    hardware write, an instruction that changes interrupt enabling (`ei`,
+    `di`, `mtc0`), a VU started, a hooked or kernel return address; and
+    only while no IOP packet waits (its delivery depends on RAM) and no
+    compiled code is attached. These are the points where compiled code
+    hands back, so the checks see what they saw.
+
+  The machine finishes those 600 fields in 1.37 s instead of 2.19 s
+  (`run` now reports when the machine finished and how long the GS took
+  after it), about 2 ms a field. Lockstep with the replay's presses, the
+  recompiled machine against the interpreter, is equal for 1500 fields.
+  PCSX2's EE interpreter, read for comparison, decodes every instruction
+  through its opcode tables with no cache, and tests events at branches;
+  its idle-loop skip is a speed hack that changes timing. It is a
+  reference for meaning, not a model for speed.
+
 Where the time is now:
-- **Drawing in order.** The 5,818 primitives that texture from what they
-  draw, and the small batches, draw on one thread: about 3 s of the
-  drawer's 6.5 s. The machine still waits for the GS 3.9 s of 16.7 s.
-- **VU1.** About 1 million pairs a 3D field: 15.5 ns a pair interpreted,
-  about 10 translated, with the float operations on four lanes
-  ([vu-translation.md](vu-translation.md)).
-- **The interpreted EE**, in the interpreted build.
+- **The GS in the title stretch.** Over the first 600 fields the machine
+  finishes in 1.4 s and the GS 2.8 s after it: about 30 µs of GS time a
+  primitive (130,000 of them), against about 9 µs over the 1300 fields
+  with the 3D. Not examined yet.
+- **VU1** bounds the interpreted build in 3D: about 1 million pairs a
+  field at 15.5 ns a pair; about 10 translated.
+- **Drawing in order** in the recompiled build: the primitives that
+  texture from what they draw, and the small batches, about 3 s of the
+  drawer's 6.5 s.
 
 ## Open
 
