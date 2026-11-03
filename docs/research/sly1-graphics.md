@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:12:29Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:16:51Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -118,6 +118,8 @@ through our GS alone, a repeatable benchmark of drawing.
 | Drawing on 8 threads | 32.4 s | 25 ms a field | 40 ms a field |
 | The same, recompiled build | 27.6 s | 31 ms a field | 32 ms a field |
 | Recompiled, VU1 microcode translated | 21.7 s | 19 ms a field | 26 ms a field |
+| Recompiled, narrower drawing hazards | 17.2 s | 16 ms a field | 17 ms a field |
+| Interpreted, narrower drawing hazards | 30.1 s | 24 ms a field | 34 ms a field |
 
 Real time is 16.7 ms a field. The recompiled build's EE is faster, but VU1
 and the GS are the same code, so it gains least where VU1 is busiest; it
@@ -174,6 +176,32 @@ build with translated microcode gives the same values.) The changes:
     CLUT load touching its blocks, a copy, a read back, a picture or dump.
   - A primitive textured from its own frame, or reaching past its frame's
     width, is drawn alone.
+  - **Narrower hazards.** Measured on the GS thread over 1300 fields, the
+    front end (parsing and batching) took about 4.5 s; 220,734 primitives
+    drawn alone, one after another, took 9.6 s. The rules were too
+    coarse:
+    - A texture counted as its whole declared size (up to 1024 × 1024).
+      Now it is the texels the primitive can read: the range of its
+      vertices' coordinates (for perspective, of S/Q and T/Q when every Q
+      is positive; for a sprite, at its first and last pixels, as the
+      rasteriser computes them), half a texel more for bilinear filtering
+      and an eighth for rounding, wrapped as CLAMP says.
+    - A depth buffer counted whenever the depth test was on. Now it
+      counts as read when the test compares (GEQUAL, GREATER) and as
+      written when ZMSK is clear: Sly's full-screen strips mask depth, and
+      its tiny 64-pixel-wide passes keep their depth buffer at the frame's
+      own address but test ALWAYS.
+    - A region ran from the start of a rectangle's first page row. Now it
+      is the pages each page row of the rectangle covers.
+    - The batch keeps frame writes, depth writes, depth use and texture
+      reads apart, so a primitive whose depth reads hit another's frame
+      writes (a hazard the old rules missed) also ends the batch.
+
+    Primitives drawn alone fell to 11,704: true page-level overlaps, a
+    4-bit texture kept inside the depth buffer's pages. Two tests guard
+    the rules: every pixel of random rectangles lies in its region, in
+    every format and width; and the narrowed cases draw on 4 threads what
+    they draw on one. Three runs of 1300 fields give the same GS memory.
   - Local memory is atomic words, so the threads share it without
     `unsafe`.
   - The GS dump replay draws in 0.055 s on 8 threads (0.204 s on one).
@@ -181,13 +209,12 @@ build with translated microcode gives the same values.) The changes:
     of the host's, at most 8. Past 4 it gains nothing in the game.
 
 Where the time is now:
-- **The GS.** With VU1's microcode translated
-  ([vu-translation.md](vu-translation.md)), the recompiled build waits for
-  the GS 8.3 s of 21.7 s: the GS's single front end (parsing, batching,
-  waiting for each batch) falls behind. Overlapping a batch's drawing with
-  the next batch's parsing is the next step.
+- **The GS.** The recompiled build still waits for it 4.2 s of 17.2 s:
+  the GS thread hands each batch to the drawing threads and waits for it.
+  Drawing a batch while the next one is parsed is the next step.
 - **VU1.** About 1 million pairs a 3D field: 19.5 ns a pair interpreted,
   10.8 translated. What is left is the exact float arithmetic.
+- **The interpreted EE**, in the interpreted build.
 
 ## Open
 

@@ -130,7 +130,7 @@ pub(crate) fn run(
     )?;
     let mut hw = machine.hw.borrow_mut();
     writeln!(out, "  DMA kicks: {:?}", hw.dma_kicks)?;
-    let (memory_hash, d, drawn) = hw.gs.with(|gs| {
+    let (memory_hash, d, drawn, batching) = hw.gs.with(|gs| {
         let hash = gs
             .mem
             .to_bytes()
@@ -138,7 +138,12 @@ pub(crate) fn run(
             .fold(0xCBF2_9CE4_8422_2325u64, |h, &b| {
                 (h ^ u64::from(b)).wrapping_mul(0x100_0000_01B3)
             });
-        (hash, gs.draw_time, gs.drawn)
+        (
+            hash,
+            gs.draw_time,
+            gs.drawn,
+            (gs.alone, gs.batches, gs.parallel_batches),
+        )
     });
     writeln!(out, "  GS memory hash {memory_hash:016x}")?;
     writeln!(
@@ -167,8 +172,11 @@ pub(crate) fn run(
     )?;
     writeln!(
         out,
-        "  GS: {} primitives drawn; display {:x?}",
+        "  GS: {} primitives drawn, {} of them alone; {} batches, {} on several threads; display {:x?}",
         drawn,
+        batching.0,
+        batching.1,
+        batching.2,
         hw.gs_display()
     )?;
     writeln!(out, "  IOP commands: {:x?}", machine.iop.commands)?;

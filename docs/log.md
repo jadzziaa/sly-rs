@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: Drawing hazards narrowed (texels read, depth by use, per-row regions): primitives drawn alone fell from 220,734 to 11,704. [research/sly1-graphics.md](research/sly1-graphics.md) and [research/vu-translation.md](research/vu-translation.md) correct the claim that the GS front end was the limit.
 * **Update**: [research/sly1-graphics.md](research/sly1-graphics.md) notes that the state hash now covers the VUs and the replay was re-recorded; [research/vu-translation.md](research/vu-translation.md) states the shared-semantics property.
 * **Creation**: [research/vu-translation.md](research/vu-translation.md): VU microcode translated ahead of time, how it is matched and checked, and what it gains. Plan phase 6 status and the speed figures in [research/sly1-graphics.md](research/sly1-graphics.md) updated.
 * **Update**: Fixed the recompiled build, which had diverged from the interpreter since the event-check change: compiled hardware writes now reschedule the next event. `test-full` now runs the recompiled build in lockstep and through the replay. Recompiled speed added to [research/sly1-graphics.md](research/sly1-graphics.md).

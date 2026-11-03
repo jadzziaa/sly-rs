@@ -10,15 +10,23 @@
 //! So a batch ends (is drawn) before:
 //! - a primitive that textures from blocks the batch writes, or writes
 //!   blocks it textures from;
+//! - a primitive whose depth test or depth writes touch blocks the batch
+//!   writes as frame, or whose frame touches blocks the batch uses as
+//!   depth;
 //! - a primitive with another frame or depth buffer;
-//! - an upload into blocks the batch reads or writes, a CLUT load from
-//!   blocks it writes, a copy between buffers, a read back;
+//! - an upload into blocks the batch uses, a CLUT load from blocks it
+//!   writes, a copy between buffers, a read back;
 //! - anything that reads local memory from outside (pictures, dumps).
 //!
-//! A primitive whose texture is its own frame or depth buffer, that reaches
-//! past its frame's width (where pixels of one row share pages with the
-//! next), or whose depth buffer overlaps its frame, is drawn alone, in order.
-//! Regions are conservative: whole pages of the rows a primitive covers.
+//! A primitive whose texture overlaps its own frame or the depth it writes,
+//! that reaches past its frame's width (where pixels of one row share pages
+//! with the next), or whose depth buffer, where it uses it, overlaps its
+//! frame, is drawn alone, in order.
+//!
+//! Footprints are conservative: on each page row a rectangle covers, the
+//! pages from its first column's to its last's. A texture's rectangle is
+//! the texels the primitive can read ([`Prim::texels`]); a depth buffer
+//! counts only where the depth test compares or depth is written.
 
 use rayon::prelude::*;
 
@@ -38,40 +46,68 @@ const PARALLEL_MIN: u64 = 16 * 1024;
 /// Primitives a batch holds at most.
 const MAX_PRIMS: usize = 16 * 1024;
 
-/// Blocks `start .. start + count` (modulo the memory's size).
+/// Blocks of local memory: `rows` runs of `span` blocks, the first at
+/// `start`, each `stride` blocks after the one before (all modulo the
+/// memory's size). A rectangle of a buffer covers, on each page row, the
+/// pages from its left column's to its right column's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Region {
     start: u32,
-    count: u32,
+    span: u32,
+    stride: u32,
+    rows: u32,
 }
 
 impl Region {
     /// All of local memory.
-    pub(crate) const ALL: Self = Self {
-        start: 0,
-        count: BLOCKS,
-    };
+    pub(crate) const ALL: Self = Self::run(0, BLOCKS);
+
+    /// Blocks `start .. start + count`.
+    const fn run(start: u32, count: u32) -> Self {
+        Self {
+            start,
+            span: count,
+            stride: 0,
+            rows: 1,
+        }
+    }
 
     /// The blocks a rectangle (x0, x1, y0, y1, inclusive) of a buffer may
-    /// touch: every page from the first row's to the last pixel's.
+    /// touch: on each of its page rows, the pages from its first column's to
+    /// its last's.
     pub(crate) fn of(psm: Psm, bp: u32, bw: u32, rect: [i32; 4]) -> Self {
         let (w_shift, h_shift, pages_per_row) = page_shape(psm, bw);
         let [x0, x1, y0, y1] = rect.map(|c| c.max(0) as u32);
-        let _ = x0;
-        let first = (y0 >> h_shift) * pages_per_row;
-        let last = (y1 >> h_shift) * pages_per_row + (x1 >> w_shift);
+        let (x0, x1) = (x0.min(x1), x0.max(x1));
+        let (y0, y1) = (y0.min(y1), y0.max(y1));
+        let (r0, r1) = (y0 >> h_shift, y1 >> h_shift);
+        let (p0, p1) = (x0 >> w_shift, x1 >> w_shift);
+        let first = r0 * pages_per_row + p0;
+        let start = (bp + first * 32) % BLOCKS;
+        let span = (p1 - p0 + 1) * 32;
+        let stride = pages_per_row * 32;
+        if r0 == r1 || span >= stride {
+            // One run: from the first row's first page to the last's last.
+            let last = r1 * pages_per_row + p1;
+            return Self::run(start, ((last - first + 1) * 32).min(BLOCKS));
+        }
         Self {
-            start: (bp + first * 32) % BLOCKS,
-            count: ((last - first + 1) * 32).min(BLOCKS),
+            start,
+            span,
+            stride,
+            rows: r1 - r0 + 1,
         }
     }
 
     /// The region as ranges that do not wrap.
     fn ranges(self) -> impl Iterator<Item = (u32, u32)> {
-        let end = self.start + self.count;
-        let first = (self.start, end.min(BLOCKS));
-        let second = (end > BLOCKS).then(|| (0, end - BLOCKS));
-        std::iter::once(first).chain(second)
+        (0..self.rows).flat_map(move |r| {
+            let start = (self.start + r * self.stride) % BLOCKS;
+            let end = start + self.span.min(BLOCKS);
+            let first = (start, end.min(BLOCKS));
+            let second = (end > BLOCKS).then(|| (0, end - BLOCKS));
+            std::iter::once(first).chain(second)
+        })
     }
 
     fn overlaps(self, other: Self) -> bool {
@@ -142,17 +178,53 @@ type Target = ((Psm, u32, u32), Option<(Psm, u32)>);
 pub(crate) struct Batch {
     pool: Option<rayon::ThreadPool>,
     prims: Vec<Prim>,
-    written: Blocks,
-    read: Blocks,
+    /// Blocks written as frame, written as depth, used as depth (tested or
+    /// written), read as texture.
+    frame: Blocks,
+    depth_written: Blocks,
+    depth: Blocks,
+    texture: Blocks,
     target: Option<Target>,
     pixels: u64,
     tiles: Vec<Vec<u32>>,
 }
 
-/// The blocks a primitive reads (its texture) and writes (frame, depth).
+impl Batch {
+    /// Whether a primitive with this footprint must wait for the batch: it
+    /// reads what the batch writes or writes what it reads, other than the
+    /// same frame or depth pixels, which stay in one tile.
+    fn conflicts(&self, f: &Footprint) -> bool {
+        let written = |r: Region| self.frame.hits(r) || self.depth_written.hits(r);
+        f.texture.is_some_and(written)
+            || self.texture.hits(f.frame)
+            || self.depth.hits(f.frame)
+            || f.depth
+                .is_some_and(|d| self.frame.hits(d) || (f.depth_written && self.texture.hits(d)))
+    }
+
+    fn clear(&mut self) {
+        self.prims.clear();
+        for set in [
+            &mut self.frame,
+            &mut self.depth_written,
+            &mut self.depth,
+            &mut self.texture,
+        ] {
+            set.clear();
+        }
+        self.target = None;
+        self.pixels = 0;
+    }
+}
+
+/// The blocks a primitive reads (its texture, the depth it tests) and
+/// writes (frame, depth).
 struct Footprint {
     frame: Region,
+    /// The depth buffer, if the primitive uses it at all.
     depth: Option<Region>,
+    /// Whether it writes the depth buffer.
+    depth_written: bool,
     texture: Option<Region>,
 }
 
@@ -160,14 +232,18 @@ fn footprint(prim: &Prim) -> Footprint {
     let p = &prim.pipe;
     let (fpsm, fbp, fbw) = p.frame;
     let texture = p.tex_psm.filter(|_| p.textured()).map(|psm| {
-        let (w, h) = (1i32 << p.tex.tw.min(10), 1i32 << p.tex.th.min(10));
-        Region::of(psm, p.tex.tbp, p.tex.tbw, [0, w - 1, 0, h - 1])
+        // The texels it reads, or every texel it could address.
+        let rect = prim.texels().unwrap_or([0, 0x7FF, 0, 0x7FF]);
+        Region::of(psm, p.tex.tbp, p.tex.tbw, rect)
     });
+    let (depth_read, depth_written) = p.depth_use();
     Footprint {
         frame: Region::of(fpsm, fbp, fbw, prim.bbox),
         depth: p
             .zbuf
+            .filter(|_| depth_read || depth_written)
             .map(|(zpsm, zbp)| Region::of(zpsm, zbp, fbw, prim.bbox)),
+        depth_written,
         texture,
     }
 }
@@ -205,31 +281,31 @@ impl Gs {
         let alone = fbw == 0
             || prim.bbox[1] >= (fbw * 64) as i32
             || f.depth.is_some_and(|d| d.overlaps(f.frame))
-            || f.texture
-                .is_some_and(|t| t.overlaps(f.frame) || f.depth.is_some_and(|d| t.overlaps(d)));
+            || f.texture.is_some_and(|t| {
+                t.overlaps(f.frame) || f.depth.is_some_and(|d| f.depth_written && t.overlaps(d))
+            });
         if alone {
+            self.alone += 1;
             self.flush();
             Raster { mem: &self.mem }.prim(&prim, prim.bbox);
             return;
         }
         let target = (p.frame, p.zbuf);
         let b = &self.batch;
-        if b.target.is_some_and(|t| t != target)
-            || f.texture.is_some_and(|t| b.written.hits(t))
-            || b.read.hits(f.frame)
-            || f.depth.is_some_and(|d| b.read.hits(d))
-            || b.prims.len() >= MAX_PRIMS
-        {
+        if b.target.is_some_and(|t| t != target) || b.conflicts(&f) || b.prims.len() >= MAX_PRIMS {
             self.flush();
         }
         let b = &mut self.batch;
         b.target = Some(target);
-        b.written.mark(f.frame);
+        b.frame.mark(f.frame);
         if let Some(d) = f.depth {
-            b.written.mark(d);
+            b.depth.mark(d);
+            if f.depth_written {
+                b.depth_written.mark(d);
+            }
         }
         if let Some(t) = f.texture {
-            b.read.mark(t);
+            b.texture.mark(t);
         }
         let [x0, x1, y0, y1] = prim.bbox;
         b.pixels += ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
@@ -243,8 +319,10 @@ impl Gs {
             return;
         }
         let raster = Raster { mem };
+        self.batches += 1;
         match &b.pool {
             Some(pool) if b.pixels >= PARALLEL_MIN => {
+                self.parallel_batches += 1;
                 if b.tiles.is_empty() {
                     b.tiles = vec![Vec::new(); TILES * TILES];
                 }
@@ -288,17 +366,17 @@ impl Gs {
                 }
             }
         }
-        b.prims.clear();
-        b.written.clear();
-        b.read.clear();
-        b.target = None;
-        b.pixels = 0;
+        b.clear();
     }
 
     /// Before an upload writes `region`: the batch is drawn first if it
     /// reads or writes any of it.
     pub(crate) fn before_upload(&mut self, region: Region) {
-        if self.batch.read.hits(region) || self.batch.written.hits(region) {
+        let b = &self.batch;
+        if [&b.frame, &b.depth, &b.texture]
+            .iter()
+            .any(|set| set.hits(region))
+        {
             self.flush();
         }
     }
@@ -317,7 +395,7 @@ impl Gs {
             let psm = if t.cpsm < 2 { Psm::Ct32 } else { Psm::Ct16 };
             Region::of(psm, t.cbp, 1, [0, 15, 0, 15])
         };
-        if self.batch.written.hits(region) {
+        if self.batch.frame.hits(region) || self.batch.depth_written.hits(region) {
             self.flush();
         }
     }
@@ -332,26 +410,156 @@ mod tests {
     fn regions_cover_whole_pages_and_wrap() {
         // A 640-wide CT32 buffer at block 0: rows 0..31 are pages 0..9.
         let r = Region::of(Psm::Ct32, 0, 10, [0, 639, 0, 31]);
-        assert_eq!((r.start, r.count), (0, 320));
+        assert_eq!(r, Region::run(0, 320));
         // Rows 32..63 start at page 10.
         assert_eq!(Region::of(Psm::Ct32, 0, 10, [0, 0, 32, 63]).start, 320);
         // A region past the end wraps to block 0.
         let w = Region::of(Psm::Ct32, BLOCKS - 32, 1, [0, 63, 0, 63]);
-        assert!(w.overlaps(Region { start: 0, count: 1 }));
-        assert!(!w.overlaps(Region {
-            start: 32,
-            count: 1
-        }));
+        assert!(w.overlaps(Region::run(0, 1)));
+        assert!(!w.overlaps(Region::run(32, 1)));
         let mut set = Blocks::default();
         set.mark(w);
-        assert!(set.hits(Region {
-            start: 31,
-            count: 1
-        }));
-        assert!(!set.hits(Region {
-            start: 32,
-            count: 64
-        }));
+        assert!(set.hits(Region::run(31, 1)));
+        assert!(!set.hits(Region::run(32, 64)));
+        // A rectangle two pages wide, over three page rows of a buffer
+        // ten pages wide: pages 4-5, 14-15 and 24-25 only.
+        let r = Region::of(Psm::Ct32, 0, 10, [256, 383, 0, 95]);
+        let pages: Vec<(u32, u32)> = r.ranges().collect();
+        assert_eq!(pages, [(128, 192), (448, 512), (768, 832)]);
+        assert!(!r.overlaps(Region::run(192, 256)));
+        assert!(r.overlaps(Region::run(500, 1)));
+    }
+
+    /// Every pixel of a rectangle lies in the rectangle's region, in every
+    /// format, for any base and width (odd ones and 0 included).
+    #[test]
+    fn regions_hold_every_pixel_of_their_rectangle() {
+        use crate::Memory;
+        let formats = [
+            Psm::Ct32,
+            Psm::Ct24,
+            Psm::Ct16,
+            Psm::Ct16s,
+            Psm::T8,
+            Psm::T4,
+            Psm::T8h,
+            Psm::T4hl,
+            Psm::T4hh,
+            Psm::Z32,
+            Psm::Z24,
+            Psm::Z16,
+            Psm::Z16s,
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |n: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % u64::from(n)) as u32
+        };
+        for psm in formats {
+            for _ in 0..40 {
+                let (bp, bw) = (next(BLOCKS), next(21));
+                let (x0, y0) = (next(1800), next(1800));
+                let (x1, y1) = (x0 + next(200), y0 + next(200));
+                let region = Region::of(psm, bp, bw, [x0, x1, y0, y1].map(|c| c as i32));
+                let mut set = Blocks::default();
+                set.mark(region);
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        let block = Memory::locate(psm, bp, bw, x, y).block();
+                        assert!(
+                            set.hits(Region::run(block, 1)),
+                            "{psm:?} bp {bp} bw {bw}: ({x}, {y}) in block {block}, outside {region:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The cases the footprints were narrowed for, drawn on 4 threads and
+    /// on 1: full-screen strips textured from the other half of a double
+    /// buffer, with the depth buffer just after it and masked; a depth
+    /// buffer at the frame's own address, tested ALWAYS and masked; and a
+    /// 4-bit texture stored inside the depth buffer's pages while depth is
+    /// tested and written.
+    #[test]
+    fn narrowed_footprints_draw_what_one_thread_draws() {
+        let draw = |threads: usize| {
+            let mut gs = Gs::default();
+            gs.set_threads(threads);
+            let tri = |gs: &mut Gs, k: u64, w: u64, h: u64, uv: bool| {
+                gs.write(addr::RGBAQ, 0x8000_0000 | (k * 0x0103_0507));
+                for (j, (x, y)) in [
+                    (k * 13 % w, k * 7 % h),
+                    (k * 31 % w, h - 1 - k % h),
+                    (w - 1 - k * 5 % w, k * 11 % h),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if uv {
+                        gs.write(addr::UV, ((x % 64) * 16) | (((y % 64) * 16) << 16));
+                    }
+                    let z = (k * 977 + j as u64 * 131) & 0xFFFF;
+                    gs.write(addr::XYZ2, (x * 16) | (y * 16) << 16 | z << 32);
+                }
+            };
+            gs.write(addr::SCISSOR_1, 639 << 16 | 223 << 48);
+            // The second buffer (block 2240), then strips into the first
+            // textured from it; depth at 4480, masked, tested ALWAYS.
+            gs.write(addr::FRAME_1, 0x46 | 10 << 16);
+            gs.write(addr::PRIM, 3 | 1 << 3);
+            for k in 0..30 {
+                tri(&mut gs, k, 640, 224, false);
+            }
+            gs.write(addr::FRAME_1, 10 << 16);
+            gs.write(addr::ZBUF_1, 0x8C | 1 << 32);
+            gs.write(addr::TEST_1, 1 << 16 | 1 << 17);
+            gs.write(
+                addr::TEX0_1,
+                0x8C0 | 10 << 14 | 10 << 26 | 10 << 30 | 1 << 35,
+            );
+            gs.write(addr::TEX1_1, 1 << 5);
+            gs.write(addr::PRIM, 6 | 1 << 4 | 1 << 8);
+            for k in 0..20u64 {
+                gs.write(addr::UV, (k * 32 * 16 + 5) | 3 << 16);
+                gs.write(addr::XYZ2, (k * 32 * 16) | 16 << 16);
+                gs.write(addr::UV, ((k + 1) * 32 * 16 + 5) | (224 * 16) << 16);
+                gs.write(addr::XYZ2, ((k + 1) * 32 * 16) | (223 * 16) << 16);
+            }
+            // A 64-wide buffer whose depth buffer is itself.
+            gs.write(addr::FRAME_1, 0x12C | 1 << 16);
+            gs.write(addr::ZBUF_1, 0x12C | 1 << 32);
+            gs.write(addr::PRIM, 3 | 1 << 3);
+            for k in 0..30 {
+                tri(&mut gs, k, 64, 64, false);
+            }
+            // Depth tested and written while texturing (T4, CLUT from the
+            // frame) from blocks inside the depth buffer's pages.
+            gs.write(addr::FRAME_1, 10 << 16);
+            gs.write(addr::ZBUF_1, 0x8C);
+            gs.write(addr::TEST_1, 1 << 16 | 2 << 17);
+            gs.write(
+                addr::TEX0_1,
+                0x1680 | 8 << 14 | 0x14 << 20 | 6 << 26 | 6 << 30 | 1 << 35 | 1 << 61,
+            );
+            gs.write(addr::PRIM, 3 | 1 << 3 | 1 << 4 | 1 << 8);
+            for k in 0..40 {
+                tri(&mut gs, k, 640, 224, true);
+            }
+            gs.flush();
+            // The strips and the self-depth buffer batch now.
+            assert!(
+                threads == 1 || gs.parallel_batches >= 3,
+                "{}",
+                gs.parallel_batches
+            );
+            gs.mem.to_bytes()
+        };
+        let same = draw(4) == draw(1);
+        assert!(same, "the memory differs");
     }
 
     /// The same packets drawn serially and on threads leave the same

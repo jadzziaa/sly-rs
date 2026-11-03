@@ -10,9 +10,9 @@ sources:
   - id: plan
     resource: docs/plan.md, phase 6
     title: 'The plan: ahead-of-time translation of every .DVP overlay'
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:12:29Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T07:41:07Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T08:16:51Z }
 ---
 
 # VU microcode translated ahead of time
@@ -107,9 +107,10 @@ Real time is 16.7 ms a field.
   `value`, `chop` and the adder's alignment branch-free changed little.
   Vectorising the four components (SSE2 has what is needed) would help
   the interpreter as much as the translations.
-- **The GS.** The machine now waits for the GS 8.3 s of its 21.7 s: the
-  GS's single front end (parsing, batching, waiting for each batch) is the
-  next limit.
+- **The GS.** The machine waited for the GS 8.3 s of its 21.7 s. This
+  note first blamed the GS's front end; measured, most of that time was
+  primitives drawn one after another under too coarse hazard rules (see
+  [sly1-graphics.md](sly1-graphics.md), "Narrower hazards").
 
 [^runs]: Runs of Sly 1 with interpreted and translated VU microcode
 [^plan]: The plan: ahead-of-time translation of every .DVP overlay

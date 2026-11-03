@@ -60,6 +60,14 @@ impl Pipe {
     pub(crate) const fn textured(&self) -> bool {
         self.tme
     }
+
+    /// Whether the depth test uses the depth buffer's values, and whether
+    /// fragments may write it.
+    pub(crate) fn depth_use(&self) -> (bool, bool) {
+        let ztst = bits(self.test, 17, 2);
+        let on = self.zbuf.is_some() && ztst != 0;
+        (on && ztst >= 2, on && !self.zmsk)
+    }
 }
 
 /// A primitive ready to draw: its kind (PRIM's low bits), vertices, the
@@ -71,6 +79,105 @@ pub(crate) struct Prim {
     kind: u64,
     v: [Vertex; 3],
     pub(crate) bbox: [i32; 4],
+}
+
+impl Prim {
+    /// The texels the primitive may read (u0, u1, v0, v1, inclusive),
+    /// after CLAMP's wrapping; `None` when that is not known to be less
+    /// than the whole texture.
+    ///
+    /// Every pixel's texture coordinates lie within the vertices': UV and
+    /// sprites interpolate linearly, and perspective (S, T, Q) gives a
+    /// weighted average of the vertices' S/Q and T/Q when every Q is
+    /// positive. A sprite's are taken at its first and last pixels.
+    /// Bilinear filtering reaches half a texel either side; an eighth more
+    /// covers truncation and rounding.
+    pub(crate) fn texels(&self) -> Option<[i32; 4]> {
+        let p = &self.pipe;
+        let n = match self.kind {
+            0 => 1,
+            1 | 2 | 6 => 2,
+            _ => 3,
+        };
+        let vertices = &self.v[..n];
+        if !p.fst && vertices.iter().any(|v| v.q.is_nan() || v.q <= 0.0) {
+            return None;
+        }
+        let mut coords = [[0.0f32; 2]; 3];
+        for (c, v) in coords.iter_mut().zip(vertices) {
+            let uv = attrs(p, v).uv;
+            *c = [uv.0, uv.1];
+        }
+        let mut count = n;
+        if self.kind == 6 {
+            // A sprite samples at its pixels only: its coordinates at the
+            // first and last pixels it may draw, as the rasteriser gets
+            // them.
+            let at = |v: &Vertex| [v.x as i32 - p.offset.0, v.y as i32 - p.offset.1];
+            let (a, b) = (at(&self.v[0]), at(&self.v[1]));
+            let mut sampled = [[0.0; 2]; 2];
+            for k in 0..2 {
+                let ((s0, c0), (s1, c1)) = if a[k] <= b[k] {
+                    ((a[k], coords[0][k]), (b[k], coords[1][k]))
+                } else {
+                    ((b[k], coords[1][k]), (a[k], coords[0][k]))
+                };
+                if s0 == s1 {
+                    return None;
+                }
+                for (end, pixel) in [self.bbox[2 * k], self.bbox[2 * k + 1]]
+                    .into_iter()
+                    .enumerate()
+                {
+                    sampled[end][k] = sprite_coord(p.fst, c0, c1, s0, s1, pixel * 16);
+                }
+            }
+            coords[..2].copy_from_slice(&sampled);
+            count = 2;
+        }
+        let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+        for c in &coords[..count] {
+            for k in 0..2 {
+                if !c[k].is_finite() {
+                    return None;
+                }
+                lo[k] = lo[k].min(c[k]);
+                hi[k] = hi[k].max(c[k]);
+            }
+        }
+        let cl = p.clamp;
+        let axis = |k: usize, mode: u32, size: i32, min: i32, max: i32| -> [i32; 2] {
+            // Saturating: far outside the texture only widens the range.
+            let (c0, c1) = (
+                (lo[k] - 0.625).floor() as i32,
+                (hi[k] + 0.625).floor() as i32,
+            );
+            match mode {
+                0 if c0 >= 0 && c1 < size => [c0, c1],
+                0 => [0, size - 1],
+                1 => [c0.clamp(0, size - 1), c1.clamp(0, size - 1)],
+                2 if min <= max => [c0.clamp(min, max), c1.clamp(min, max)],
+                // REGION_REPEAT: (c & min) | max lies within max..=min | max.
+                3 => [max, min | max],
+                _ => [0, 0x7FF],
+            }
+        };
+        let [u0, u1] = axis(
+            0,
+            bits(cl, 0, 2),
+            1 << p.tex.tw.min(10),
+            bits(cl, 4, 10) as i32,
+            bits(cl, 14, 10) as i32,
+        );
+        let [v0, v1] = axis(
+            1,
+            bits(cl, 2, 2),
+            1 << p.tex.th.min(10),
+            bits(cl, 24, 10) as i32,
+            bits(cl, 34, 10) as i32,
+        );
+        Some([u0, u1, v0, v1])
+    }
 }
 
 /// A fragment's interpolated attributes.
@@ -277,18 +384,7 @@ impl Raster<'_> {
         let px1 = ((x1 + 15) >> 4).min(cx1 + 1);
         let py0 = ((y0 + 15) >> 4).max(cy0);
         let py1 = ((y1 + 15) >> 4).min(cy1 + 1);
-        // Texture coordinates at each sample point. UV (FST) is fixed
-        // point, 1/16 texel, and interpolates exactly; S/T/Q in floats.
-        let fst = p.fst;
-        let at = |c0: f32, c1: f32, s0: i32, s1: i32, s: i32| -> f32 {
-            if fst {
-                let (c0, c1) = ((c0 * 16.0) as i64, (c1 * 16.0) as i64);
-                let c = c0 + ((c1 - c0) * i64::from(s - s0)).div_euclid(i64::from(s1 - s0));
-                c as f32 / 16.0
-            } else {
-                c0 + (c1 - c0) / (s1 - s0) as f32 * (s - s0) as f32
-            }
-        };
+        let at = |c0, c1, s0, s1, s| sprite_coord(p.fst, c0, c1, s0, s1, s);
         for y in py0..py1 {
             let v = at(v0, v1, y0, y1, y * 16);
             for x in px0..px1 {
@@ -695,6 +791,20 @@ impl Raster<'_> {
             _ => (rgba, p.fbmsk),
         };
         self.mem.set(at, (new & !mask) | (dst & mask));
+    }
+}
+
+/// A sprite's texture coordinate at sample position `s` (1/16 pixel),
+/// between corners at `s0` and `s1` (`s0 < s1`) with coordinates `c0` and
+/// `c1`. UV (FST) is fixed point, 1/16 texel, and interpolates exactly;
+/// S/T/Q in floats.
+fn sprite_coord(fst: bool, c0: f32, c1: f32, s0: i32, s1: i32, s: i32) -> f32 {
+    if fst {
+        let (c0, c1) = ((c0 * 16.0) as i64, (c1 * 16.0) as i64);
+        let c = c0 + ((c1 - c0) * i64::from(s - s0)).div_euclid(i64::from(s1 - s0));
+        c as f32 / 16.0
+    } else {
+        c0 + (c1 - c0) / (s1 - s0) as f32 * (s - s0) as f32
     }
 }
 

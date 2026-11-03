@@ -97,6 +97,14 @@ pub struct Pixel {
     mask: u32,
 }
 
+impl Pixel {
+    /// The block of local memory it lies in.
+    #[cfg(test)]
+    pub(crate) const fn block(self) -> u32 {
+        (self.word / 64) as u32
+    }
+}
+
 /// The address of pixel (`x`, `y`) of a `psm` buffer at `bp` with width
 /// `bw`.
 /// The address from the block and column tables directly: the reference
