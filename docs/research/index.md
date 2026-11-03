@@ -9,6 +9,10 @@
 * [How Sly 1's graphics reach the GS in sly-rs](sly1-graphics.md) - The path Sly 1's frames take through DMA, the scratchpad, VIF0/VIF1, VU0/VU1 and the GS as sly-rs models it, and the four missing pieces that each stopped the first level from drawing. (draft)
 * [VU microcode translated ahead of time](vu-translation.md) - How sly-rs translates the VU microcode overlays into Rust at recompile time, how the translations are matched against what the game uploads and checked against the interpreter bit for bit, and what they gain on Sly 1.
 
+# Proposal
+
+* [A specialising VU1 translator](vu-specialising-translator.md) - Why VU1 still costs 7.8 ns a pair after the float switch, and the design of a translator that emits per-pair code with registers in locals and flag timing resolved at generation time (as rac-rs does), with its budget, steps and checks. (draft)
+
 # Research Note
 
 * [What the three discs contain: a survey](disc-survey.md) - Measured facts about the user's three Sly Cooper USA disc images - files, executables, sections, instruction mix, VU microcode overlays, IOP modules and where the game data hides - that size and shape the recompilation plan.
