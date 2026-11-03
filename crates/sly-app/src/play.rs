@@ -72,6 +72,7 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
     let shared = Arc::new(Shared::default());
     let proxy = event_loop.create_proxy();
     let bindings = Bindings::new(&options.settings.keys)?;
+    GamepadMap::new(&options.settings.gamepad)?;
     let (window_size, pause_on_focus_loss) = (
         options.settings.window,
         options.settings.pause_on_focus_loss,
@@ -126,9 +127,13 @@ fn emulate(
         }
         None => (Script::default(), 0),
     };
+    let gamepad_map = GamepadMap::new(&options.settings.gamepad)?;
     let mut gamepads = gilrs::Gilrs::new()
         .map_err(|e| tracing::warn!("no gamepads: {e}"))
         .ok();
+    for (_, pad) in gamepads.iter().flat_map(gilrs::Gilrs::gamepads) {
+        report(&pad);
+    }
     let mut recorder = Recorder::default();
     let mut next = Instant::now();
     while !shared.quit.load(Ordering::Relaxed) {
@@ -141,7 +146,10 @@ fn emulate(
         let live = field >= ahead;
         let pad = if live {
             let keyboard = *shared.keyboard.lock().map_err(|_| anyhow!("input lock"))?;
-            combine(keyboard, gamepads.as_mut().map(gamepad))
+            combine(
+                keyboard,
+                gamepads.as_mut().map(|g| gamepad(g, &gamepad_map)),
+            )
         } else {
             script.input_at(field)
         };
@@ -227,35 +235,89 @@ fn combine(keyboard: PadInput, gamepad: Option<PadInput>) -> PadInput {
     }
 }
 
+/// Says which gamepad is in use and how its buttons are placed.
+fn report(pad: &gilrs::Gamepad<'_>) {
+    let placed = match pad.mapping_source() {
+        gilrs::MappingSource::SdlMappings => "buttons placed by SDL's controller database",
+        _ => {
+            "not in SDL's controller database: buttons as its driver reports them; \
+             if they are in the wrong places, see [play.gamepad] in sly-rs.example.toml"
+        }
+    };
+    println!("gamepad: {} ({placed})", pad.name());
+}
+
+/// The gamepad's buttons, by gilrs's names, and the DualShock button
+/// (its bit, as `sly_common::replay::BUTTONS`) each gives.
+const DEFAULT_GAMEPAD: [(&str, gilrs::Button, &str); 16] = [
+    ("select", gilrs::Button::Select, "select"),
+    ("l3", gilrs::Button::LeftThumb, "l3"),
+    ("r3", gilrs::Button::RightThumb, "r3"),
+    ("start", gilrs::Button::Start, "start"),
+    ("up", gilrs::Button::DPadUp, "up"),
+    ("right", gilrs::Button::DPadRight, "right"),
+    ("down", gilrs::Button::DPadDown, "down"),
+    ("left", gilrs::Button::DPadLeft, "left"),
+    ("l2", gilrs::Button::LeftTrigger2, "l2"),
+    ("r2", gilrs::Button::RightTrigger2, "r2"),
+    ("l1", gilrs::Button::LeftTrigger, "l1"),
+    ("r1", gilrs::Button::RightTrigger, "r1"),
+    ("north", gilrs::Button::North, "triangle"),
+    ("east", gilrs::Button::East, "circle"),
+    ("south", gilrs::Button::South, "cross"),
+    ("west", gilrs::Button::West, "square"),
+];
+
+/// Which DualShock button each gamepad button gives.
+struct GamepadMap(Vec<(gilrs::Button, u16)>);
+
+impl GamepadMap {
+    /// The defaults (by position: the bottom face button is Cross) with
+    /// `overrides` (`[play.gamepad]`) in place.
+    fn new(overrides: &std::collections::BTreeMap<String, String>) -> Result<Self> {
+        for name in overrides.keys() {
+            if !DEFAULT_GAMEPAD.iter().any(|&(n, _, _)| n == name) {
+                return Err(anyhow!(
+                    "[play.gamepad]: no gamepad button {name:?} (south, east, north, west, l1, r1, l2, r2, l3, r3, select, start, up, down, left, right)"
+                ));
+            }
+        }
+        DEFAULT_GAMEPAD
+            .iter()
+            .map(|&(name, button, default)| {
+                let target = overrides.get(name).map_or(default, String::as_str);
+                match part(target) {
+                    Some(Part::Button(bit)) => Ok((button, bit)),
+                    _ => Err(anyhow!(
+                        "[play.gamepad]: {name} = {target:?} is not a DualShock button (cross, square, triangle, circle, l1, ...)"
+                    )),
+                }
+            })
+            .collect::<Result<_>>()
+            .map(Self)
+    }
+
+    /// The DualShock buttons `pressed` gives.
+    fn buttons(&self, pressed: impl Fn(gilrs::Button) -> bool) -> u16 {
+        self.0
+            .iter()
+            .filter(|&&(b, _)| pressed(b))
+            .fold(0, |m, &(_, bit)| m | bit)
+    }
+}
+
 /// The first connected gamepad's state, in the DualShock's terms.
-fn gamepad(gilrs: &mut gilrs::Gilrs) -> PadInput {
-    use gilrs::{Axis, Button};
-    while gilrs.next_event().is_some() {}
+fn gamepad(gilrs: &mut gilrs::Gilrs, map: &GamepadMap) -> PadInput {
+    use gilrs::Axis;
+    while let Some(event) = gilrs.next_event() {
+        if matches!(event.event, gilrs::EventType::Connected) {
+            report(&gilrs.gamepad(event.id));
+        }
+    }
     let Some((_, pad)) = gilrs.gamepads().find(|(_, p)| p.is_connected()) else {
         return PadInput::default();
     };
-    // Bits as `sly_common::replay::BUTTONS`.
-    let buttons = [
-        (Button::Select, 0),
-        (Button::LeftThumb, 1),
-        (Button::RightThumb, 2),
-        (Button::Start, 3),
-        (Button::DPadUp, 4),
-        (Button::DPadRight, 5),
-        (Button::DPadDown, 6),
-        (Button::DPadLeft, 7),
-        (Button::LeftTrigger2, 8),
-        (Button::RightTrigger2, 9),
-        (Button::LeftTrigger, 10),
-        (Button::RightTrigger, 11),
-        (Button::North, 12),
-        (Button::East, 13),
-        (Button::South, 14),
-        (Button::West, 15),
-    ]
-    .into_iter()
-    .filter(|&(b, _)| pad.is_pressed(b))
-    .fold(0u16, |m, (_, bit)| m | 1 << bit);
+    let buttons = map.buttons(|b| pad.is_pressed(b));
     // -1..1 to 0..255; the PS2's sticks read 0 at the top.
     #[allow(
         clippy::cast_possible_truncation,
@@ -706,6 +768,30 @@ mod tests {
         assert_eq!(bindings.pad(&[KeyCode::Space]).buttons, 0);
         overrides.insert("jump".to_owned(), "KeyZ".to_owned());
         assert!(Bindings::new(&overrides).is_err());
+    }
+
+    #[test]
+    fn gamepad_buttons_go_by_position_and_can_be_remapped() {
+        use gilrs::Button;
+        let map = GamepadMap::new(&std::collections::BTreeMap::new()).unwrap();
+        assert_eq!(
+            map.buttons(|b| b == Button::South),
+            1 << 14,
+            "bottom: Cross"
+        );
+        assert_eq!(map.buttons(|b| b == Button::West), 1 << 15, "left: Square");
+        // A pad whose driver reports its left and top buttons swapped.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("north".to_owned(), "square".to_owned());
+        overrides.insert("west".to_owned(), "triangle".to_owned());
+        let map = GamepadMap::new(&overrides).unwrap();
+        assert_eq!(map.buttons(|b| b == Button::North), 1 << 15);
+        assert_eq!(map.buttons(|b| b == Button::West), 1 << 12);
+        overrides.insert("paddle".to_owned(), "cross".to_owned());
+        assert!(GamepadMap::new(&overrides).is_err());
+        overrides.remove("paddle");
+        overrides.insert("south".to_owned(), "left-up".to_owned());
+        assert!(GamepadMap::new(&overrides).is_err());
     }
 
     #[test]

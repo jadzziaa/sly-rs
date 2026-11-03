@@ -18,3 +18,15 @@ window = [1280, 896]
 [play.keys]
 # cross = "Space"
 # left-up = "KeyW"
+
+# Gamepad buttons replace the defaults one by one: a gamepad button, by
+# where it sits (south, east, north, west, l1, r1, l2, r2, l3, r3, select,
+# start, up, down, left, right) = the DualShock button it gives. By default
+# they go by position (the bottom face button is Cross, the left one
+# Square). `play` says at start whether SDL's controller database knows
+# your pad; when it does not, Linux may report the left and top face
+# buttons swapped (the 8BitDo Ultimate 2 Wireless does), and this puts
+# them back:
+[play.gamepad]
+# north = "square"
+# west = "triangle"

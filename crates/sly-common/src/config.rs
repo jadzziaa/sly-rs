@@ -75,6 +75,12 @@ pub struct Play {
     /// direction (`left-up`, `right-left`, ...) to a key's name as winit
     /// gives it (`KeyW`, `Space`, `ArrowUp`, `Digit1`, `ShiftLeft`, ...).
     pub keys: BTreeMap<String, String>,
+    /// Gamepad buttons that replace the defaults: a gamepad button, by
+    /// where gilrs places it (`south`, `east`, `north`, `west`, `l1`, `r1`,
+    /// `l2`, `r2`, `l3`, `r3`, `select`, `start`, `up`, `down`, `left`,
+    /// `right`), to the DualShock button it gives (`cross`, `square`, ...
+    /// as in a replay's presses).
+    pub gamepad: BTreeMap<String, String>,
 }
 
 impl Default for Play {
@@ -83,6 +89,7 @@ impl Default for Play {
             pause_on_focus_loss: true,
             window: [1280, 896],
             keys: BTreeMap::new(),
+            gamepad: BTreeMap::new(),
         }
     }
 }

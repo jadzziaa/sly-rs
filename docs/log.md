@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: `[play.gamepad]` remaps gamepad buttons; the prologue plays through; gameplay runs at 56% of console speed headless, VU1 taking 84.5% of host time ([plan](plan.md)).
 * **Update**: The pad reports a configurable DualShock 2 (modeConfig 2), so Sly 1 asks for analog mode and the left stick moves Sly after the binocucom ([boot](research/sly1-boot.md)); interface states renamed from UpdateUi.
 * **Update**: `play` deinterlaces adaptively, with field parity from the GS: still 2D no longer jumps a line every field ([plan](plan.md)).
 * **Update**: VIF0 starts with CYCLE 4, 4, as the BIOS leaves it, and a VIF reset keeps its registers, as in PCSX2: VIF0 had stalled at boot, so the lamps' lights were never found and the title's lamp lit nothing ([graphics](research/sly1-graphics.md)). Replay hashes re-recorded; `tools/pcsx2-frames.sh` takes a `state` press (a savestate).

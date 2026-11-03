@@ -56,8 +56,11 @@ Commands so far:
   then hands over. Keys: WASD left stick, IJKL right stick, arrows D-pad,
   Space Cross, E Circle, Q Square, F Triangle, 2/3 L1/R1, 1/4 L2/R2, G/H
   L3/R3, Enter Start, Backspace Select; P pauses, Escape quits. The game
-  pauses while the window is not focused. Keys and the window's size can be
-  changed under `[play]` in `sly-rs.toml` (see `sly-rs.example.toml`). The
+  pauses while the window is not focused. Keys, gamepad buttons and the
+  window's size can be changed under `[play]` in `sly-rs.toml` (see
+  `sly-rs.example.toml`); `play` says whether SDL's controller database
+  knows your gamepad, and if it does not, its face buttons may need
+  `[play.gamepad]`. The
   recompiled binary below plays faster in busy scenes.
 - `sly-rs format-card card.ps2` writes a freshly formatted 8 MB memory
   card image as PCSX2 keeps them (`--check` reads one and reports on it).
