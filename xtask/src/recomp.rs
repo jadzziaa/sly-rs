@@ -169,6 +169,35 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Plays `games/<game>/replays/<name>.toml` on the generated binary, which
+/// checks its checkpoints.
+pub(crate) fn replay(root: &Path, game: Game, name: &str) -> Result<()> {
+    let binary = root
+        .join("generated")
+        .join(game.key())
+        .join("target/release")
+        .join(game.key());
+    let file = root
+        .join("games")
+        .join(game.key())
+        .join("replays")
+        .join(format!("{name}.toml"));
+    eprintln!(
+        "== recompiled replay: {} replay {}",
+        binary.display(),
+        file.display()
+    );
+    let status = Command::new(&binary)
+        .arg("replay")
+        .arg(&file)
+        .status()
+        .with_context(|| format!("running {}", binary.display()))?;
+    if !status.success() {
+        bail!("the recompiled game missed the replay's checkpoints");
+    }
+    Ok(())
+}
+
 /// Builds the generated binary in release mode and, with `check`, runs it
 /// in lockstep with the interpreter for 300 fields.
 fn build_and_check(dir: &Path, game: Game, check: bool) -> Result<()> {

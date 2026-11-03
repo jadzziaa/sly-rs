@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:02:54Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:29:45Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:02:54Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:29:50Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -116,8 +116,18 @@ through our GS alone, a repeatable benchmark of drawing.
 | Before (`3ed1483`) | 73.5 s | 101 ms a field | 158 ms a field |
 | GS on one thread (`d0824b6`) | 37.4 s | 32 ms a field | 81 ms a field |
 | Drawing on 8 threads | 32.4 s | 25 ms a field | 40 ms a field |
+| The same, recompiled build | 27.6 s | 31 ms a field | 32 ms a field |
 
-Real time is 16.7 ms a field. Earlier figures in this note (29.7 s, about
+Real time is 16.7 ms a field. The recompiled build's EE is faster, but VU1
+and the GS are the same code, so it gains least where VU1 is busiest; it
+waits for the GS 8.2 s of its run. Until the fix below, it was not in the
+same state as the interpreter at all: after the change to event checks
+(`d507a81`), a DMA transfer started from compiled code completed late,
+because the next event was recomputed only after interpreted hardware
+writes. Lockstep failed at field 1 and every replay checkpoint differed;
+the disc tests ran the interpreter alone, so nothing noticed. `cargo xtask
+test-full` now also runs the recompiled build in lockstep and through the
+replay. Earlier figures in this note (29.7 s, about
 35 ms a 3D field) timed the machine without waiting for the GS thread to
 catch up, and were too good. Every change left the results bit for bit the
 same: the whole of GS memory at field 1300 hashes the same, and the

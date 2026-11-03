@@ -3,7 +3,8 @@
 //! - `ci`: everything a change must pass: formatting, clippy, rustdoc, tests,
 //!   `cargo deny` (when installed) and `check-deps`.
 //! - `test-full`: the ignored tests, in release mode: those that need the
-//!   user's discs and the exhaustive ones (every 32-bit word).
+//!   user's discs and the exhaustive ones (every 32-bit word); then Sly 1
+//!   recompiled, in lockstep with the interpreter and through its replay.
 //! - `check-deps`: no `ps2-*` crate may depend on a `sly-*` crate (goal G5
 //!   of docs/plan.md).
 //! - `recomp <game> [--build | --check]`: recompiles a game's executable
@@ -127,7 +128,11 @@ fn test_full(root: &Path) -> Result<()> {
             "--ignored",
         ],
         &[],
-    )
+    )?;
+    // The recompiled build must give the interpreter's results: the disc
+    // tests above run the interpreter alone.
+    recomp::run(root, &["sly1".to_owned(), "--check".to_owned()])?;
+    recomp::replay(root, sly_common::Game::Sly1, "new-game")
 }
 
 /// Fails if any `ps2-*` package depends on a `sly-*` package.

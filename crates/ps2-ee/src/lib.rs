@@ -424,11 +424,15 @@ impl Machine {
                 *self.stats.hooks.entry(name).or_default() += 1;
                 continue;
             }
+            let writes = self.mem.mmio_writes;
             if self.run_compiled(next_event.min(end)) {
+                // Compiled code writes hardware too (a DMA kick, say).
+                if self.mem.mmio_writes != writes {
+                    next_event = next_event.min(self.next_event());
+                }
                 continue;
             }
             let before = self.cpu.cycles;
-            let writes = self.mem.mmio_writes;
             let syscall =
                 Insn::decode(self.mem.read32(self.cpu.pc)).op() == ps2_isa::ee::Op::Syscall;
             if let Some(stop) = self.step() {
