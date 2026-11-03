@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:04:57Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:54:34Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -514,6 +514,11 @@ given: the gates are the schedule.
       29.7 s and rebuilds no generated crate (target: 30 s).
     - The recompiled machine runs about 2.4 billion instructions a second
       in this wait loop (0.6 s for 300 fields; the interpreter takes 10.8 s).
+  - The measure, refined in phase 5: system call instructions are counted
+    apart. The kernel's emulation runs them by design, so they say nothing
+    about code the recompiler missed. With the sound driver running, the
+    game spins on `FlushCache` while its banks load. Counting those calls
+    would put the share at 97.7%; leaving them out gives 99.990%.
   - In CI, without a disc: the conformance program is recompiled at build
     time (`conformance/rec`, an exception to the no-`build.rs` rule for our
     own test program). It must print the expected output, stay in lockstep
@@ -564,6 +569,34 @@ given: the gates are the schedule.
 - **Gate**: Sly 1 headless reaches the title screen, starts a new game and
   loads the first level under a scripted pad replay; two runs give identical
   hashes.
+
+- **Status, 2026-11-03: in progress** (details:
+  [research/sly1-boot.md](research/sly1-boot.md)).
+  - Built, with the advisor's sub-gates (a)-(d) passed:
+    - (a) The IOP runtime: R3000 semantics in `ps2-core::iop`, an IRX
+      loader with relocation and linking, a kernel HLE (threads with
+      priorities, semaphores, event flags, alarms, interrupt handlers,
+      hardware timers, `sysmem`, `sysclib`, `stdio`, `sifman`, the server
+      side of `sifcmd`, `cdvdman` reads). Our own IOP conformance module
+      (`conformance/iop`) prints exactly what it prints on PCSX2, whose IOP
+      runs Sony's own kernel.
+    - (b) `LIBSD` starts. (c) `989SND` starts and registers its RPC
+      servers.
+    - (d) The EE's sound calls get real replies. Both sound banks load into
+      SPU2 memory through a modelled DMA, and Sly 1 stops at a new point:
+      its first frame's GS FINISH wait.
+  - The recompiled lockstep still passes (300 fields, IOP registers and RAM
+    compared too); 99.990% of the game's own instructions run recompiled.
+  - Simplifications to revisit:
+    - Disc reads by modules complete at once, like the EE's. One drive model
+      with modelled read times, shared by `cdvdfsv` and `cdvdman`, is still
+      to do.
+    - The SPU2 is registers, sound memory and DMA only: no voices yet.
+    - PCSX2 cannot check the timer functions 989SND uses (the BIOS's
+      `TIMRMAN` lacks them); the game exercises them instead.
+  - Next: DMA channels and the GS events their packets cause (FINISH, then
+    V-sync waits), pad and memory card servers, the libmpeg hook, the
+    anticrack test, the replay format and the gate.
 
 ### Phase 6 - Graphics
 

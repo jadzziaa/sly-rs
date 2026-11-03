@@ -9,11 +9,15 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use ps2_core::iop::{IopCpu, IopMemory, IopMmio, IopOutcome, execute};
+use ps2_core::Regions;
+use ps2_core::iop::{IopCpu, IopMemory, IopOutcome, execute};
 
 use crate::hle::{self, Hle};
 use crate::irx::{Irx, IrxError};
-use crate::kernel::{self, Kernel, MODULE_RETURN, THREAD_EXIT, Thread};
+use crate::kernel::{
+    self, CALLBACK_RETURN, Kernel, MODULE_RETURN, RPC_LOOP, RPC_RETURN, THREAD_EXIT, Thread, Wait,
+};
+use crate::spu2::IopHardware;
 
 /// The priority a module's start function runs at (the loader's thread,
 /// below the modules' own threads).
@@ -47,24 +51,60 @@ pub struct Started {
     pub result: u32,
 }
 
-/// Hardware registers not modelled yet: reads return the last value
-/// written, and the first access to each register is logged.
-#[derive(Default)]
-pub struct Registers {
-    values: BTreeMap<u32, u32>,
+/// A guest function the kernel calls from interrupt context.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Callback {
+    pub(crate) func: u32,
+    pub(crate) args: [u32; 4],
+    pub(crate) gp: u32,
+    pub(crate) kind: CallbackKind,
 }
 
-impl IopMmio for Registers {
-    fn read(&mut self, address: u32, bytes: u32) -> u32 {
-        let value = self.values.get(&address).copied().unwrap_or(0);
-        tracing::trace!(target: "iop::hw", "read{} {address:#010x} = {value:#x}", bytes * 8);
-        value
-    }
+/// What happens when a callback returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallbackKind {
+    /// Nothing.
+    Plain,
+    /// A timer handler: its result is the next compare value (0 stops).
+    Timer(usize),
+}
 
-    fn write(&mut self, address: u32, bytes: u32, value: u32) {
-        tracing::trace!(target: "iop::hw", "write{} {address:#010x} = {value:#x}", bytes * 8);
-        self.values.insert(address, value);
-    }
+/// A hardware timer allocated with `AllocHardTimer`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HwTimer {
+    /// IOP cycles per tick (source and prescale).
+    pub(crate) cycles_per_tick: u64,
+    pub(crate) compare: u32,
+    pub(crate) handler: u32,
+    pub(crate) arg: u32,
+    pub(crate) gp: u32,
+    /// When it next reaches its compare value, while running.
+    pub(crate) due: Option<u64>,
+}
+
+/// An RPC server a module registered with `sceSifRegisterRpc`.
+#[derive(Clone, Copy, Debug)]
+pub struct GuestServer {
+    /// Its function: `void *f(int function, void *buffer, int size)`.
+    pub func: u32,
+    /// Its receive buffer, where the EE's data arrives.
+    pub buffer: u32,
+    /// Its queue (`sceSifSetRpcQueue`).
+    pub queue: u32,
+}
+
+/// An EE call to a guest server, until it is answered.
+#[derive(Clone, Debug)]
+pub struct RpcRequest {
+    /// The server.
+    pub sid: u32,
+    /// The function number.
+    pub function: u32,
+    /// Bytes of data the EE sent.
+    pub size: u32,
+    /// The `RPC_END` packet's words 4..=7 and the EE's receive buffer and
+    /// size.
+    pub reply: ([u32; 4], u32, u32),
 }
 
 /// The IOP processor and its kernel.
@@ -72,8 +112,8 @@ pub struct IopCore {
     /// The CPU.
     pub cpu: IopCpu,
     scratchpad: Vec<u8>,
-    /// Hardware registers.
-    pub hw: Registers,
+    /// Hardware: the SPU2 and its DMA channels.
+    pub hw: IopHardware,
     /// The kernel.
     pub kernel: Kernel,
     /// Kernel import stubs, by address: library and function index.
@@ -90,6 +130,35 @@ pub struct IopCore {
     pub console: Vec<u8>,
     /// Kernel calls made, by library and function.
     pub calls: BTreeMap<(String, u16), u64>,
+    /// Callbacks waiting to run.
+    pub(crate) callbacks: VecDeque<Callback>,
+    /// The state a running callback interrupted, and the callback's kind.
+    interrupted: Option<(IopCpu, CallbackKind)>,
+    /// The interrupt stack's top.
+    interrupt_stack: u32,
+    /// Hardware timers by id − 1.
+    pub(crate) timers: Vec<Option<HwTimer>>,
+    /// RPC servers modules registered, by id.
+    pub servers: BTreeMap<u32, GuestServer>,
+    /// RPC queues: the serving thread and the requests waiting.
+    pub(crate) queues: BTreeMap<u32, (usize, VecDeque<RpcRequest>)>,
+    /// The request each serving thread is answering.
+    serving: BTreeMap<usize, RpcRequest>,
+    /// Answered requests and the IOP address of their reply data.
+    pub answered: VecDeque<(RpcRequest, u32)>,
+    /// SIF DMA transfers made (their ids).
+    pub(crate) dma_ids: u32,
+    /// Interrupt handlers by line: function, argument, `$gp`.
+    pub(crate) handlers: BTreeMap<u32, (u32, u32, u32)>,
+    /// Interrupt lines enabled (the controller's mask: independent of the
+    /// handlers, and set before them by `libsd`).
+    pub(crate) enabled: std::collections::BTreeSet<u32>,
+    /// The disc, for `cdvdman`'s reads into IOP memory.
+    pub disc: Option<std::rc::Rc<dyn crate::cdvd::Sectors>>,
+    /// `sceCdCallback`'s function and the `$gp` it runs with.
+    pub(crate) cd_callback: (u32, u32),
+    /// Sectors `cdvdman` read for modules.
+    pub sectors_read: u64,
 }
 
 impl Default for IopCore {
@@ -105,7 +174,7 @@ impl IopCore {
         Self {
             cpu: IopCpu::default(),
             scratchpad: vec![0; 1024],
-            hw: Registers::default(),
+            hw: IopHardware::default(),
             kernel: Kernel::default(),
             stubs: BTreeMap::new(),
             libraries: BTreeMap::new(),
@@ -114,7 +183,57 @@ impl IopCore {
             started: VecDeque::new(),
             console: Vec::new(),
             calls: BTreeMap::new(),
+            callbacks: VecDeque::new(),
+            interrupted: None,
+            interrupt_stack: 0,
+            timers: Vec::new(),
+            servers: BTreeMap::new(),
+            queues: BTreeMap::new(),
+            serving: BTreeMap::new(),
+            answered: VecDeque::new(),
+            dma_ids: 0,
+            handlers: BTreeMap::new(),
+            enabled: std::collections::BTreeSet::new(),
+            disc: None,
+            cd_callback: (0, 0),
+            sectors_read: 0,
         }
+    }
+
+    /// Raises interrupt `line`: its handler runs, if one is registered and
+    /// enabled.
+    pub fn raise(&mut self, line: u32) {
+        if !self.enabled.contains(&line) {
+            tracing::debug!(target: "iop::intr", "line {line:#x} raised but disabled");
+            return;
+        }
+        if let Some(&(func, arg, gp)) = self.handlers.get(&line) {
+            self.callbacks.push_back(Callback {
+                func,
+                args: [arg, 0, 0, 0],
+                gp,
+                kind: CallbackKind::Plain,
+            });
+        }
+    }
+
+    /// Queues an EE call to a guest server and wakes its thread.
+    pub fn request(&mut self, request: RpcRequest) -> bool {
+        let Some(server) = self.servers.get(&request.sid).copied() else {
+            return false;
+        };
+        let Some((t, queue)) = self.queues.get_mut(&server.queue) else {
+            return false;
+        };
+        let t = *t;
+        queue.push_back(request);
+        if self.kernel.threads[t]
+            .as_ref()
+            .is_some_and(|th| th.wait == Wait::Rpc(server.queue))
+        {
+            self.kernel.wake(t, 0);
+        }
+        true
     }
 
     /// Registers a library a module exports.
@@ -212,7 +331,7 @@ impl IopCore {
             priority: LOADER_PRIORITY,
             init_priority: LOADER_PRIORITY,
             status: kernel::Status::Dormant,
-            wait: kernel::Wait::None,
+            wait: Wait::None,
             entry: base + irx.entry,
             stack: (stack, stack_size),
             gp: base + irx.gp,
@@ -229,13 +348,153 @@ impl IopCore {
     /// Whether the IOP has something to run before `until` (IOP cycles).
     #[must_use]
     pub fn busy(&self, until: u64) -> bool {
-        self.kernel.runnable() || self.kernel.next_alarm().is_some_and(|a| a <= until)
+        self.kernel.runnable()
+            || self.interrupted.is_some()
+            || !self.callbacks.is_empty()
+            || self.next_alarm().is_some_and(|a| a <= until)
     }
 
-    /// When the IOP next has something to do, if it is idle.
+    /// When the IOP next has something to do, if it is idle: an alarm or a
+    /// timer.
     #[must_use]
     pub fn next_alarm(&self) -> Option<u64> {
-        self.kernel.next_alarm()
+        let timer = self.timers.iter().flatten().filter_map(|t| t.due).min();
+        [self.kernel.next_alarm(), timer, self.hw.next_due()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// Completes the DMA transfers due by now: their data moves and their
+    /// interrupt line is raised.
+    fn finish_transfers(&mut self, ram: &mut [u8]) {
+        for t in self.hw.take_due(self.cpu.cycles) {
+            let (madr, spu, n) = (
+                t.madr as usize & 0x1F_FFFF,
+                t.spu as usize,
+                t.bytes as usize,
+            );
+            let n = n
+                .min(ram.len().saturating_sub(madr))
+                .min(self.hw.spu_ram.len().saturating_sub(spu));
+            if t.to_spu {
+                self.hw.spu_ram[spu..spu + n].copy_from_slice(&ram[madr..madr + n]);
+            } else {
+                ram[madr..madr + n].copy_from_slice(&self.hw.spu_ram[spu..spu + n]);
+            }
+            tracing::debug!(target: "iop::spu2", "cycle {}: DMA done, line {:#x}", self.cpu.cycles, t.line);
+            self.raise(t.line);
+        }
+    }
+
+    /// Queues the handlers of the timers due by now.
+    fn fire_timers(&mut self) {
+        let now = self.cpu.cycles;
+        for (id, timer) in self.timers.iter_mut().enumerate() {
+            if let Some(t) = timer
+                && t.due.is_some_and(|due| due <= now)
+            {
+                t.due = None;
+                self.callbacks.push_back(Callback {
+                    func: t.handler,
+                    args: [t.arg, 0, 0, 0],
+                    gp: t.gp,
+                    kind: CallbackKind::Timer(id),
+                });
+            }
+        }
+    }
+
+    /// Starts the next callback, interrupting whatever runs.
+    fn start_callback(&mut self, ram: &mut [u8]) {
+        let Some(callback) = self.callbacks.pop_front() else {
+            return;
+        };
+        tracing::debug!(target: "iop::intr", "cycle {}: callback {:#x} ({:?})", self.cpu.cycles, callback.func, callback.kind);
+        if self.interrupt_stack == 0 {
+            self.interrupt_stack = self
+                .kernel
+                .heap
+                .alloc(1, 0x2000, 0)
+                .map_or(0x0001_F000, |s| s + 0x2000);
+        }
+        let _ = ram;
+        self.interrupted = Some((self.cpu.clone(), callback.kind));
+        self.kernel.in_interrupt = true;
+        let cycles = self.cpu.cycles;
+        self.cpu = kernel::start_context(
+            callback.func,
+            &callback.args,
+            callback.gp,
+            self.interrupt_stack - 16,
+            CALLBACK_RETURN,
+        );
+        self.cpu.cycles = cycles;
+    }
+
+    /// A callback returned: the interrupted state resumes.
+    fn callback_returned(&mut self) {
+        let result = self.cpu.gpr[2];
+        tracing::debug!(target: "iop::intr", "cycle {}: callback returned {result:#x}", self.cpu.cycles);
+        let Some((state, kind)) = self.interrupted.take() else {
+            return;
+        };
+        let cycles = self.cpu.cycles;
+        self.cpu = state;
+        self.cpu.cycles = cycles;
+        self.kernel.in_interrupt = false;
+        if let CallbackKind::Timer(id) = kind
+            && let Some(Some(timer)) = self.timers.get_mut(id)
+            && result != 0
+        {
+            timer.compare = result;
+            timer.due = Some(cycles + u64::from(result) * timer.cycles_per_tick);
+        }
+        self.kernel.schedule(&mut self.cpu);
+    }
+
+    /// A serving thread is back in its RPC loop: answer the next request
+    /// or wait for one.
+    fn rpc_loop(&mut self) {
+        let Some(t) = self.kernel.current else {
+            return;
+        };
+        let Some((queue_id, request)) = self
+            .queues
+            .iter_mut()
+            .find(|(_, (thread, _))| *thread == t)
+            .map(|(&q, (_, requests))| (q, requests.pop_front()))
+        else {
+            // A loop without a queue: nothing will ever arrive.
+            self.kernel.block(&mut self.cpu, Wait::Rpc(0), RPC_LOOP);
+            self.kernel.schedule(&mut self.cpu);
+            return;
+        };
+        let Some(request) = request else {
+            self.kernel
+                .block(&mut self.cpu, Wait::Rpc(queue_id), RPC_LOOP);
+            self.kernel.schedule(&mut self.cpu);
+            return;
+        };
+        let Some(server) = self.servers.get(&request.sid).copied() else {
+            return;
+        };
+        self.cpu.gpr[4] = request.function;
+        self.cpu.gpr[5] = server.buffer;
+        self.cpu.gpr[6] = request.size;
+        self.cpu.gpr[31] = RPC_RETURN;
+        self.cpu.pc = server.func;
+        self.serving.insert(t, request);
+    }
+
+    /// A server function returned its reply's address.
+    fn rpc_returned(&mut self) {
+        if let Some(t) = self.kernel.current
+            && let Some(request) = self.serving.remove(&t)
+        {
+            self.answered.push_back((request, self.cpu.gpr[2]));
+        }
+        self.cpu.pc = RPC_LOOP;
     }
 
     /// Runs the IOP until its clock reaches `target`.
@@ -244,34 +503,42 @@ impl IopCore {
     ///
     /// Something the emulation does not support yet (a kernel function, an
     /// exception), with where it happened.
-    pub fn run_until(&mut self, ram: &mut [u8], target: u64) -> Result<(), String> {
+    pub fn run_until(&mut self, regions: &mut Regions, target: u64) -> Result<(), String> {
         loop {
             if self.kernel.fire_alarms(self.cpu.cycles) {
                 self.kernel.schedule(&mut self.cpu);
             }
-            if self.kernel.current.is_none() {
+            self.fire_timers();
+            self.finish_transfers(&mut regions.iop_ram);
+            if self.interrupted.is_none() && self.kernel.interrupts && !self.callbacks.is_empty() {
+                self.start_callback(&mut regions.iop_ram);
+            }
+            if self.kernel.current.is_none() && self.interrupted.is_none() {
                 self.kernel.schedule(&mut self.cpu);
             }
             if self.cpu.cycles >= target {
                 return Ok(());
             }
-            if self.kernel.current.is_none() {
-                // Idle: jump to the next alarm.
-                let next = self.kernel.next_alarm().unwrap_or(u64::MAX).min(target);
+            if self.kernel.current.is_none() && self.interrupted.is_none() {
+                // Idle: jump to the next alarm or timer.
+                let next = self.next_alarm().unwrap_or(u64::MAX).min(target);
                 self.cpu.cycles = next.max(self.cpu.cycles);
                 continue;
             }
             match self.cpu.pc {
+                CALLBACK_RETURN => self.callback_returned(),
                 THREAD_EXIT => {
                     self.kernel.exit_current();
                     self.kernel.schedule(&mut self.cpu);
                 }
                 MODULE_RETURN => self.module_returned(),
+                RPC_LOOP => self.rpc_loop(),
+                RPC_RETURN => self.rpc_returned(),
                 pc => {
                     if let Some((library, index)) = self.stubs.get(&pc).cloned() {
-                        self.kernel_call(ram, &library, index)?;
+                        self.kernel_call(regions, &library, index)?;
                     } else {
-                        self.step(ram)?;
+                        self.step(&mut regions.iop_ram)?;
                     }
                 }
             }
@@ -295,15 +562,22 @@ impl IopCore {
     }
 
     /// Runs the kernel function `index` of `library`, called from a stub.
-    fn kernel_call(&mut self, ram: &mut [u8], library: &str, index: u16) -> Result<(), String> {
+    fn kernel_call(
+        &mut self,
+        regions: &mut Regions,
+        library: &str,
+        index: u16,
+    ) -> Result<(), String> {
         *self.calls.entry((library.to_owned(), index)).or_default() += 1;
         self.cpu.cycles += HLE_COST;
         let ra = self.cpu.gpr[31];
-        match hle::call(self, ram, library, index) {
+        let Regions { iop_ram, ram, .. } = regions;
+        match hle::call(self, iop_ram, ram, library, index) {
             Hle::Return(value) => {
                 self.cpu.gpr[2] = value;
                 self.cpu.pc = ra;
             }
+            Hle::Goto(pc) => self.cpu.pc = pc,
             Hle::Block(wait) => self.kernel.block(&mut self.cpu, wait, ra),
             Hle::Unimplemented => {
                 return Err(format!(
@@ -319,6 +593,7 @@ impl IopCore {
     /// Runs one instruction (with its delay slot).
     fn step(&mut self, ram: &mut [u8]) -> Result<(), String> {
         let pc = self.cpu.pc;
+        self.hw.now = self.cpu.cycles;
         let mut mem = IopMemory {
             ram,
             scratchpad: &mut self.scratchpad,

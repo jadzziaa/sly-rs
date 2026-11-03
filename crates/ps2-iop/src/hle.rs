@@ -8,15 +8,17 @@
 
 use ps2_core::iop::IopCpu;
 
-use crate::core::IopCore;
+use crate::core::{Callback, CallbackKind, GuestServer, HwTimer, IopCore};
 use crate::format::format;
 use crate::irx;
-use crate::kernel::{self, Thread, Wait, kerr, wef};
+use crate::kernel::{self, RPC_LOOP, Thread, Wait, kerr, wef};
 
 /// What a kernel call does.
 pub(crate) enum Hle {
     /// Returns this in `$v0`.
     Return(u32),
+    /// Continues at this address instead of returning.
+    Goto(u32),
     /// The calling thread waits; its `$v0` is set when the wait ends.
     Block(Wait),
     /// Not written yet.
@@ -256,15 +258,25 @@ fn formatted(core: &mut IopCore, ram: &mut [u8], fmt: u32, first: u32) -> Vec<u8
 }
 
 /// Runs `library`'s function `index` for the current thread.
-#[allow(clippy::too_many_lines, reason = "one arm per kernel function")]
-pub(crate) fn call(core: &mut IopCore, ram: &mut [u8], library: &str, index: u16) -> Hle {
+#[allow(
+    clippy::too_many_lines,
+    clippy::match_same_arms,
+    reason = "one arm per kernel function"
+)]
+pub(crate) fn call(
+    core: &mut IopCore,
+    ram: &mut [u8],
+    ee: &mut [u8],
+    library: &str,
+    index: u16,
+) -> Hle {
     let (a0, a1, a2, a3) = (
         core.cpu.gpr[4],
         core.cpu.gpr[5],
         core.cpu.gpr[6],
         core.cpu.gpr[7],
     );
-    tracing::trace!(target: "iop::hle", "{library} {} ({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x})", function_name(library, index));
+    tracing::trace!(target: "iop::hle", "cycle {}: {library} {} ({a0:#x}, {a1:#x}, {a2:#x}, {a3:#x}) from {:#x}", core.cpu.cycles, function_name(library, index), core.cpu.gpr[31]);
     match (library, index) {
         // intrman
         ("intrman", 17) => {
@@ -277,6 +289,28 @@ pub(crate) fn call(core: &mut IopCore, ram: &mut [u8], library: &str, index: u16
             core.kernel.interrupts = a0 != 0;
             ok(0)
         }
+        ("intrman", 4) => {
+            let gp = core.cpu.gpr[28];
+            core.handlers.insert(a0, (a2, a3, gp));
+            ok(0)
+        }
+        ("intrman", 5) => {
+            core.handlers.remove(&a0);
+            ok(0)
+        }
+        ("intrman", 6 | 7) => {
+            let enable = index == 6;
+            if enable {
+                core.enabled.insert(a0);
+            } else {
+                core.enabled.remove(&a0);
+            }
+            if !enable && a1 != 0 {
+                core.memory(ram).write32(a1, a0);
+            }
+            ok(0)
+        }
+        ("intrman", 23) => ok(i32::from(core.kernel.in_interrupt)),
         ("intrman", 8) => {
             core.kernel.interrupts = false;
             ok(0)
@@ -628,7 +662,196 @@ pub(crate) fn call(core: &mut IopCore, ram: &mut [u8], library: &str, index: u16
                 ok(kerr::EVF_COND)
             }
         }
+        // sifman: transfers to the EE complete at once.
+        ("sifman", 5) => ok(0),
+        ("sifman", 29) => ok(1),
+        ("sifman", 7 | 32) => {
+            for i in 0..a1 {
+                let at = a0 + 16 * i;
+                let mut mem = core.memory(ram);
+                let (src, dest, size) = (mem.read32(at), mem.read32(at + 4), mem.read32(at + 8));
+                let bytes: Vec<u8> = (0..size).map(|k| mem.read8(src.wrapping_add(k))).collect();
+                copy_to_ee(ee, dest, &bytes);
+                core.cpu.cycles += u64::from(size / 16);
+            }
+            if index == 32 && a2 != 0 {
+                core.callbacks.push_back(Callback {
+                    func: a2,
+                    args: [a3, 0, 0, 0],
+                    gp: core.cpu.gpr[28],
+                    kind: CallbackKind::Plain,
+                });
+            }
+            core.dma_ids += 1;
+            Hle::Return(core.dma_ids)
+        }
+        ("sifman", 8) => ok(-1),
+
+        // sifcmd: the server side of RPC.
+        ("sifcmd", 14) => ok(0),
+        ("sifcmd", 19) => {
+            core.queues
+                .insert(a0, (a1 as usize - 1, std::collections::VecDeque::new()));
+            ok(0)
+        }
+        ("sifcmd", 17) => {
+            let queue = arg(core, ram, 6);
+            tracing::debug!(target: "iop::rpc", "server {a1:#x} registered: function {a2:#x}, buffer {a3:#x}, queue {queue:#x}");
+            core.servers.insert(
+                a1,
+                GuestServer {
+                    func: a2,
+                    buffer: a3,
+                    queue,
+                },
+            );
+            ok(0)
+        }
+        ("sifcmd", 22) => Hle::Goto(RPC_LOOP),
+        ("sifcmd", 23) => {
+            // sceSifGetOtherData(rd, EE source, IOP destination, size, mode).
+            let size = a3;
+            let bytes: Vec<u8> = (0..size)
+                .map(|k| {
+                    ee.get(((a1 + k) & 0x01FF_FFFF) as usize)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .collect();
+            let mut mem = core.memory(ram);
+            for (k, b) in bytes.into_iter().enumerate() {
+                mem.write8(a2 + k as u32, b);
+            }
+            core.cpu.cycles += u64::from(size / 16);
+            ok(0)
+        }
+
+        // cdvdman, for modules that read the disc themselves. Reads complete
+        // at once (as the EE's do through cdvdfsv), then the callback runs.
+        ("cdvdman", 6) => {
+            let Some(data) = core.disc.as_ref().and_then(|d| d.read(a0, a1)) else {
+                tracing::warn!(target: "iop::cdvd", "module read past the disc: {a1} sectors at {a0}");
+                return ok(0);
+            };
+            let mut mem = core.memory(ram);
+            for (k, &b) in data.iter().enumerate() {
+                mem.write8(a2 + k as u32, b);
+            }
+            core.sectors_read += u64::from(a1);
+            core.cpu.cycles += data.len() as u64 / 16;
+            tracing::debug!(target: "iop::cdvd", "cycle {}: module read: {a1} sectors at LBA {a0} into {a2:#x}", core.cpu.cycles);
+            let (func, gp) = core.cd_callback;
+            if func != 0 {
+                core.callbacks.push_back(Callback {
+                    func,
+                    args: [1, 0, 0, 0],
+                    gp,
+                    kind: CallbackKind::Plain,
+                });
+            }
+            ok(1)
+        }
+        ("cdvdman", 8 | 11) => ok(0),
+        ("cdvdman", 15 | 39) => ok(1),
+        ("cdvdman", 37) => {
+            let old = core.cd_callback.0;
+            core.cd_callback = (a0, core.cpu.gpr[28]);
+            Hle::Return(old)
+        }
+
+        // timrman: hardware timers on the IOP clock.
+        ("timrman", 4) => match timer_cycles(a0, a2) {
+            Some(cycles_per_tick) => {
+                core.timers.push(Some(HwTimer {
+                    cycles_per_tick,
+                    compare: 0,
+                    handler: 0,
+                    arg: 0,
+                    gp: 0,
+                    due: None,
+                }));
+                Hle::Return(core.timers.len() as u32)
+            }
+            None => ok(-1),
+        },
+        ("timrman", 6) => match timer_slot(core, a0) {
+            Some(slot) => {
+                *slot = None;
+                ok(0)
+            }
+            None => ok(-1),
+        },
+        ("timrman", 20) => {
+            let gp = core.cpu.gpr[28];
+            match timer_slot(core, a0).and_then(Option::as_mut) {
+                Some(timer) => {
+                    timer.compare = a1;
+                    timer.handler = a2;
+                    timer.arg = a3;
+                    timer.gp = gp;
+                    ok(0)
+                }
+                None => ok(-1),
+            }
+        }
+        ("timrman", 22) => match (
+            timer_slot(core, a0).and_then(Option::as_mut),
+            timer_cycles(a1, a3),
+        ) {
+            (Some(timer), Some(cycles)) => {
+                timer.cycles_per_tick = cycles;
+                ok(0)
+            }
+            _ => ok(-1),
+        },
+        ("timrman", 23) => {
+            let now = core.cpu.cycles;
+            match timer_slot(core, a0).and_then(Option::as_mut) {
+                Some(timer) => {
+                    timer.due = Some(now + u64::from(timer.compare.max(1)) * timer.cycles_per_tick);
+                    ok(0)
+                }
+                None => ok(-1),
+            }
+        }
+        ("timrman", 24) => match timer_slot(core, a0).and_then(Option::as_mut) {
+            Some(timer) => {
+                timer.due = None;
+                ok(0)
+            }
+            None => ok(-1),
+        },
         _ => Hle::Unimplemented,
+    }
+}
+
+/// IOP cycles per tick of a hardware timer counting `source` (1: the
+/// system clock; 4: H-lines) divided by `prescale`.
+fn timer_cycles(source: u32, prescale: u32) -> Option<u64> {
+    let base = match source {
+        1 => 1,
+        // An NTSC H-line: 294.912 MHz × 1001 / 60,000 × 2 / 525 EE cycles, / 8.
+        4 => 2_340,
+        _ => return None,
+    };
+    let prescale = match prescale {
+        0 | 1 => 1,
+        8 | 16 | 256 => u64::from(prescale),
+        _ => return None,
+    };
+    Some(base * prescale)
+}
+
+fn timer_slot(core: &mut IopCore, id: u32) -> Option<&mut Option<HwTimer>> {
+    core.timers.get_mut((id as usize).checked_sub(1)?)
+}
+
+/// Copies `bytes` into EE RAM at `dest` (SIF DMA to the EE).
+fn copy_to_ee(ee: &mut [u8], dest: u32, bytes: &[u8]) {
+    for (k, &b) in bytes.iter().enumerate() {
+        if let Some(slot) = ee.get_mut(((dest as usize) + k) & 0x01FF_FFFF) {
+            *slot = b;
+        }
     }
 }
 

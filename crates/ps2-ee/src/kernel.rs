@@ -93,6 +93,14 @@ pub struct Thread {
     context: Option<Context>,
 }
 
+impl Thread {
+    /// Where a thread that is not running resumes, and its return address.
+    #[must_use]
+    pub fn resumes_at(&self) -> Option<(u32, u32)> {
+        self.context.as_ref().map(|c| (c.pc, c.gpr[31] as u32))
+    }
+}
+
 /// A semaphore.
 #[derive(Clone, Debug)]
 pub struct Sema {

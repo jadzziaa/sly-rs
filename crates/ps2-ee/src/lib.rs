@@ -69,8 +69,11 @@ pub enum Stop {
 pub struct Stats {
     /// Instructions run by generated code.
     pub compiled: u64,
-    /// Instructions run by the interpreter.
+    /// Instructions run by the interpreter, system calls excepted.
     pub interpreted: u64,
+    /// System call instructions: the kernel's emulation runs them by
+    /// design, whether the code around them is recompiled or not.
+    pub kernel: u64,
     /// Calls into generated code.
     pub entries: u64,
     /// Why generated code gave control back, by reason.
@@ -354,11 +357,17 @@ impl Machine {
                 continue;
             }
             let before = self.cpu.cycles;
+            let syscall =
+                Insn::decode(self.mem.read32(self.cpu.pc)).op() == ps2_isa::ee::Op::Syscall;
             if let Some(stop) = self.step() {
                 return stop;
             }
             let ran = self.cpu.cycles - before;
-            self.stats.interpreted += ran;
+            if syscall {
+                self.stats.kernel += ran;
+            } else {
+                self.stats.interpreted += ran;
+            }
             if !self.table.is_empty() && self.stats.interpreted_at.len() < 4096 {
                 *self.stats.interpreted_at.entry(self.cpu.pc).or_default() += ran;
             }

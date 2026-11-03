@@ -109,9 +109,10 @@ pub(crate) fn run(game: &str, fields: u64, recompiled: Option<&Recompiled>) -> R
     let share = 100.0 * stats.compiled as f64 / total.max(1) as f64;
     writeln!(
         out,
-        "{fields} fields equal; {} of {total} instructions recompiled ({share:.4}%); \
-         host time {:.2} s recompiled, {:.2} s interpreted",
+        "{fields} fields equal; {} of {total} instructions recompiled ({share:.4}%), \
+         {} more were system calls; host time {:.2} s recompiled, {:.2} s interpreted",
         stats.compiled,
+        stats.kernel,
         time_c.as_secs_f64(),
         time_i.as_secs_f64()
     )?;

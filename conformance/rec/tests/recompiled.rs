@@ -49,8 +49,8 @@ fn recompiled_output_matches_expected() {
     // The phase 4 gate's measure: at most 0.1% of instructions interpreted.
     let stats = &machine.stats;
     eprintln!(
-        "compiled {} interpreted {}, exits {:?}",
-        stats.compiled, stats.interpreted, stats.exits
+        "compiled {} interpreted {} system calls {}, exits {:?}",
+        stats.compiled, stats.interpreted, stats.kernel, stats.exits
     );
     assert!(
         stats.interpreted * 1000 <= stats.compiled + stats.interpreted,

@@ -30,8 +30,9 @@ mod hle;
 pub mod irx;
 pub mod kernel;
 pub mod loadfile;
+pub mod spu2;
 
-pub use crate::core::{IopCore, Module, Started};
+pub use crate::core::{GuestServer, IopCore, Module, RpcRequest, Started};
 
 /// Modules the IOP side emulates in Rust (their RPC servers): loading one
 /// only records it.
@@ -66,8 +67,11 @@ struct PendingLoad {
 /// Where the IOP receives command packets (its `pktbuf`), published in the
 /// SMCOM mailbox at boot.
 pub const IOP_PACKET_BUFFER: u32 = 0x0001_0000;
-/// Where server receive buffers start in IOP memory, 64 KiB each.
-const SERVER_BUFFERS: u32 = 0x0004_0000;
+/// Where the Rust servers' receive buffers start in IOP memory, 16 KiB
+/// each, up to the IOP heap (24 servers).
+const SERVER_BUFFERS: u32 = 0x0002_0000;
+/// The size of a Rust server's receive buffer.
+const SERVER_BUFFER_SIZE: u32 = 0x4000;
 
 /// System command ids.
 pub mod cid {
@@ -123,6 +127,16 @@ pub fn server_name(sid: u32) -> &'static str {
         0x0012_3456 | 0x0012_3457 => "989snd",
         _ => "unknown",
     }
+}
+
+/// Whether `sid` belongs to a system module sly-rs emulates in Rust (whose
+/// unhandled servers answer zeros rather than never being found).
+fn emulated_in_rust(sid: u32) -> bool {
+    matches!(
+        sid,
+        0x8000_0001 | 0x8000_0006 | 0x8000_0100 | 0x8000_0101 | 0x8000_0400 | 0x8000_0592
+            ..=0x8000_059A
+    )
 }
 
 /// A server not emulated yet: answers every call with zeros and logs it.
@@ -221,11 +235,36 @@ impl Iop {
     ///
     /// Something the IOP emulation does not support yet.
     pub fn run(&mut self, mem: &mut Memory, until: u64) -> Result<(), String> {
-        self.core.run_until(&mut mem.regions.iop_ram, until)?;
+        self.core.run_until(&mut mem.regions, until)?;
         while let Some(done) = self.core.started.pop_front() {
             if let Some(load) = self.loads.remove(&done.token) {
                 self.answer_load(&load, done.id.cast_signed(), done.result);
             }
+        }
+        while let Some((request, data)) = self.core.answered.pop_front() {
+            let ([a, b, c, d], recv_buf, recv_size) = request.reply;
+            tracing::debug!(target: "iop::rpc", "{:#x} function {:#x} answered at IOP cycle {}: {recv_size} bytes from {data:#x} ({:#x}...) to EE {recv_buf:#x}", request.sid, request.function, self.core.cpu.cycles, iop_word(mem, data));
+            let extra = (recv_buf != 0 && recv_size > 0 && data != 0).then(|| {
+                let bytes = (0..recv_size).map(|i| iop_byte(mem, data + i)).collect();
+                (recv_buf, bytes)
+            });
+            self.send(
+                vec![
+                    0,
+                    0,
+                    cid::RPC_END,
+                    0,
+                    a,
+                    b,
+                    c,
+                    d,
+                    cid::RPC_CALL,
+                    request.sid,
+                    0,
+                    0,
+                ],
+                extra,
+            );
         }
         Ok(())
     }
@@ -306,11 +345,20 @@ impl Iop {
     }
 
     /// Registers a server answering the ids `sids`.
+    ///
+    /// # Panics
+    ///
+    /// If the servers' receive buffers would reach the IOP heap (more than
+    /// 24 server ids).
     pub fn register(&mut self, sids: &[u32], server: Box<dyn Server>) {
         let index = self.servers.len();
         self.servers.push(server);
         for &sid in sids {
-            let buffer = SERVER_BUFFERS + 0x1_0000 * self.sids.len() as u32;
+            let buffer = SERVER_BUFFERS + SERVER_BUFFER_SIZE * self.sids.len() as u32;
+            assert!(
+                buffer + SERVER_BUFFER_SIZE <= kernel::HEAP_START,
+                "too many RPC servers for the space below the IOP heap"
+            );
             self.sids.insert(sid, (index, buffer));
         }
     }
@@ -324,12 +372,13 @@ impl Iop {
     }
 
     /// Registers the CD/DVD servers, reading from `disc`.
-    pub fn attach_disc(&mut self, disc: Box<dyn cdvd::Sectors>) {
+    pub fn attach_disc(&mut self, disc: std::rc::Rc<dyn cdvd::Sectors>) {
         use cdvd::{DISK_READY, INIT, NCMD, POWER_OFF, SCMD, SEARCH_FILE};
         self.register(
             &[INIT, SCMD, NCMD, POWER_OFF, SEARCH_FILE, DISK_READY],
-            Box::new(cdvd::Cdvd::new(disc)),
+            Box::new(cdvd::Cdvd::new(std::rc::Rc::clone(&disc))),
         );
+        self.core.disc = Some(disc);
     }
 
     /// Handles a transfer the EE's kernel made with `sceSifSetDma` (the
@@ -370,15 +419,23 @@ impl Iop {
         None
     }
 
-    /// `RPC_BIND`: reply with the server's address and its receive buffer.
+    /// `RPC_BIND`: reply with the server's address and its receive buffer:
+    /// a module's own buffer for servers modules registered, a buffer of
+    /// ours for the Rust servers. A server nobody serves yet answers 0, and
+    /// the EE binds again until a module registers it.
     fn bind(&mut self, words: &[u32], mem: &mut Memory) {
         let (client, sid) = (words[7], words[8]);
-        if !self.sids.contains_key(&sid) {
-            self.register(&[sid], Box::new(Unknown { sid }));
-        }
-        let (index, buffer) = self.sids[&sid];
-        tracing::debug!(target: "iop::rpc", "bind {sid:#x} ({})", self.servers[index].name());
         let _ = mem;
+        let found = if let Some(server) = self.core.servers.get(&sid) {
+            Some(server.buffer)
+        } else {
+            if !self.sids.contains_key(&sid) && emulated_in_rust(sid) {
+                self.register(&[sid], Box::new(Unknown { sid }));
+            }
+            self.sids.get(&sid).map(|&(_, buffer)| buffer)
+        };
+        tracing::debug!(target: "iop::rpc", "bind {sid:#x} ({}): {found:x?}", server_name(sid));
+        let (server, buffer) = found.map_or((0, 0), |buffer| (sid, buffer));
         // RendPkt: header, rec_id, pkt_addr, rpc_id, client, cid, server, buf, cbuf.
         self.send(
             vec![
@@ -391,7 +448,7 @@ impl Iop {
                 words[6],
                 client,
                 cid::RPC_BIND,
-                sid,
+                server,
                 buffer,
                 0,
             ],
@@ -405,6 +462,20 @@ impl Iop {
         let (client, function, send_size, recv_buf, recv_size, server) = (
             words[7], words[8], words[9], words[10], words[11], words[13],
         );
+        tracing::debug!(target: "iop::rpc", "call {server:#x} function {function:#x} at IOP cycle {}", self.core.cpu.cycles);
+        if self.core.request(RpcRequest {
+            sid: server,
+            function,
+            size: send_size,
+            reply: (
+                [words[4], words[5], words[6], words[7]],
+                recv_buf,
+                recv_size,
+            ),
+        }) {
+            *self.calls.entry((server, function)).or_default() += 1;
+            return;
+        }
         let Some(&(index, buffer)) = self.sids.get(&server) else {
             tracing::warn!(target: "iop::rpc", "call to unbound server {server:#x}");
             return;
@@ -482,6 +553,15 @@ impl Iop {
     #[must_use]
     pub fn pending(&self) -> bool {
         !self.outgoing.is_empty()
+    }
+
+    /// The packets waiting to go to the EE: command id and words 4.. .
+    #[must_use]
+    pub fn waiting(&self) -> Vec<(u32, Vec<u32>)> {
+        self.outgoing
+            .iter()
+            .map(|o| (o.packet[2], o.packet[4..].to_vec()))
+            .collect()
     }
 }
 

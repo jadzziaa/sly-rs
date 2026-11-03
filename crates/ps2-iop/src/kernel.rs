@@ -19,6 +19,10 @@ pub const THREAD_EXIT: u32 = 0x0000_1000;
 pub const MODULE_RETURN: u32 = 0x0000_1008;
 /// Where a callback the kernel makes into guest code returns to.
 pub const CALLBACK_RETURN: u32 = 0x0000_1010;
+/// Where a thread in `sceSifRpcLoop` waits for its next request.
+pub const RPC_LOOP: u32 = 0x0000_1018;
+/// Where an RPC server function returns to.
+pub const RPC_RETURN: u32 = 0x0000_1020;
 
 /// Kernel error codes (`kerr.h`).
 pub mod kerr {
@@ -271,12 +275,16 @@ pub struct Kernel {
     alarm_order: u64,
     /// Interrupts enabled (`CpuSuspendIntr` and friends).
     pub interrupts: bool,
+    /// A callback runs in interrupt context: no thread switches until it
+    /// returns.
+    pub in_interrupt: bool,
     /// IOP RAM not used by the kernel.
     pub heap: Heap,
 }
 
-/// The lowest IOP RAM the heap hands out; below are the SIF buffers.
-pub const HEAP_START: u32 = 0x0004_0000;
+/// The lowest IOP RAM the heap hands out; below are the SIF packet buffer
+/// and the Rust servers' receive buffers.
+pub const HEAP_START: u32 = 0x0008_0000;
 /// The end of IOP RAM.
 pub const HEAP_END: u32 = 0x0020_0000;
 
@@ -292,6 +300,7 @@ impl Default for Kernel {
             alarms: BTreeMap::new(),
             alarm_order: 0,
             interrupts: true,
+            in_interrupt: false,
             heap: Heap::new(HEAP_START, HEAP_END),
         }
     }
@@ -364,6 +373,9 @@ impl Kernel {
     /// Lets the highest-priority thread run: the running one keeps the
     /// processor unless a ready thread outranks it, or it stopped running.
     pub fn schedule(&mut self, cpu: &mut IopCpu) {
+        if self.in_interrupt {
+            return;
+        }
         let current = self.current.and_then(|t| {
             let thread = self.threads[t].as_ref()?;
             Some((t, thread.status, thread.priority))

@@ -2,6 +2,7 @@
 //! configured disc, the IOP side given the disc and the loader version.
 
 use std::path::Path;
+use std::rc::Rc;
 
 use ps2_analysis::Image;
 use ps2_disc::Disc;
@@ -34,11 +35,25 @@ pub enum BootError {
 }
 
 /// The game's disc as the IOP's CD/DVD servers read it.
-struct DiscSectors(Disc);
+struct DiscSectors(Rc<Disc>);
 
 impl ps2_iop::cdvd::Sectors for DiscSectors {
     fn read(&self, lba: u32, count: u32) -> Option<Vec<u8>> {
         self.0.sectors(lba, count).ok()
+    }
+}
+
+/// The game's disc as the IOP's module loader reads it: `cdrom0:\NAME;1`.
+struct DiscFiles(Rc<Disc>);
+
+impl ps2_iop::Files for DiscFiles {
+    fn read(&self, path: &str) -> Option<Vec<u8>> {
+        let name = path
+            .strip_prefix("cdrom0:")?
+            .trim_start_matches(['\\', '/']);
+        let name = name.split(';').next()?;
+        let entry = self.0.find(name).ok()??;
+        self.0.read_file(&entry).ok()
     }
 }
 
@@ -72,7 +87,11 @@ pub fn boot(game: Game) -> Result<(Machine, Image), BootError> {
     let (image, disc) = executable(game)?;
     let argv0 = format!("cdrom0:\\{};1", Build::of(game).boot_elf);
     let mut machine = Machine::boot(&image, &argv0).map_err(BootError::Layout)?;
-    machine.iop.attach_disc(Box::new(DiscSectors(disc)));
+    let disc = Rc::new(disc);
+    machine
+        .iop
+        .attach_disc(Rc::new(DiscSectors(Rc::clone(&disc))));
+    machine.iop.attach_files(Box::new(DiscFiles(disc)));
     machine.iop.attach_loader(Build::of(game).iop_version);
     Ok((machine, image))
 }

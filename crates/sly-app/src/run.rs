@@ -64,8 +64,13 @@ pub(crate) fn run(
         .iter()
         .enumerate()
         .filter_map(|(id, t)| {
-            t.as_ref()
-                .map(|t| format!("{id}: {:?} prio {}", t.status, t.priority))
+            t.as_ref().map(|t| {
+                let (pc, ra) = t.resumes_at().unwrap_or_default();
+                format!(
+                    "{id}: {:?} prio {} at {pc:08x} (ra {ra:08x})",
+                    t.status, t.priority
+                )
+            })
         })
         .collect();
     writeln!(
@@ -93,14 +98,67 @@ pub(crate) fn run(
         machine.kernel.sif_regs, hw.sbus
     )?;
     writeln!(out, "  not built yet: {:?}", machine.skipped)?;
+    let core = &machine.iop.core;
+    let iop_threads: Vec<String> = core
+        .kernel
+        .threads
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            t.as_ref().map(|t| {
+                format!(
+                    "{}: {:?} {:?} prio {} at {:08x}",
+                    i + 1,
+                    t.status,
+                    t.wait,
+                    t.priority,
+                    if core.kernel.current == Some(i) {
+                        core.cpu.pc
+                    } else {
+                        t.context.pc
+                    }
+                )
+            })
+        })
+        .collect();
+    writeln!(
+        out,
+        "  IOP threads (running {:?}): {}",
+        core.kernel.current.map(|t| t + 1),
+        iop_threads.join("; ")
+    )?;
+    let modules: Vec<String> = core
+        .modules
+        .iter()
+        .map(|m| format!("{} at {:#x}", m.name, m.base))
+        .collect();
+    writeln!(out, "  IOP modules: {}", modules.join(", "))?;
+    let mut iop_calls: Vec<String> = core
+        .calls
+        .iter()
+        .map(|((lib, i), n)| format!("{lib} {i}×{n}"))
+        .collect();
+    iop_calls.sort();
+    writeln!(out, "  IOP kernel calls: {}", iop_calls.join(", "))?;
+    writeln!(
+        out,
+        "  IOP: {} cycles, {} sectors read by modules",
+        core.cpu.cycles, core.sectors_read
+    )?;
+    writeln!(
+        out,
+        "  SIF packets waiting for the EE: {:x?}",
+        machine.iop.waiting()
+    )?;
     let stats = &machine.stats;
     if stats.entries > 0 {
         let total = stats.compiled + stats.interpreted;
         writeln!(
             out,
-            "  recompiled: {} of {total} instructions ({:.4}%), {} entries; exits {:?}",
+            "  recompiled: {} of {total} instructions ({:.4}%), and {} system calls; {} entries; exits {:?}",
             stats.compiled,
             100.0 * stats.compiled as f64 / total.max(1) as f64,
+            stats.kernel,
             stats.entries,
             stats.exits
         )?;

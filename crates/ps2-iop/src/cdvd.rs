@@ -5,6 +5,8 @@
 //! Reads are synchronous: the sectors are in EE memory by the time the
 //! reply goes back.
 
+use std::rc::Rc;
+
 use ps2_core::Memory;
 
 use crate::{Call, Server};
@@ -53,7 +55,7 @@ fn bcd(value: u32) -> u32 {
 
 /// The CD/DVD servers, sharing the disc.
 pub struct Cdvd {
-    disc: Box<dyn Sectors>,
+    disc: Rc<dyn Sectors>,
     /// Sectors read so far.
     pub sectors_read: u64,
 }
@@ -61,7 +63,7 @@ pub struct Cdvd {
 impl Cdvd {
     /// Servers reading from `disc`.
     #[must_use]
-    pub fn new(disc: Box<dyn Sectors>) -> Self {
+    pub fn new(disc: Rc<dyn Sectors>) -> Self {
         Self {
             disc,
             sectors_read: 0,
