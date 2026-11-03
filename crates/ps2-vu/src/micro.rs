@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use ps2_core::{Vu0 as Regs, float};
-use ps2_gs::Gs;
+use ps2_gs::thread::Sink;
 use ps2_isa::vu::{FLAG_E, FLAG_I, LowerOp, Pair, UpperOp};
 
 /// The longest program run before giving up (a guard against loops).
@@ -29,7 +29,7 @@ pub struct Vu1Link<'a> {
     /// What XTOP reads.
     pub top: u32,
     /// Where XGKICK sends packets (PATH1).
-    pub gs: &'a mut Gs,
+    pub gs: &'a mut dyn Sink,
 }
 
 /// A VU and its memories for one program.
@@ -42,6 +42,8 @@ pub struct Unit<'a> {
     pub data: &'a mut [u8],
     /// VU1's extras; `None` for VU0.
     pub vu1: Option<Vu1Link<'a>>,
+    /// Its decoded pairs.
+    pub cache: &'a mut Cache,
 }
 
 /// How a program ended.
@@ -147,6 +149,46 @@ fn classify(m: &str) -> Upper {
         _ => Operand::Bc,
     };
     Upper::Arith(arith, operand, acc)
+}
+
+/// A pair decoded, kept by address in micro memory; an entry is used
+/// only while the memory still holds the same 64 bits there.
+#[derive(Clone, Copy)]
+struct Decoded {
+    raw: u64,
+    pair: Pair,
+    class: Upper,
+}
+
+/// Decoded pairs of a VU's micro memory (one per VU, kept between
+/// programs).
+#[derive(Clone, Default)]
+pub struct Cache {
+    slots: Vec<Option<Decoded>>,
+}
+
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cache({} pairs)", self.slots.iter().flatten().count())
+    }
+}
+
+impl Cache {
+    /// The decoded pair at `pc` (micro memory of `size` bytes).
+    fn get(&mut self, size: usize, pc: u32, upper: u32, lower: u32) -> (Pair, Upper) {
+        if self.slots.len() != size / 8 {
+            self.slots = vec![None; size / 8];
+        }
+        let raw = (u64::from(upper) << 32) | u64::from(lower);
+        let slot = &mut self.slots[(pc as usize / 8) % (size / 8)];
+        if let Some(d) = slot.filter(|d| d.raw == raw) {
+            return (d.pair, d.class);
+        }
+        let pair = Pair::from_words(upper, lower);
+        let class = upper_class(pair.upper_op());
+        *slot = Some(Decoded { raw, pair, class });
+        (pair, class)
+    }
 }
 
 /// Whether component `i` (0 = x … 3 = w) is in the 4-bit `dest` mask.
@@ -282,7 +324,7 @@ pub fn run(unit: &mut Unit<'_>, pc: u32) -> Run {
             u32::from_le_bytes([b[0], b[1], b[2], b[3]])
         };
         let (lower, upper) = (word(0), word(1));
-        let pair = Pair::from_words(upper, lower);
+        let (pair, class) = unit.cache.get(unit.code.len(), pc, upper, lower);
         let next_pc = (pc + 8) & code_mask;
         let mut writes = Writes::new();
         let mut branch: Option<u32> = None;
@@ -305,7 +347,6 @@ pub fn run(unit: &mut Unit<'_>, pc: u32) -> Run {
                 _ => {}
             }
         }
-        tracing::trace!(target: "vu::pairs", "{pc:04x}: {} vi {:x?}", pair.display(pc), &unit.regs.vi[1..16]);
         let r = &*unit.regs;
 
         // Upper half.
@@ -320,7 +361,7 @@ pub fn run(unit: &mut Unit<'_>, pc: u32) -> Run {
         let mut upper_flags: Option<(u32, u32)> = None;
         let mut upper_clip: Option<u32> = None;
         let mut upper_vf: Option<(usize, [u32; 4])> = None;
-        match upper_class(pair.upper_op()) {
+        match class {
             Upper::Arith(arith, operand, to_acc) => {
                 let (a, t, acc) = (r.vf[fs], r.vf[ft], r.acc);
                 let mut out = if to_acc { acc } else { r.vf[fd] };
@@ -740,7 +781,7 @@ fn efu(op: LowerOp, v: [u32; 4], f: u32) -> (u32, u64) {
 
 /// Sends the GIF packet at quadword `address` of VU1 data memory to the GS
 /// on PATH1: tags and their data up to the end of the tag with EOP set.
-fn xgkick(data: &[u8], address: u32, gs: &mut Gs) {
+fn xgkick(data: &[u8], address: u32, gs: &mut dyn Sink) {
     let mask = (data.len() / 16 - 1) as u32;
     let read = |q: u32| {
         let at = ((q & mask) * 16) as usize;

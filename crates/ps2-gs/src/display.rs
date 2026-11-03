@@ -23,6 +23,26 @@ pub struct Privileged {
     pub bgcolor: u64,
 }
 
+impl Privileged {
+    /// The registers from the privileged block (`0x12000000`), as a GS
+    /// dump holds it.
+    #[must_use]
+    pub fn from_block(block: &[u8]) -> Self {
+        let reg = |at: usize| {
+            block.get(at..at + 8).map_or(0, |b| {
+                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+            })
+        };
+        Self {
+            pmode: reg(0x00),
+            smode2: reg(0x20),
+            dispfb: [reg(0x70), reg(0x90)],
+            display: [reg(0x80), reg(0xA0)],
+            bgcolor: reg(0xE0),
+        }
+    }
+}
+
 /// A picture, RGB, row by row.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frame {

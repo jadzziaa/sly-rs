@@ -12,7 +12,7 @@
 //! frame and depth writes.
 
 use crate::regs::{Tex0, bits};
-use crate::{Gs, Psm, Vertex};
+use crate::{Gs, Memory, Psm, Vertex};
 
 /// Everything a primitive's fragments need, decoded once.
 #[allow(clippy::struct_excessive_bools, reason = "PRIM's attribute bits")]
@@ -111,6 +111,7 @@ impl Gs {
     /// Draws a primitive from its vertices.
     pub(crate) fn draw(&mut self, v: &[Vertex]) {
         self.drawn += 1;
+        let started = std::time::Instant::now();
         let p = self.pipe();
         let kind = self.prim & 7;
         let at = |v: &Vertex| (v.x as i32 - p.offset.0, v.y as i32 - p.offset.1);
@@ -124,6 +125,13 @@ impl Gs {
             3..=5 => self.triangle(&p, [at(&v[0]), at(&v[1]), at(&v[2])], v),
             _ => self.sprite(&p, at(&v[0]), at(&v[1]), &v[0], &v[1]),
         }
+        let class = match kind {
+            0 => 0,
+            1 | 2 => 1,
+            3..=5 => 2,
+            _ => 3,
+        };
+        self.draw_time[class] += started.elapsed();
     }
 
     /// A vertex's attributes as a fragment's.
@@ -222,59 +230,59 @@ impl Gs {
             dy < 0 || (dy == 0 && dx > 0)
         };
         let edges = [(pos[1], pos[2]), (pos[2], pos[0]), (pos[0], pos[1])];
+        let owned = edges.map(|(a, b)| owns(a, b));
         let inv = 1.0 / area as f64;
+        let flat_z = f[0].z == f[1].z && f[1].z == f[2].z;
+        let (tw, th) = (
+            f64::from(1u16 << p.tex.tw.min(10)),
+            f64::from(1u16 << p.tex.th.min(10)),
+        );
+        let (x0, x1) = (left.max(sx0), right.min(sx1));
         for y in top.max(sy0)..=bottom.min(sy1) {
-            for x in left.max(sx0)..=right.min(sx1) {
-                let (sx, sy) = (i64::from(x) * 16, i64::from(y) * 16);
-                let mut w = [0i64; 3];
-                let mut inside = true;
-                for (k, &(a, b)) in edges.iter().enumerate() {
-                    let e = edge(a, b, sx, sy);
-                    w[k] = e;
-                    if e < 0 || (e == 0 && !owns(a, b)) {
-                        inside = false;
-                        break;
-                    }
+            let sy = i64::from(y) * 16;
+            // Edge values at the row's first sample; each step right by a
+            // pixel changes them by a constant.
+            let e0 = edges.map(|(a, b)| edge(a, b, i64::from(x0) * 16, sy));
+            let step = edges.map(|(a, b)| -i64::from(b.1 - a.1) * 16);
+            let Some((from, to)) = row_span(e0, step, owned, i64::from(x1 - x0)) else {
+                continue;
+            };
+            let mut e = std::array::from_fn::<i64, 3, _>(|k| e0[k] + step[k] * from);
+            for x in x0 + from as i32..=x0 + to as i32 {
+                let w = e;
+                for k in 0..3 {
+                    e[k] += step[k];
                 }
-                if !inside {
+                if (0..3).any(|k| w[k] < 0 || (w[k] == 0 && !owned[k])) {
                     continue;
                 }
-                let b = w.map(|e| e as f64 * inv);
-                let lerp =
-                    |g: &dyn Fn(&Frag) -> f64| b[0] * g(&f[0]) + b[1] * g(&f[1]) + b[2] * g(&f[2]);
                 // Depth, colour and fog from the exact integer weights
                 // (they sum to the area), so a value all three vertices
                 // share comes out exactly.
-                let exact = |g: &dyn Fn(&Frag) -> i64| {
-                    let sum: i128 = (0..3)
-                        .map(|k| i128::from(w[k]) * i128::from(g(&f[k])))
-                        .sum();
-                    (sum / i128::from(area)) as i64
+                let exact = |a: i64, b: i64, c: i64| (w[0] * a + w[1] * b + w[2] * c) / area;
+                let z = if flat_z {
+                    f[0].z
+                } else {
+                    let sum: i128 = (0..3).map(|k| i128::from(w[k]) * i128::from(f[k].z)).sum();
+                    (sum / i128::from(area)) as u32
                 };
-                let z = exact(&|q| i64::from(q.z)) as u32;
                 let rgba = if p.iip {
-                    std::array::from_fn(|k| exact(&|q| i64::from(q.rgba[k])) as i32)
+                    std::array::from_fn(|k| {
+                        exact(
+                            f[0].rgba[k].into(),
+                            f[1].rgba[k].into(),
+                            f[2].rgba[k].into(),
+                        ) as i32
+                    })
                 } else {
                     last.rgba
                 };
-                let uv = if p.fst {
-                    (
-                        lerp(&|q| f64::from(q.uv.0)) as f32,
-                        lerp(&|q| f64::from(q.uv.1)) as f32,
-                    )
+                let uv = if p.tme {
+                    tex_coords(p, &f, w.map(|e| e as f64 * inv), (tw, th))
                 } else {
-                    // Perspective: interpolate S, T and Q, then divide.
-                    let (tw, th) = (
-                        f64::from(1u16 << p.tex.tw.min(10)),
-                        f64::from(1u16 << p.tex.th.min(10)),
-                    );
-                    let s = lerp(&|q| f64::from(q.stq[0]));
-                    let t = lerp(&|q| f64::from(q.stq[1]));
-                    let q = lerp(&|q| f64::from(q.stq[2]));
-                    let q = if q == 0.0 { f64::MIN_POSITIVE } else { q };
-                    ((s / q * tw) as f32, (t / q * th) as f32)
+                    (0.0, 0.0)
                 };
-                let fog = exact(&|q| i64::from(q.f)) as i32;
+                let fog = exact(f[0].f.into(), f[1].f.into(), f[2].f.into()) as i32;
                 self.fragment(
                     p,
                     x,
@@ -382,12 +390,26 @@ impl Gs {
         // truncated (as PCSX2's software renderer does).
         let (u, v) = ((u * 16.0) as i32 - 8, (v * 16.0) as i32 - 8);
         let (iu, iv, fu, fv) = (u >> 4, v >> 4, u & 15, v & 15);
-        let t = [
-            channels(self.texel(p, iu, iv)),
-            channels(self.texel(p, iu + 1, iv)),
-            channels(self.texel(p, iu, iv + 1)),
-            channels(self.texel(p, iu + 1, iv + 1)),
-        ];
+        // A zero weight takes nothing from the texel it weighs (`lerp(a, b,
+        // 0)` is `a`), so that texel is not fetched.
+        let t00 = channels(self.texel(p, iu, iv));
+        let t10 = if fu == 0 {
+            t00
+        } else {
+            channels(self.texel(p, iu + 1, iv))
+        };
+        let (t01, t11) = if fv == 0 {
+            (t00, t10)
+        } else {
+            let t01 = channels(self.texel(p, iu, iv + 1));
+            let t11 = if fu == 0 {
+                t01
+            } else {
+                channels(self.texel(p, iu + 1, iv + 1))
+            };
+            (t01, t11)
+        };
+        let t = [t00, t10, t01, t11];
         let lerp = |a: i32, b: i32, f: i32| a + (((b - a) * f) >> 4);
         std::array::from_fn(|k| {
             let top = lerp(t[0][k], t[1][k], fu);
@@ -408,6 +430,45 @@ impl Gs {
             _ => {}
         }
         let (x, y) = (x as u32, y as u32);
+        // The tests that need no texture first, so a fragment they reject
+        // costs no sampling; the result is the same in either order.
+        let t = p.test;
+        let (fpsm, fbp, fbw) = p.frame;
+        let at = Memory::locate(fpsm, fbp, fbw, x, y);
+        let dst = self.mem.get(at);
+        // Destination alpha test.
+        if bits(t, 14, 1) != 0 {
+            let bit = match fpsm {
+                Psm::Ct32 => dst >> 31,
+                Psm::Ct16 | Psm::Ct16s => (dst >> 15) & 1,
+                _ => bits(t, 15, 1),
+            };
+            if bit != bits(t, 15, 1) {
+                return;
+            }
+        }
+        // Depth test; the depth is written once the alpha test allows.
+        let mut depth = None;
+        if let Some((zpsm, zbp)) = p.zbuf {
+            let max = match zpsm {
+                Psm::Z24 => 0x00FF_FFFF,
+                Psm::Z16 | Psm::Z16s => 0xFFFF,
+                _ => u32::MAX,
+            };
+            let z = frag.z.min(max);
+            let z_at = Memory::locate(zpsm, zbp, fbw, x, y);
+            let old = self.mem.get(z_at);
+            let pass = match bits(t, 17, 2) {
+                0 => false,
+                1 => true,
+                2 => z >= old,
+                _ => z > old,
+            };
+            if !pass {
+                return;
+            }
+            depth = Some((z_at, z));
+        }
         let mut c = frag.rgba;
         if p.tme {
             let t = self.sample(p, frag.uv);
@@ -450,7 +511,6 @@ impl Gs {
         }
         // Alpha test: which writes survive.
         let (mut write_fb, mut write_z, mut write_alpha) = (true, !p.zmsk, true);
-        let t = p.test;
         if bits(t, 0, 1) != 0 {
             let (a, aref) = (c[3], bits(t, 4, 8) as i32);
             let pass = match bits(t, 1, 3) {
@@ -475,40 +535,8 @@ impl Gs {
                 }
             }
         }
-        let (fpsm, fbp, fbw) = p.frame;
-        let dst = self.mem.read(fpsm, fbp, fbw, x, y);
-        // Destination alpha test.
-        if bits(t, 14, 1) != 0 {
-            let bit = match fpsm {
-                Psm::Ct32 => dst >> 31,
-                Psm::Ct16 | Psm::Ct16s => (dst >> 15) & 1,
-                _ => bits(t, 15, 1),
-            };
-            if bit != bits(t, 15, 1) {
-                return;
-            }
-        }
-        // Depth test.
-        if let Some((zpsm, zbp)) = p.zbuf {
-            let max = match zpsm {
-                Psm::Z24 => 0x00FF_FFFF,
-                Psm::Z16 | Psm::Z16s => 0xFFFF,
-                _ => u32::MAX,
-            };
-            let z = frag.z.min(max);
-            let old = self.mem.read(zpsm, zbp, fbw, x, y);
-            let pass = match bits(t, 17, 2) {
-                0 => false,
-                1 => true,
-                2 => z >= old,
-                _ => z > old,
-            };
-            if !pass {
-                return;
-            }
-            if write_z {
-                self.mem.write(zpsm, zbp, fbw, x, y, z);
-            }
+        if write_z && let Some((z_at, z)) = depth {
+            self.mem.set(z_at, z);
         }
         if !write_fb {
             return;
@@ -561,8 +589,44 @@ impl Gs {
             Psm::Ct24 => (rgba & 0x00FF_FFFF, p.fbmsk | 0xFF00_0000),
             _ => (rgba, p.fbmsk),
         };
-        self.mem
-            .write(fpsm, fbp, fbw, x, y, (new & !mask) | (dst & mask));
+        self.mem.set(at, (new & !mask) | (dst & mask));
+    }
+}
+
+/// The pixels of a triangle's row worth testing, relative to its first:
+/// from the edge equations (an edge owned or not needs a value of at least
+/// 0 or 1), one pixel wider on each side; the per-pixel test decides
+/// exactly.
+fn row_span(e0: [i64; 3], step: [i64; 3], owned: [bool; 3], last: i64) -> Option<(i64, i64)> {
+    let (mut from, mut to) = (0, last);
+    for k in 0..3 {
+        let need = i64::from(!owned[k]) - e0[k];
+        match step[k].cmp(&0) {
+            std::cmp::Ordering::Greater => from = from.max(need.div_euclid(step[k]) - 1),
+            std::cmp::Ordering::Less => to = to.min((-need).div_euclid(-step[k]) + 1),
+            std::cmp::Ordering::Equal if need > 0 => return None,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    (from <= to).then_some((from, to))
+}
+
+/// Texture coordinates at a triangle's sample with barycentric weights `b`:
+/// UV interpolated, or S, T and Q interpolated then divided (perspective).
+fn tex_coords(p: &Pipe, f: &[Frag; 3], b: [f64; 3], (tw, th): (f64, f64)) -> (f32, f32) {
+    let lerp =
+        |g: [f32; 3]| b[0] * f64::from(g[0]) + b[1] * f64::from(g[1]) + b[2] * f64::from(g[2]);
+    if p.fst {
+        (
+            lerp([f[0].uv.0, f[1].uv.0, f[2].uv.0]) as f32,
+            lerp([f[0].uv.1, f[1].uv.1, f[2].uv.1]) as f32,
+        )
+    } else {
+        let s = lerp([f[0].stq[0], f[1].stq[0], f[2].stq[0]]);
+        let t = lerp([f[0].stq[1], f[1].stq[1], f[2].stq[1]]);
+        let q = lerp([f[0].stq[2], f[1].stq[2], f[2].stq[2]]);
+        let q = if q == 0.0 { f64::MIN_POSITIVE } else { q };
+        ((s / q * tw) as f32, (t / q * th) as f32)
     }
 }
 

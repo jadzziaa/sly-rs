@@ -574,6 +574,7 @@ dependencies = [
  "ps2-core",
  "ps2-disc",
  "ps2-ee",
+ "ps2-gs",
  "ps2-iop",
  "ps2-isa",
  "sly-common",

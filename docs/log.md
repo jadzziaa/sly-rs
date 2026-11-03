@@ -1,5 +1,8 @@
 # Update log
 
+## 2026-11-03
+* **Update**: Speed: the 3D title from about 200 ms to about 35 ms a field, pictures unchanged ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).
+
 ## 2026-11-02
 * **Update**: Phase 6: the title's spotlight matches PCSX2 after exact triangle interpolation; the title field now differs by at most 11 levels ([sly1-graphics.md](research/sly1-graphics.md)).
 * **Update**: Phase 6: Sly 1 compared with PCSX2, which draws sly-rs's own packets through GS dumps; the dialog matches pixel for pixel, the 3D title differs in its spotlight ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).

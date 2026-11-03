@@ -6,6 +6,7 @@ mod analyze;
 mod disasm;
 mod elf;
 mod elf_run;
+mod gs_replay;
 mod info;
 mod lockstep;
 mod replay;
@@ -142,6 +143,19 @@ enum Command {
         #[arg(long)]
         replay: Option<PathBuf>,
     },
+    /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
+    /// (a benchmark of drawing) and write what the display shows at its
+    /// end.
+    GsReplay {
+        /// The dump.
+        path: PathBuf,
+        /// Times to play it.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+        /// Write what the display shows at the end to this PNG file.
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
+    },
     /// Run a replay (scripted presses) and check its checkpoints: the game's
     /// world and level, and the machine's state hash.
     Replay {
@@ -232,6 +246,11 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
             record,
             interpret,
         } => replay::run(&path, record, recompiled.filter(|_| !interpret)),
+        Command::GsReplay {
+            path,
+            repeat,
+            screenshot,
+        } => gs_replay::run(&path, repeat, screenshot.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

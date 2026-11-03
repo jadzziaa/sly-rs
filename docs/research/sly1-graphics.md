@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:25:20Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:05:34Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:25:20Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:05:34Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -103,13 +103,47 @@ field).
   registers as the BIOS does for NTSC, and the GS CSR's revision and ID sit
   in bits 16 to 31.
 
+## Speed
+
+Measured on the replay's first 1300 fields; the last 200 are the 3D title.
+`perf` and `samply` need `kernel.perf_event_paranoid` at 1 or lower, so
+the profiles came from sampling stacks with gdb, and `sly-rs run` reports
+where host time goes. `sly-rs gs-replay` plays a GS dump through our GS
+alone, a repeatable benchmark of drawing.
+
+| | 1300 fields | 3D field |
+| --- | --- | --- |
+| Before | 76 s | about 200 ms |
+| After | 29.7 s | about 35 ms |
+
+Real time is 16.7 ms a field. Every change left the pictures bit for bit
+the same: the whole of GS memory at field 1300 hashes the same, and the
+replay's state hashes are unchanged. The changes:
+
+- **The GS on its own thread.** Nothing the EE does depends on what the GS
+  draws. A tag scanner finds the SIGNAL, FINISH and LABEL writes as packets
+  are sent, and the GS draws them in order on a worker thread.
+- **Fewer event checks.** The machine recomputed its next event after
+  every interpreted instruction, 16% of the main thread. Now it does so
+  only after a system call or a hardware write.
+- **Drawing.**
+  - Each triangle row is scanned only across its span.
+  - The depth and destination-alpha tests run before texturing.
+  - Local memory is held as words, with per-format page tables.
+  - Frame and depth pixels are located once per fragment.
+  - Texels with a zero bilinear weight are not fetched.
+  - The GS dump replay went from 0.285 s to 0.197 s.
+- **VU programs.** Decoded pairs are kept per VU, used only while the
+  memory still holds the same pair.
+
+The main thread is now mostly VU1 interpretation (VIF1 with VU1, about 56%
+of the run's time); the GS thread is busy about 80% of it.
+
 ## Open
 
 - The logo's top edge looked clipped in earlier pictures; field and
   interlace handling in the display are checked only for this game's
   mode (NTSC, field mode).
-- Speed: about 0.05 s per field on the title's dialog; about 0.2 s per
-  field once the 3D scene draws (software rasteriser, VU interpreter).
 
 [^runs]: Runs of Sly 1 with the GS, VIFs and VUs modelled
 [^symbols]: Sly 1 function and variable names (TheOnlyZac/sly1, CC0)

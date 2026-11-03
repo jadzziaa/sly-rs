@@ -129,6 +129,9 @@ pub struct Memory {
     /// Set by a write after which the [`Mmio`] handler says an interrupt
     /// may be taken; recompiled code clears it and exits.
     pub attention: bool,
+    /// Writes to hardware registers so far: the machine's next event can
+    /// only change when this does (or the kernel runs).
+    pub mmio_writes: u64,
 }
 
 macro_rules! access {
@@ -154,6 +157,7 @@ macro_rules! access {
             match self.regions.slice_mut(address, N as u32) {
                 Some(bytes) => bytes.copy_from_slice(&value.to_le_bytes()),
                 None => {
+                    self.mmio_writes += 1;
                     self.attention |=
                         self.mmio
                             .write(&mut self.regions, address, N as u32, u128::from(value));
@@ -171,6 +175,7 @@ impl Memory {
             regions: Regions::default(),
             mmio,
             attention: false,
+            mmio_writes: 0,
         }
     }
 

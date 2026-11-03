@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:25:20Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:05:34Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -673,7 +673,9 @@ given: the gates are the schedule.
     dialog, its title over the first level's night scene, and the level's
     intro ([research/sly1-graphics.md](research/sly1-graphics.md)).
     Nothing is compared with PCSX2 yet.
-  - Speed: about 0.2 s per field once 3D draws.
+  - Speed: about 35 ms per field once 3D draws, about half real speed
+    (from about 200 ms; [research/sly1-graphics.md](research/sly1-graphics.md)).
+    This is with the EE interpreted.
   - Compared with PCSX2 ([research/sly1-graphics.md](research/sly1-graphics.md)):
     - `sly-rs run --gs-dump` writes PCSX2 GS dumps, so PCSX2 draws our
       exact packets. This replaces sub-gate (b), a GS conformance program:
@@ -682,7 +684,8 @@ given: the gates are the schedule.
       field, 16,561 of 143,360 pixels differ, by at most 11, and 45 by
       more than 8: rounding of perspective texture coordinates and
       shading.
-  - Next: speed, measured first.
+  - Next: the VU1 interpreter (most of the main thread in 3D), and
+    drawing (now on its own thread, busy about 80% of the time).
 
 ### Phase 7 - Playable Sly 1
 

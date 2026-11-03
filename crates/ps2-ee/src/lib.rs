@@ -275,7 +275,7 @@ impl Machine {
                 if hw.gs.dumping() {
                     let field = ((hw.gs_csr >> 13) & 1) as u8;
                     let block = hw.gs_privileged();
-                    hw.gs.dump_vsync(field, &block);
+                    hw.gs.dump_vsync(field, block);
                 }
                 hw.gs_csr
             };
@@ -362,9 +362,11 @@ impl Machine {
             code: &mut regions.vu0_code,
             data: &mut regions.vu0_data,
         };
+        let started = std::time::Instant::now();
         if hw.vif0.run(&mut self.cpu.vu0, &mut mem, &mut hw.gs) == ps2_vu::vif::Stop::Interrupt {
             hw.raise_intc(intc::VIF0);
         }
+        hw.timing.vif0 += started.elapsed();
     }
 
     /// Runs until `budget` more cycles have passed or the machine stops.
@@ -382,10 +384,14 @@ impl Machine {
             if self.iop.pending() && !self.kernel.in_interrupt() && self.iop.deliver(&mut self.mem)
             {
                 self.hw.borrow_mut().complete_dma(5);
+                next_event = next_event.min(self.next_event());
             }
             if self.interrupt_ready() {
-                let mut hw = self.hw.borrow_mut();
-                self.kernel.begin_interrupt(&mut self.cpu, &mut hw);
+                {
+                    let mut hw = self.hw.borrow_mut();
+                    self.kernel.begin_interrupt(&mut self.cpu, &mut hw);
+                }
+                next_event = next_event.min(self.next_event());
             }
             if self.kernel.current.is_none() && !self.kernel.in_interrupt() {
                 // Every thread waits: jump to the next event, but not past
@@ -422,6 +428,7 @@ impl Machine {
                 continue;
             }
             let before = self.cpu.cycles;
+            let writes = self.mem.mmio_writes;
             let syscall =
                 Insn::decode(self.mem.read32(self.cpu.pc)).op() == ps2_isa::ee::Op::Syscall;
             if let Some(stop) = self.step() {
@@ -436,7 +443,10 @@ impl Machine {
             if !self.table.is_empty() && self.stats.interpreted_at.len() < 4096 {
                 *self.stats.interpreted_at.entry(self.cpu.pc).or_default() += ran;
             }
-            next_event = next_event.min(self.next_event());
+            // Only the kernel and hardware writes schedule events.
+            if syscall || self.mem.mmio_writes != writes {
+                next_event = next_event.min(self.next_event());
+            }
         }
         Stop::Budget
     }
@@ -444,6 +454,12 @@ impl Machine {
     /// Runs a VU program the EE started (`vcallms` for VU0, CMSAR1 for
     /// VU1) to its end.
     fn run_vu(&mut self, vu1: bool, address: u32) {
+        let started = std::time::Instant::now();
+        self.run_vu_program(vu1, address);
+        self.hw.borrow_mut().timing.vu_calls += started.elapsed();
+    }
+
+    fn run_vu_program(&mut self, vu1: bool, address: u32) {
         let regions = &mut self.mem.regions;
         if !vu1 {
             ps2_vu::micro::run(
@@ -452,6 +468,7 @@ impl Machine {
                     code: &regions.vu0_code,
                     data: &mut regions.vu0_data,
                     vu1: None,
+                    cache: &mut self.hw.borrow_mut().vif0.cache,
                 },
                 address,
             );
@@ -469,6 +486,7 @@ impl Machine {
                     top: hw.vif1.read(0xE0),
                     gs: &mut hw.gs,
                 }),
+                cache: &mut hw.vif1.cache,
             },
             address,
         );

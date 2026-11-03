@@ -1,4 +1,5 @@
 use super::*;
+use ps2_gs::Gs;
 
 const ONE: u32 = 0x3F80_0000;
 const TWO: u32 = 0x4000_0000;
@@ -36,6 +37,7 @@ fn exec(code: &[u8], regs: &mut Regs, data: &mut [u8], gs: Option<&mut Gs>) -> R
             code,
             data,
             vu1,
+            cache: &mut Cache::default(),
         },
         0,
     )

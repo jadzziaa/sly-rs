@@ -80,9 +80,9 @@ pub struct Hardware {
     pub transfers: Vec<crate::dma::Transfer>,
     /// The GS's SIGNAL and LABEL registers, as packets last set them.
     pub gs_signal_label: (u64, u64),
-    /// The GS itself (outside the state hash: it only follows what the
-    /// EE sends it).
-    pub gs: Box<ps2_gs::Gs>,
+    /// The GS itself, drawing on a thread of its own (outside the state
+    /// hash: it only follows what the EE sends it).
+    pub gs: ps2_gs::thread::Threaded,
     /// VIF0.
     pub vif0: ps2_vu::Vif,
     /// VIF0 transfers completed, for the machine to run through VIF0.
@@ -93,6 +93,20 @@ pub struct Hardware {
     pub vu1: ps2_vu::Regs,
     /// VIF1's transfer, while it is under way.
     vif1_chain: Option<crate::dma::Chain>,
+    /// Host time spent in the VIFs (with the VU programs they start and
+    /// what those draw), and in VU programs the EE starts (for reports).
+    pub timing: Timing,
+}
+
+/// Host time spent by subsystem, for reports.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Timing {
+    /// VIF0, with VU0 programs.
+    pub vif0: std::time::Duration,
+    /// VIF1, with VU1 programs and what they draw.
+    pub vif1: std::time::Duration,
+    /// VU programs the EE starts (`vcallms`, CMSAR1).
+    pub vu_calls: std::time::Duration,
 }
 
 impl Hardware {
@@ -116,12 +130,13 @@ impl Hardware {
             console: Vec::new(),
             transfers: Vec::new(),
             gs_signal_label: (0, 0),
-            gs: Box::default(),
+            gs: ps2_gs::thread::Threaded::default(),
             vif0: ps2_vu::Vif::new(false),
             vif0_ready: Vec::new(),
             vif1: ps2_vu::Vif::new(true),
             vu1: ps2_vu::reset_regs(),
             vif1_chain: None,
+            timing: Timing::default(),
         }
     }
 
@@ -229,7 +244,7 @@ impl Hardware {
             return;
         }
         if channel == 2 {
-            self.gs.gif(3, moves.quadwords(regions));
+            ps2_gs::thread::Sink::gif(&mut self.gs, 3, moves.quadwords(regions).collect());
         }
         let words = if channel == 0 {
             moves.words(regions)
@@ -272,6 +287,7 @@ impl Hardware {
             return;
         };
         let before = chain.cycles();
+        let started = std::time::Instant::now();
         let mut words = Vec::with_capacity(4);
         let interrupt = loop {
             let mut mem = ps2_vu::Memories {
@@ -293,6 +309,7 @@ impl Hardware {
                 }
             }
         };
+        self.timing.vif1 += started.elapsed();
         let due = self.clock.get() + chain.cycles() - before;
         self.transfers.push(crate::dma::Transfer {
             channel: 1,
@@ -487,7 +504,7 @@ impl Mmio for HardwareHandle {
             0x1000_6000 => {
                 // The GIF's FIFO: PATH3 packets written by the EE. Their
                 // events are raised at once.
-                hw.gs.gif(3, [value]);
+                ps2_gs::thread::Sink::gif(&mut hw.gs, 3, vec![value]);
                 let events = hw.gs.take_events();
                 hw.raise_gs_events(events);
                 return true;

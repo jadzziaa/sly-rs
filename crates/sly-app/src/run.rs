@@ -51,7 +51,7 @@ pub(crate) fn run(
             {
                 let mut hw = machine.hw.borrow_mut();
                 let block = hw.gs_privileged();
-                hw.gs.start_dump(&block);
+                hw.gs.start_dump(block);
             }
             let stop = if stop == ps2_ee::Stop::Budget {
                 sly_common::replay::run(&mut machine, fields - before, &presses)
@@ -67,7 +67,8 @@ pub(crate) fn run(
     let elapsed = started.elapsed();
     if let Some(path) = pictures.screenshot {
         let hw = machine.hw.borrow();
-        let frame = hw.gs.display(&hw.gs_display());
+        let regs = hw.gs_display();
+        let frame = hw.gs.with(move |gs| gs.display(&regs));
         std::fs::write(path, frame.png()).with_context(|| format!("writing {}", path.display()))?;
     }
     let mut out = io::stdout().lock();
@@ -127,10 +128,36 @@ pub(crate) fn run(
     )?;
     let hw = machine.hw.borrow();
     writeln!(out, "  DMA kicks: {:?}", hw.dma_kicks)?;
+    let (memory_hash, d, drawn) = hw.gs.with(|gs| {
+        let hash = gs
+            .mem
+            .to_bytes()
+            .iter()
+            .fold(0xCBF2_9CE4_8422_2325u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x100_0000_01B3)
+            });
+        (hash, gs.draw_time, gs.drawn)
+    });
+    writeln!(out, "  GS memory hash {memory_hash:016x}")?;
+    let t = &hw.timing;
+    let total = elapsed.as_secs_f64();
+    let pct = |x: std::time::Duration| 100.0 * x.as_secs_f64() / total;
+    writeln!(
+        out,
+        "  host time: GS drawing {:.1}% on its own thread (points {:.1}%, lines {:.1}%, triangles {:.1}%, sprites {:.1}%); VIF1 with VU1 {:.1}%; VIF0 with VU0 {:.1}%; VU programs the EE starts {:.1}%",
+        pct(d.iter().sum()),
+        pct(d[0]),
+        pct(d[1]),
+        pct(d[2]),
+        pct(d[3]),
+        pct(t.vif1),
+        pct(t.vif0),
+        pct(t.vu_calls),
+    )?;
     writeln!(
         out,
         "  GS: {} primitives drawn; display {:x?}",
-        hw.gs.drawn,
+        drawn,
         hw.gs_display()
     )?;
     writeln!(out, "  IOP commands: {:x?}", machine.iop.commands)?;

@@ -25,6 +25,7 @@ pub mod gif;
 pub mod mem;
 pub mod regs;
 mod tables;
+pub mod thread;
 mod transfer;
 
 pub use display::{Frame, Privileged};
@@ -104,6 +105,9 @@ pub struct Gs {
     dump: Option<dump::Dump>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
+    /// Host time spent drawing, by primitive class: points, lines,
+    /// triangles, sprites (for reports).
+    pub draw_time: [std::time::Duration; 4],
 }
 
 impl Default for Gs {
@@ -139,6 +143,7 @@ impl Default for Gs {
             events: Events::default(),
             dump: None,
             drawn: 0,
+            draw_time: Default::default(),
         }
     }
 }

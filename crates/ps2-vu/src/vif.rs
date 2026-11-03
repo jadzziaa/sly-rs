@@ -14,7 +14,7 @@
 
 use std::collections::VecDeque;
 
-use ps2_gs::Gs;
+use ps2_gs::thread::Sink;
 
 use crate::{Memories, Regs, micro};
 
@@ -78,6 +78,8 @@ pub struct Vif {
     pub commands: u64,
     /// VU programs started, for reports.
     pub programs: u64,
+    /// The VU's decoded pairs.
+    pub cache: micro::Cache,
 }
 
 impl Vif {
@@ -107,6 +109,7 @@ impl Vif {
             fifo: VecDeque::new(),
             commands: 0,
             programs: 0,
+            cache: micro::Cache::default(),
         }
     }
 
@@ -155,6 +158,7 @@ impl Vif {
                     *self = Self {
                         commands: self.commands,
                         programs: self.programs,
+                        cache: std::mem::take(&mut self.cache),
                         ..Self::new(self.vif1)
                     };
                 }
@@ -208,7 +212,7 @@ impl Vif {
 
     /// Runs commands until the FIFO runs dry or a stall. `regs` and `mem`
     /// are the VU this VIF feeds.
-    pub fn run(&mut self, regs: &mut Regs, mem: &mut Memories<'_>, gs: &mut Gs) -> Stop {
+    pub fn run(&mut self, regs: &mut Regs, mem: &mut Memories<'_>, gs: &mut dyn Sink) -> Stop {
         loop {
             if self.stalled() {
                 return Stop::Stalled;
@@ -240,7 +244,7 @@ impl Vif {
         data: &[u32],
         regs: &mut Regs,
         mem: &mut Memories<'_>,
-        gs: &mut Gs,
+        gs: &mut dyn Sink,
     ) {
         let cmd = (code >> 24) & 0x7F;
         let imm = code & 0xFFFF;
@@ -281,7 +285,7 @@ impl Vif {
                         | u128::from(w[2]) << 64
                         | u128::from(w[3]) << 96
                 });
-                gs.gif(2, qwords);
+                gs.gif(2, qwords.collect());
             }
             0x60..=0x7F => self.unpack(code, data, mem),
             // NOP, FLUSHE, FLUSH, FLUSHA (the VU has finished: it runs to
@@ -292,7 +296,13 @@ impl Vif {
 
     /// Starts the VU at `pc` (or where it stopped), after updating the
     /// double-buffer registers.
-    fn start(&mut self, regs: &mut Regs, mem: &mut Memories<'_>, gs: &mut Gs, pc: Option<u32>) {
+    fn start(
+        &mut self,
+        regs: &mut Regs,
+        mem: &mut Memories<'_>,
+        gs: &mut dyn Sink,
+        pc: Option<u32>,
+    ) {
         self.itop = self.itops;
         if self.vif1 {
             self.top = self.tops & 0x3FF;
@@ -317,6 +327,7 @@ impl Vif {
                 code: mem.code,
                 data: mem.data,
                 vu1,
+                cache: &mut self.cache,
             },
             pc,
         );
@@ -468,7 +479,7 @@ mod tests {
         regs: Regs,
         code: Vec<u8>,
         data: Vec<u8>,
-        gs: Gs,
+        gs: ps2_gs::Gs,
     }
 
     impl Rig {
@@ -478,7 +489,7 @@ mod tests {
                 regs: crate::reset_regs(),
                 code: vec![0; 0x4000],
                 data: vec![0; 0x4000],
-                gs: Gs::default(),
+                gs: ps2_gs::Gs::default(),
             }
         }
 

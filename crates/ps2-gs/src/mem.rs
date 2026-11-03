@@ -86,27 +86,31 @@ impl Psm {
     }
 }
 
-/// Where a pixel lives: the byte address and, for 4-bit formats, whether it
-/// is the high nibble.
+/// Where a pixel lives: a word of local memory and the bits of it the
+/// format holds (`mask` at `shift`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Place {
-    byte: usize,
-    high: bool,
+pub struct Pixel {
+    word: usize,
+    shift: u32,
+    mask: u32,
 }
 
 /// The address of pixel (`x`, `y`) of a `psm` buffer at `bp` with width
 /// `bw`.
-fn place(psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> Place {
-    let (page_w, page_h, pages_per_row) = match psm {
-        Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (64, 64, bw),
-        Psm::T8 => (128, 64, bw >> 1),
-        Psm::T4 => (128, 128, bw >> 1),
-        _ => (64, 32, bw),
+/// The address from the block and column tables directly: the reference
+/// [`place`]'s page tables are built from.
+fn place_slow(psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> Pixel {
+    // Page width and height as powers of two.
+    let (w_shift, h_shift, pages_per_row) = match psm {
+        Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (6, 6, bw),
+        Psm::T8 => (7, 6, bw >> 1),
+        Psm::T4 => (7, 7, bw >> 1),
+        _ => (6, 5, bw),
     };
     // As the GS (and PCSX2) does: x past the width runs into the next row's
     // pages, and 8- and 4-bit buffers have half as many pages per row.
-    let page = (y / page_h) * pages_per_row + x / page_w;
-    let (px, py) = (x % page_w, y % page_h);
+    let page = (y >> h_shift) * pages_per_row + (x >> w_shift);
+    let (px, py) = (x & ((1 << w_shift) - 1), y & ((1 << h_shift) - 1));
     let z = if psm.is_depth() { 0x18 } else { 0 };
     let (block, offset, high) = match psm {
         Psm::Ct16 | Psm::Z16 => {
@@ -148,99 +152,179 @@ fn place(psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> Place {
         }
     };
     let block = (bp + page * 32 + u32::from(block ^ z)) & 0x3FFF;
-    Place {
-        byte: block as usize * 256 + offset,
-        high,
+    let byte = block as usize * 256 + offset;
+    let (shift, mask) = match psm {
+        Psm::Ct32 | Psm::Z32 => (0, u32::MAX),
+        Psm::Ct24 | Psm::Z24 => (0, 0x00FF_FFFF),
+        Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (8 * (byte as u32 & 2), 0xFFFF),
+        Psm::T8 => (8 * (byte as u32 & 3), 0xFF),
+        Psm::T4 => (8 * (byte as u32 & 3) + 4 * u32::from(high), 0xF),
+        Psm::T8h => (24, 0xFF),
+        Psm::T4hl => (24, 0xF),
+        Psm::T4hh => (28, 0xF),
+    };
+    Pixel {
+        word: byte / 4,
+        shift,
+        mask,
     }
 }
 
-/// GS local memory.
+/// Offsets within a page, by position in the page (row by row): bytes for
+/// 32- and 16-bit formats and PSMT8, nibbles for PSMT4.
+struct PageTables {
+    ct32: Vec<u16>,
+    z32: Vec<u16>,
+    ct16: Vec<u16>,
+    ct16s: Vec<u16>,
+    z16: Vec<u16>,
+    z16s: Vec<u16>,
+    t8: Vec<u16>,
+    t4: Vec<u16>,
+}
+
+fn page_tables() -> &'static PageTables {
+    static TABLES: std::sync::OnceLock<PageTables> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        // A page at block 0 with one page per row: the offset is the
+        // address itself.
+        let table = |psm: Psm, w: u32, h: u32, nibbles: bool| -> Vec<u16> {
+            let bw = if matches!(psm, Psm::T8 | Psm::T4) {
+                2
+            } else {
+                1
+            };
+            (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let p = place_slow(psm, 0, bw, x, y);
+                    let byte = p.word * 4 + (p.shift / 8) as usize;
+                    let at = if nibbles {
+                        byte * 2 + ((p.shift / 4) & 1) as usize
+                    } else {
+                        byte
+                    };
+                    at as u16
+                })
+                .collect()
+        };
+        PageTables {
+            ct32: table(Psm::Ct32, 64, 32, false),
+            z32: table(Psm::Z32, 64, 32, false),
+            ct16: table(Psm::Ct16, 64, 64, false),
+            ct16s: table(Psm::Ct16s, 64, 64, false),
+            z16: table(Psm::Z16, 64, 64, false),
+            z16s: table(Psm::Z16s, 64, 64, false),
+            t8: table(Psm::T8, 128, 64, false),
+            t4: table(Psm::T4, 128, 128, true),
+        }
+    })
+}
+
+/// The address of pixel (`x`, `y`) of a `psm` buffer at `bp` with width
+/// `bw`: its page's base, then the page table's offset.
+#[inline]
+fn place(psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> Pixel {
+    let t = page_tables();
+    let (table, w_shift, h_shift, pages_per_row): (&[u16], u32, u32, u32) = match psm {
+        Psm::Ct32 | Psm::Ct24 | Psm::T8h | Psm::T4hl | Psm::T4hh => (&t.ct32, 6, 5, bw),
+        Psm::Z32 | Psm::Z24 => (&t.z32, 6, 5, bw),
+        Psm::Ct16 => (&t.ct16, 6, 6, bw),
+        Psm::Ct16s => (&t.ct16s, 6, 6, bw),
+        Psm::Z16 => (&t.z16, 6, 6, bw),
+        Psm::Z16s => (&t.z16s, 6, 6, bw),
+        Psm::T8 => (&t.t8, 7, 6, bw >> 1),
+        Psm::T4 => (&t.t4, 7, 7, bw >> 1),
+    };
+    let page = (y >> h_shift) * pages_per_row + (x >> w_shift);
+    let (px, py) = (x & ((1 << w_shift) - 1), y & ((1 << h_shift) - 1));
+    let offset = u32::from(table[((py << w_shift) | px) as usize]);
+    let base = (bp + page * 32) * 256;
+    let (byte, nibble) = if psm == Psm::T4 {
+        (offset >> 1, offset & 1)
+    } else {
+        (offset, 0)
+    };
+    let byte = ((base + byte) & 0x3F_FFFF) as usize;
+    let (shift, mask) = match psm {
+        Psm::Ct32 | Psm::Z32 => (0, u32::MAX),
+        Psm::Ct24 | Psm::Z24 => (0, 0x00FF_FFFF),
+        Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (8 * (byte as u32 & 2), 0xFFFF),
+        Psm::T8 => (8 * (byte as u32 & 3), 0xFF),
+        Psm::T4 => (8 * (byte as u32 & 3) + 4 * nibble, 0xF),
+        Psm::T8h => (24, 0xFF),
+        Psm::T4hl => (24, 0xF),
+        Psm::T4hh => (28, 0xF),
+    };
+    Pixel {
+        word: byte / 4,
+        shift,
+        mask,
+    }
+}
+
+/// GS local memory, as 32-bit words.
 pub struct Memory {
-    data: Box<[u8]>,
+    words: Box<[u32]>,
 }
 
 impl Default for Memory {
     fn default() -> Self {
         Self {
-            data: vec![0; SIZE].into_boxed_slice(),
+            words: vec![0; SIZE / 4].into_boxed_slice(),
         }
     }
 }
 
 impl Memory {
-    fn u32_at(&self, byte: usize) -> u32 {
-        let b = &self.data[byte..byte + 4];
-        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    /// Where pixel (`x`, `y`) of the `psm` buffer at `bp` with width `bw`
+    /// lives, for [`Memory::get`] and [`Memory::set`].
+    #[inline]
+    #[must_use]
+    pub fn locate(psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> Pixel {
+        place(psm, bp, bw, x, y)
     }
 
-    fn set_u32(&mut self, byte: usize, value: u32) {
-        self.data[byte..byte + 4].copy_from_slice(&value.to_le_bytes());
+    /// The pixel at `p`, as the format stores it (indices for T formats,
+    /// RGB5A1 for 16-bit colour).
+    #[inline]
+    #[must_use]
+    pub fn get(&self, p: Pixel) -> u32 {
+        (self.words[p.word] >> p.shift) & p.mask
+    }
+
+    /// Writes the pixel at `p`; bits the format does not hold are kept.
+    #[inline]
+    pub fn set(&mut self, p: Pixel, value: u32) {
+        let w = &mut self.words[p.word];
+        *w = (*w & !(p.mask << p.shift)) | ((value & p.mask) << p.shift);
     }
 
     /// Pixel (`x`, `y`) of the `psm` buffer at `bp` with width `bw`, as the
-    /// format stores it (indices for T formats, RGB5A1 for 16-bit colour).
+    /// format stores it.
+    #[inline]
     #[must_use]
     pub fn read(&self, psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> u32 {
-        let p = place(psm, bp, bw, x, y);
-        match psm {
-            Psm::Ct32 | Psm::Z32 => self.u32_at(p.byte),
-            Psm::Ct24 | Psm::Z24 => self.u32_at(p.byte) & 0x00FF_FFFF,
-            Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => u32::from(u16::from_le_bytes([
-                self.data[p.byte],
-                self.data[p.byte + 1],
-            ])),
-            Psm::T8 => u32::from(self.data[p.byte]),
-            Psm::T4 => u32::from(if p.high {
-                self.data[p.byte] >> 4
-            } else {
-                self.data[p.byte] & 0xF
-            }),
-            Psm::T8h => self.u32_at(p.byte) >> 24,
-            Psm::T4hl => (self.u32_at(p.byte) >> 24) & 0xF,
-            Psm::T4hh => self.u32_at(p.byte) >> 28,
-        }
+        self.get(place(psm, bp, bw, x, y))
     }
 
     /// Writes pixel (`x`, `y`); bits the format does not hold are kept.
+    #[inline]
     pub fn write(&mut self, psm: Psm, bp: u32, bw: u32, x: u32, y: u32, value: u32) {
-        let p = place(psm, bp, bw, x, y);
-        match psm {
-            Psm::Ct32 | Psm::Z32 => self.set_u32(p.byte, value),
-            Psm::Ct24 | Psm::Z24 => {
-                let old = self.u32_at(p.byte);
-                self.set_u32(p.byte, (old & 0xFF00_0000) | (value & 0x00FF_FFFF));
-            }
-            Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => {
-                self.data[p.byte..p.byte + 2].copy_from_slice(&(value as u16).to_le_bytes());
-            }
-            Psm::T8 => self.data[p.byte] = value as u8,
-            Psm::T4 => {
-                let b = &mut self.data[p.byte];
-                *b = if p.high {
-                    (*b & 0x0F) | ((value as u8 & 0xF) << 4)
-                } else {
-                    (*b & 0xF0) | (value as u8 & 0xF)
-                };
-            }
-            Psm::T8h => {
-                let old = self.u32_at(p.byte);
-                self.set_u32(p.byte, (old & 0x00FF_FFFF) | (value << 24));
-            }
-            Psm::T4hl => {
-                let old = self.u32_at(p.byte);
-                self.set_u32(p.byte, (old & !0x0F00_0000) | ((value & 0xF) << 24));
-            }
-            Psm::T4hh => {
-                let old = self.u32_at(p.byte);
-                self.set_u32(p.byte, (old & !0xF000_0000) | ((value & 0xF) << 28));
-            }
+        self.set(place(psm, bp, bw, x, y), value);
+    }
+
+    /// Replaces the memory with `bytes`, little-endian (from dumps).
+    pub fn load_bytes(&mut self, bytes: &[u8]) {
+        for (w, b) in self.words.iter_mut().zip(bytes.as_chunks::<4>().0) {
+            *w = u32::from_le_bytes(*b);
         }
     }
 
-    /// The raw bytes (for tests and dumps).
+    /// The memory as bytes, little-endian (for dumps).
     #[must_use]
-    pub fn bytes(&self) -> &[u8] {
-        &self.data
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 }
 
@@ -302,22 +386,40 @@ mod tests {
     }
 
     #[test]
+    fn page_tables_agree_with_the_block_and_column_tables() {
+        for psm in ALL {
+            for (bp, bw) in [(0, 1), (0x40, 2), (0x3FE0, 10), (0x123, 4)] {
+                for y in (0..300).step_by(7) {
+                    for x in (0..700).step_by(3) {
+                        assert_eq!(
+                            place(psm, bp, bw, x, y),
+                            place_slow(psm, bp, bw, x, y),
+                            "{psm:?} bp {bp:#x} bw {bw} at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn addresses_follow_the_tables() {
         // PSMCT32: pixel (2, 0) is the 5th of block 0; (8, 0) starts block 1;
         // (0, 8) starts block 2; (0, 32) is the next page row.
-        let at = |x, y| place(Psm::Ct32, 0, 1, x, y).byte;
+        let at = |x, y| place(Psm::Ct32, 0, 1, x, y).word * 4;
         assert_eq!(at(2, 0), 16);
         assert_eq!(at(8, 0), 256);
         assert_eq!(at(0, 8), 512);
         assert_eq!(at(0, 32), 8192);
         // Depth swaps block groups: Z32's first pixel is in block 24.
-        assert_eq!(place(Psm::Z32, 0, 1, 0, 0).byte, 24 * 256);
-        // PSMT4: two pixels per byte.
+        assert_eq!(place(Psm::Z32, 0, 1, 0, 0).word * 4, 24 * 256);
+        // PSMT4: two pixels per byte; pixel 1 is the low nibble of byte 4.
         assert_eq!(
             place(Psm::T4, 0, 2, 1, 0),
-            Place {
-                byte: 4,
-                high: false
+            Pixel {
+                word: 1,
+                shift: 0,
+                mask: 0xF
             }
         );
     }
