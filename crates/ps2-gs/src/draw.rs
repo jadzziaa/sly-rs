@@ -10,32 +10,67 @@
 //! bilinear) and the texture function, fog, the alpha test, the destination
 //! alpha test, the depth test, blending, COLCLAMP, FBA, then the masked
 //! frame and depth writes.
+//!
+//! A primitive is drawn from a [`Prim`]: its vertices and a snapshot of
+//! every register it reads ([`Pipe`]), so it can be drawn later, and in
+//! parts. [`Raster`] draws the part inside a clip rectangle; the parts of
+//! one primitive in rectangles that tile its bounding box are the whole of
+//! it ([`crate::batch`] draws tiles on several threads).
+
+use std::sync::Arc;
 
 use crate::regs::{Tex0, bits};
-use crate::{Gs, Memory, Psm, Vertex};
+use crate::{Gs, Memory, Psm, Vertex, clut_color, expand16, expand24};
 
 /// Everything a primitive's fragments need, decoded once.
 #[allow(clippy::struct_excessive_bools, reason = "PRIM's attribute bits")]
-struct Pipe {
+#[derive(Clone)]
+pub(crate) struct Pipe {
     tme: bool,
     fge: bool,
     abe: bool,
     fst: bool,
     iip: bool,
-    /// Scissor, inclusive, in pixels.
-    scissor: [i32; 4],
+    /// Scissor, inclusive, in pixels: x0, x1, y0, y1.
+    pub(crate) scissor: [i32; 4],
     offset: (i32, i32),
-    frame: (Psm, u32, u32),
+    /// The frame buffer: format, base block, width in 64-pixel units.
+    pub(crate) frame: (Psm, u32, u32),
     fbmsk: u32,
-    zbuf: Option<(Psm, u32)>,
+    /// The depth buffer when the depth test is on: format, base block.
+    pub(crate) zbuf: Option<(Psm, u32)>,
     zmsk: bool,
     test: u64,
     alpha: u64,
     fba: bool,
-    tex: Tex0,
-    tex_psm: Option<Psm>,
+    pub(crate) tex: Tex0,
+    pub(crate) tex_psm: Option<Psm>,
     clamp: u64,
     linear: bool,
+    texa: u64,
+    fogcol: u64,
+    colclamp: bool,
+    pabe: bool,
+    scanmsk: u32,
+    clut: Arc<[u16; 512]>,
+}
+
+impl Pipe {
+    /// Whether the primitive reads its texture.
+    pub(crate) const fn textured(&self) -> bool {
+        self.tme
+    }
+}
+
+/// A primitive ready to draw: its kind (PRIM's low bits), vertices, the
+/// registers it reads, and the pixels it may touch (x0, x1, y0, y1,
+/// inclusive; inside the scissor).
+#[derive(Clone)]
+pub(crate) struct Prim {
+    pub(crate) pipe: Pipe,
+    kind: u64,
+    v: [Vertex; 3],
+    pub(crate) bbox: [i32; 4],
 }
 
 /// A fragment's interpolated attributes.
@@ -51,7 +86,7 @@ struct Frag {
 }
 
 impl Gs {
-    fn pipe(&self) -> Pipe {
+    fn pipe(&mut self) -> Pipe {
         let attrs = if self.prmodecont & 1 != 0 {
             self.prim
         } else {
@@ -105,58 +140,125 @@ impl Gs {
             tex_psm: Psm::from_bits(u64::from(tex.psm)),
             clamp: c.clamp,
             linear,
+            texa: self.texa,
+            fogcol: self.fogcol,
+            colclamp: bits(self.colclamp, 0, 1) != 0,
+            pabe: bits(self.pabe, 0, 1) != 0,
+            scanmsk: bits(self.scanmsk, 0, 2),
+            clut: Arc::clone(self.clut_shared.get_or_insert_with(|| Arc::new(self.clut))),
         }
     }
 
-    /// Draws a primitive from its vertices.
+    /// Draws a primitive from its vertices: at once, or queued in a batch
+    /// when the GS draws with several threads.
     pub(crate) fn draw(&mut self, v: &[Vertex]) {
         self.drawn += 1;
         let started = std::time::Instant::now();
-        let p = self.pipe();
+        let pipe = self.pipe();
         let kind = self.prim & 7;
+        let mut vertices = [Vertex::default(); 3];
+        vertices[..v.len()].copy_from_slice(v);
+        if let Some(bbox) = bounds(&pipe, kind, &vertices) {
+            let prim = Prim {
+                pipe,
+                kind,
+                v: vertices,
+                bbox,
+            };
+            if self.batching() {
+                self.queue(prim);
+            } else {
+                Raster { mem: &self.mem }.prim(&prim, prim.bbox);
+            }
+        }
+        self.draw_time += started.elapsed();
+    }
+}
+
+/// The pixels a primitive may touch (x0, x1, y0, y1, inclusive), inside
+/// its scissor; `None` if there are none.
+fn bounds(p: &Pipe, kind: u64, v: &[Vertex; 3]) -> Option<[i32; 4]> {
+    let at = |v: &Vertex| (v.x as i32 - p.offset.0, v.y as i32 - p.offset.1);
+    let pos: Vec<(i32, i32)> = match kind {
+        0 => vec![at(&v[0])],
+        1 | 2 | 6 => vec![at(&v[0]), at(&v[1])],
+        _ => vec![at(&v[0]), at(&v[1]), at(&v[2])],
+    };
+    let (min_x, max_x) = (
+        pos.iter().map(|q| q.0).min()?,
+        pos.iter().map(|q| q.0).max()?,
+    );
+    let (min_y, max_y) = (
+        pos.iter().map(|q| q.1).min()?,
+        pos.iter().map(|q| q.1).max()?,
+    );
+    // The sample points each rasteriser can reach.
+    let [x0, x1, y0, y1] = match kind {
+        0 => [
+            (min_x + 15) >> 4,
+            (min_x + 15) >> 4,
+            (min_y + 15) >> 4,
+            (min_y + 15) >> 4,
+        ],
+        1 | 2 => [
+            (min_x + 8) >> 4,
+            (max_x + 8) >> 4,
+            (min_y + 8) >> 4,
+            (max_y + 8) >> 4,
+        ],
+        6 => [
+            (min_x + 15) >> 4,
+            ((max_x + 15) >> 4) - 1,
+            (min_y + 15) >> 4,
+            ((max_y + 15) >> 4) - 1,
+        ],
+        _ => [(min_x + 15) >> 4, max_x >> 4, (min_y + 15) >> 4, max_y >> 4],
+    };
+    let [sx0, sx1, sy0, sy1] = p.scissor;
+    let b = [
+        x0.max(sx0).max(0),
+        x1.min(sx1),
+        y0.max(sy0).max(0),
+        y1.min(sy1),
+    ];
+    (b[0] <= b[1] && b[2] <= b[3]).then_some(b)
+}
+
+/// Draws primitives, or the parts of them inside a clip rectangle, into
+/// local memory.
+pub(crate) struct Raster<'a> {
+    pub(crate) mem: &'a Memory,
+}
+
+impl Raster<'_> {
+    /// Draws the part of `prim` inside `clip` (x0, x1, y0, y1, inclusive;
+    /// within its bounding box).
+    pub(crate) fn prim(&self, prim: &Prim, clip: [i32; 4]) {
+        let p = &prim.pipe;
+        let v = &prim.v;
         let at = |v: &Vertex| (v.x as i32 - p.offset.0, v.y as i32 - p.offset.1);
-        match kind {
+        match prim.kind {
             0 => {
                 let (x, y) = at(&v[0]);
-                let frag = Self::attrs(&p, &v[0]);
-                self.fragment(&p, (x + 15) >> 4, (y + 15) >> 4, frag);
+                let frag = attrs(p, &v[0]);
+                self.fragment(p, (x + 15) >> 4, (y + 15) >> 4, frag);
             }
-            1 | 2 => self.line(&p, at(&v[0]), at(&v[1]), &v[0], &v[1]),
-            3..=5 => self.triangle(&p, [at(&v[0]), at(&v[1]), at(&v[2])], v),
-            _ => self.sprite(&p, at(&v[0]), at(&v[1]), &v[0], &v[1]),
-        }
-        let class = match kind {
-            0 => 0,
-            1 | 2 => 1,
-            3..=5 => 2,
-            _ => 3,
-        };
-        self.draw_time[class] += started.elapsed();
-    }
-
-    /// A vertex's attributes as a fragment's.
-    fn attrs(p: &Pipe, v: &Vertex) -> Frag {
-        let (w, h) = (
-            f32::from(1u16 << p.tex.tw.min(10)),
-            f32::from(1u16 << p.tex.th.min(10)),
-        );
-        let uv = if p.fst {
-            (v.u as f32 / 16.0, v.v as f32 / 16.0)
-        } else {
-            let q = if v.q == 0.0 { f32::MIN_POSITIVE } else { v.q };
-            (v.s / q * w, v.t / q * h)
-        };
-        Frag {
-            z: v.z,
-            rgba: v.rgba.map(i32::from),
-            uv,
-            stq: [v.s, v.t, v.q],
-            f: i32::from(v.f),
+            1 | 2 => self.line(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
+            3..=5 => self.triangle(p, clip, [at(&v[0]), at(&v[1]), at(&v[2])], v),
+            _ => self.sprite(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
         }
     }
 
-    fn sprite(&mut self, p: &Pipe, a: (i32, i32), b: (i32, i32), va: &Vertex, vb: &Vertex) {
-        let (fa, fb) = (Self::attrs(p, va), Self::attrs(p, vb));
+    fn sprite(
+        &self,
+        p: &Pipe,
+        clip: [i32; 4],
+        a: (i32, i32),
+        b: (i32, i32),
+        va: &Vertex,
+        vb: &Vertex,
+    ) {
+        let (fa, fb) = (attrs(p, va), attrs(p, vb));
         let ((x0, u0), (x1, u1)) = if a.0 <= b.0 {
             ((a.0, fa.uv.0), (b.0, fb.uv.0))
         } else {
@@ -170,11 +272,11 @@ impl Gs {
         if x0 == x1 || y0 == y1 {
             return;
         }
-        let [sx0, sx1, sy0, sy1] = p.scissor;
-        let px0 = ((x0 + 15) >> 4).max(sx0);
-        let px1 = ((x1 + 15) >> 4).min(sx1 + 1);
-        let py0 = ((y0 + 15) >> 4).max(sy0);
-        let py1 = ((y1 + 15) >> 4).min(sy1 + 1);
+        let [cx0, cx1, cy0, cy1] = clip;
+        let px0 = ((x0 + 15) >> 4).max(cx0);
+        let px1 = ((x1 + 15) >> 4).min(cx1 + 1);
+        let py0 = ((y0 + 15) >> 4).max(cy0);
+        let py1 = ((y1 + 15) >> 4).min(cy1 + 1);
         // Texture coordinates at each sample point. UV (FST) is fixed
         // point, 1/16 texel, and interpolates exactly; S/T/Q in floats.
         let fst = p.fst;
@@ -196,13 +298,9 @@ impl Gs {
         }
     }
 
-    fn triangle(&mut self, p: &Pipe, pos: [(i32, i32); 3], v: &[Vertex]) {
+    fn triangle(&self, p: &Pipe, clip: [i32; 4], pos: [(i32, i32); 3], v: &[Vertex; 3]) {
         // The last vertex gives flat colour; keep it before reordering.
-        let f = [
-            Self::attrs(p, &v[0]),
-            Self::attrs(p, &v[1]),
-            Self::attrs(p, &v[2]),
-        ];
+        let f = [attrs(p, &v[0]), attrs(p, &v[1]), attrs(p, &v[2])];
         let last = f[2];
         let edge = |a: (i32, i32), b: (i32, i32), x: i64, y: i64| {
             i64::from(b.0 - a.0) * (y - i64::from(a.1))
@@ -218,7 +316,7 @@ impl Gs {
         } else {
             (pos, f, area)
         };
-        let [sx0, sx1, sy0, sy1] = p.scissor;
+        let [cx0, cx1, cy0, cy1] = clip;
         let left = (pos.iter().map(|q| q.0).min().unwrap_or(0) + 15) >> 4;
         let right = pos.iter().map(|q| q.0).max().unwrap_or(0) >> 4;
         let top = (pos.iter().map(|q| q.1).min().unwrap_or(0) + 15) >> 4;
@@ -237,8 +335,8 @@ impl Gs {
             f64::from(1u16 << p.tex.tw.min(10)),
             f64::from(1u16 << p.tex.th.min(10)),
         );
-        let (x0, x1) = (left.max(sx0), right.min(sx1));
-        for y in top.max(sy0)..=bottom.min(sy1) {
+        let (x0, x1) = (left.max(cx0), right.min(cx1));
+        for y in top.max(cy0)..=bottom.min(cy1) {
             let sy = i64::from(y) * 16;
             // Edge values at the row's first sample; each step right by a
             // pixel changes them by a constant.
@@ -299,17 +397,25 @@ impl Gs {
         }
     }
 
-    fn line(&mut self, p: &Pipe, a: (i32, i32), b: (i32, i32), va: &Vertex, vb: &Vertex) {
-        let (fa, fb) = (Self::attrs(p, va), Self::attrs(p, vb));
+    fn line(
+        &self,
+        p: &Pipe,
+        clip: [i32; 4],
+        a: (i32, i32),
+        b: (i32, i32),
+        va: &Vertex,
+        vb: &Vertex,
+    ) {
+        let (fa, fb) = (attrs(p, va), attrs(p, vb));
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let steps = (dx.abs().max(dy.abs()) + 15) >> 4;
-        let [sx0, sx1, sy0, sy1] = p.scissor;
+        let [cx0, cx1, cy0, cy1] = clip;
         for i in 0..steps.max(1) {
             let t = i as f32 / steps.max(1) as f32;
             let x = (a.0 as f32 + dx as f32 * t) as i32;
             let y = (a.1 as f32 + dy as f32 * t) as i32;
             let (px, py) = ((x + 8) >> 4, (y + 8) >> 4);
-            if px < sx0 || px > sx1 || py < sy0 || py > sy1 {
+            if px < cx0 || px > cx1 || py < cy0 || py > cy1 {
                 continue;
             }
             let mix = |a: i32, b: i32| a + ((b - a) as f32 * t) as i32;
@@ -374,9 +480,9 @@ impl Gs {
         );
         match psm {
             Psm::Ct32 | Psm::Z32 => raw,
-            Psm::Ct24 | Psm::Z24 => self.expand24(raw),
-            Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => self.expand16(raw),
-            _ => self.clut_color(&p.tex, raw),
+            Psm::Ct24 | Psm::Z24 => expand24(p.texa, raw),
+            Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => expand16(p.texa, raw),
+            _ => clut_color(&p.clut, p.texa, &p.tex, raw),
         }
     }
 
@@ -420,11 +526,11 @@ impl Gs {
 
     /// One fragment through the pixel pipeline.
     #[allow(clippy::too_many_lines, reason = "the pipeline in hardware order")]
-    fn fragment(&mut self, p: &Pipe, x: i32, y: i32, frag: Frag) {
+    fn fragment(&self, p: &Pipe, x: i32, y: i32, frag: Frag) {
         if x < 0 || y < 0 {
             return;
         }
-        match bits(self.scanmsk, 0, 2) {
+        match p.scanmsk {
             2 if y & 1 == 0 => return,
             3 if y & 1 == 1 => return,
             _ => {}
@@ -501,9 +607,9 @@ impl Gs {
         }
         if p.fge {
             let fc = [
-                bits(self.fogcol, 0, 8),
-                bits(self.fogcol, 8, 8),
-                bits(self.fogcol, 16, 8),
+                bits(p.fogcol, 0, 8),
+                bits(p.fogcol, 8, 8),
+                bits(p.fogcol, 16, 8),
             ];
             for k in 0..3 {
                 c[k] = (frag.f * c[k] + (255 - frag.f) * fc[k] as i32) >> 8;
@@ -543,14 +649,14 @@ impl Gs {
         }
         let d = match fpsm {
             Psm::Ct16 | Psm::Ct16s => {
-                let c = self.expand16(dst & 0x7FFF);
+                let c = expand16(p.texa, dst & 0x7FFF);
                 (c & 0x00FF_FFFF) | (if dst & 0x8000 != 0 { 0x8000_0000 } else { 0 })
             }
             Psm::Ct24 => dst | 0x8000_0000,
             _ => dst,
         };
         let dc = [d & 0xFF, (d >> 8) & 0xFF, (d >> 16) & 0xFF, d >> 24].map(|v| v as i32);
-        if p.abe && (bits(self.pabe, 0, 1) == 0 || c[3] & 0x80 != 0) {
+        if p.abe && (!p.pabe || c[3] & 0x80 != 0) {
             let a = p.alpha;
             let cs = c;
             let pick = |sel: u32, k: usize| match sel {
@@ -568,9 +674,8 @@ impl Gs {
                     + pick(bits(a, 6, 2), k);
             }
         }
-        let clamp = bits(self.colclamp, 0, 1) != 0;
         for ck in c.iter_mut().take(3) {
-            *ck = if clamp {
+            *ck = if p.colclamp {
                 (*ck).clamp(0, 255)
             } else {
                 *ck & 0xFF
@@ -590,6 +695,27 @@ impl Gs {
             _ => (rgba, p.fbmsk),
         };
         self.mem.set(at, (new & !mask) | (dst & mask));
+    }
+}
+
+/// A vertex's attributes as a fragment's.
+fn attrs(p: &Pipe, v: &Vertex) -> Frag {
+    let (w, h) = (
+        f32::from(1u16 << p.tex.tw.min(10)),
+        f32::from(1u16 << p.tex.th.min(10)),
+    );
+    let uv = if p.fst {
+        (v.u as f32 / 16.0, v.v as f32 / 16.0)
+    } else {
+        let q = if v.q == 0.0 { f32::MIN_POSITIVE } else { v.q };
+        (v.s / q * w, v.t / q * h)
+    };
+    Frag {
+        z: v.z,
+        rgba: v.rgba.map(i32::from),
+        uv,
+        stq: [v.s, v.t, v.q],
+        f: i32::from(v.f),
     }
 }
 

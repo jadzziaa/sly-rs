@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: Drawing on several threads: the heaviest 3D stretch from 81 to 40 ms a field, results unchanged ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).
 * **Update**: Speed measured honestly (the GS thread included): 1300 fields in 37.4 s, was 73.5; earlier figures were too good. VU1 programs faster ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).
 * **Update**: Speed: the 3D title from about 200 ms to about 35 ms a field, pictures unchanged ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).
 

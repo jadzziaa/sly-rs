@@ -108,6 +108,19 @@ impl Scanner {
     }
 }
 
+/// Threads to draw with: `$SLY_RS_GS_THREADS`, or all but two of the
+/// host's (the machine's thread and the GS's own), at most 8.
+fn drawing_threads() -> usize {
+    std::env::var("SLY_RS_GS_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get().saturating_sub(2))
+                .clamp(1, 8)
+        })
+}
+
 /// Packets the machine may be ahead of the GS by.
 const QUEUE: usize = 4096;
 
@@ -123,6 +136,8 @@ pub struct Threaded {
     worker: Option<JoinHandle<()>>,
     scanner: Scanner,
     dumping: bool,
+    /// Time the machine spent waiting for room in the queue (for reports).
+    pub waited: std::time::Duration,
 }
 
 impl Default for Threaded {
@@ -134,10 +149,15 @@ impl Default for Threaded {
             .name("gs".to_owned())
             .spawn(move || {
                 let mut gs = Gs::default();
+                gs.set_threads(drawing_threads());
                 for job in queue {
                     match job {
                         Job::Gif(path, data) => gs.gif(path, data),
-                        Job::Call(f) => f(&mut gs),
+                        Job::Call(f) => {
+                            // Whoever looks at the GS sees everything drawn.
+                            gs.flush();
+                            f(&mut gs);
+                        }
                     }
                 }
             })
@@ -147,16 +167,21 @@ impl Default for Threaded {
             worker,
             scanner: Scanner::default(),
             dumping: false,
+            waited: std::time::Duration::ZERO,
         }
     }
 }
 
 impl Threaded {
-    fn send(&self, job: Job) {
+    fn send(&mut self, job: Job) {
         if let Some(jobs) = &self.jobs {
             // A send fails only when the thread has died, which `with`
             // reports.
-            let _ = jobs.send(job);
+            if let Err(mpsc::TrySendError::Full(job)) = jobs.try_send(job) {
+                let started = std::time::Instant::now();
+                let _ = jobs.send(job);
+                self.waited += started.elapsed();
+            }
         }
     }
 
@@ -171,7 +196,7 @@ impl Threaded {
     /// # Panics
     ///
     /// If the GS's thread has died (it panicked).
-    pub fn with<R: Send + 'static>(&self, f: impl FnOnce(&mut Gs) -> R + Send + 'static) -> R {
+    pub fn with<R: Send + 'static>(&mut self, f: impl FnOnce(&mut Gs) -> R + Send + 'static) -> R {
         let (reply, result) = mpsc::sync_channel(1);
         self.send(Job::Call(Box::new(move |gs| {
             let _ = reply.send(f(gs));
@@ -183,7 +208,7 @@ impl Threaded {
     }
 
     /// Runs `f` on the GS in turn with the packets, without waiting.
-    pub fn post(&self, f: impl FnOnce(&mut Gs) + Send + 'static) {
+    pub fn post(&mut self, f: impl FnOnce(&mut Gs) + Send + 'static) {
         self.send(Job::Call(Box::new(f)));
     }
 
@@ -200,7 +225,7 @@ impl Threaded {
     }
 
     /// Records a V-sync in the dump.
-    pub fn dump_vsync(&self, field: u8, privileged: Box<[u8; crate::dump::PRIV_SIZE]>) {
+    pub fn dump_vsync(&mut self, field: u8, privileged: Box<[u8; crate::dump::PRIV_SIZE]>) {
         self.post(move |gs| gs.dump_vsync(field, &privileged));
     }
 

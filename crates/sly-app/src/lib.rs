@@ -152,6 +152,9 @@ enum Command {
         /// Times to play it.
         #[arg(long, default_value_t = 1)]
         repeat: u32,
+        /// Threads to draw with (the result is the same).
+        #[arg(long, default_value_t = 1)]
+        threads: usize,
         /// Write what the display shows at the end to this PNG file.
         #[arg(long)]
         screenshot: Option<PathBuf>,
@@ -249,8 +252,9 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
         Command::GsReplay {
             path,
             repeat,
+            threads,
             screenshot,
-        } => gs_replay::run(&path, repeat, screenshot.as_deref()),
+        } => gs_replay::run(&path, repeat, threads, screenshot.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -18,6 +18,7 @@
     reason = "register fields"
 )]
 
+mod batch;
 pub mod display;
 mod draw;
 pub mod dump;
@@ -91,6 +92,8 @@ pub struct Gs {
     /// The CLUT buffer: 512 halfwords; a 32-bit entry keeps its low half at
     /// `i` and its high half at `256 + i`.
     clut: [u16; 512],
+    /// A copy of it the primitives drawn since it last changed share.
+    clut_shared: Option<std::sync::Arc<[u16; 512]>>,
     /// CBP0 and CBP1, for CLD 4 and 5.
     cbp: [u32; 2],
     /// The host-to-local transfer under way.
@@ -105,9 +108,10 @@ pub struct Gs {
     dump: Option<dump::Dump>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
-    /// Host time spent drawing, by primitive class: points, lines,
-    /// triangles, sprites (for reports).
-    pub draw_time: [std::time::Duration; 4],
+    /// Host time spent drawing (for reports).
+    pub draw_time: std::time::Duration,
+    /// Primitives waiting to be drawn, when drawing on several threads.
+    batch: batch::Batch,
 }
 
 impl Default for Gs {
@@ -136,6 +140,7 @@ impl Default for Gs {
             queue: [Vertex::default(); 3],
             queued: 0,
             clut: [0; 512],
+            clut_shared: None,
             cbp: [0; 2],
             transfer: None,
             readback: std::collections::VecDeque::new(),
@@ -143,7 +148,8 @@ impl Default for Gs {
             events: Events::default(),
             dump: None,
             drawn: 0,
-            draw_time: Default::default(),
+            draw_time: std::time::Duration::ZERO,
+            batch: batch::Batch::default(),
         }
     }
 }
@@ -330,6 +336,10 @@ impl Gs {
         if !load {
             return;
         }
+        // Primitives waiting to be drawn may write what the CLUT is read
+        // from.
+        self.before_clut_load(t);
+        self.clut_shared = None;
         let cpsm = match t.cpsm {
             0 | 1 => Psm::Ct32,
             0xA => Psm::Ct16s,
@@ -365,44 +375,46 @@ impl Gs {
             }
         }
     }
+}
 
-    /// The CLUT's colour for `index` as RGBA8888.
-    fn clut_color(&self, t: &Tex0, index: u32) -> u32 {
-        if t.cpsm < 2 {
-            let at = ((t.csa * 16 + index) & 0xFF) as usize;
-            u32::from(self.clut[at]) | (u32::from(self.clut[256 + at]) << 16)
-        } else {
-            self.expand16(u32::from(
-                self.clut[((t.csa * 16 + index) & 0x1FF) as usize],
-            ))
-        }
+/// A CLUT's colour for `index` as RGBA8888 (16-bit entries take alpha
+/// from TEXA).
+pub(crate) fn clut_color(clut: &[u16; 512], texa: u64, t: &Tex0, index: u32) -> u32 {
+    if t.cpsm < 2 {
+        let at = ((t.csa * 16 + index) & 0xFF) as usize;
+        u32::from(clut[at]) | (u32::from(clut[256 + at]) << 16)
+    } else {
+        expand16(
+            texa,
+            u32::from(clut[((t.csa * 16 + index) & 0x1FF) as usize]),
+        )
     }
+}
 
-    /// A 16-bit colour as RGBA8888, alpha from TEXA.
-    fn expand16(&self, c: u32) -> u32 {
-        let rgb = ((c & 0x1F) << 3) | (((c >> 5) & 0x1F) << 11) | (((c >> 10) & 0x1F) << 19);
-        #[allow(
-            clippy::verbose_bit_mask,
-            reason = "the 15 colour bits, as the manual puts it"
-        )]
-        let a = if c & 0x8000 != 0 {
-            bits(self.texa, 32, 8)
-        } else if bits(self.texa, 15, 1) != 0 && c & 0x7FFF == 0 {
-            0
-        } else {
-            bits(self.texa, 0, 8)
-        };
-        rgb | (a << 24)
-    }
+/// A 16-bit colour as RGBA8888, alpha from TEXA.
+pub(crate) fn expand16(texa: u64, c: u32) -> u32 {
+    let rgb = ((c & 0x1F) << 3) | (((c >> 5) & 0x1F) << 11) | (((c >> 10) & 0x1F) << 19);
+    #[allow(
+        clippy::verbose_bit_mask,
+        reason = "the 15 colour bits, as the manual puts it"
+    )]
+    let a = if c & 0x8000 != 0 {
+        bits(texa, 32, 8)
+    } else if bits(texa, 15, 1) != 0 && c & 0x7FFF == 0 {
+        0
+    } else {
+        bits(texa, 0, 8)
+    };
+    rgb | (a << 24)
+}
 
-    /// A 24-bit colour as RGBA8888, alpha from TEXA.
-    fn expand24(&self, c: u32) -> u32 {
-        let c = c & 0x00FF_FFFF;
-        let a = if bits(self.texa, 15, 1) != 0 && c == 0 {
-            0
-        } else {
-            bits(self.texa, 0, 8)
-        };
-        c | (a << 24)
-    }
+/// A 24-bit colour as RGBA8888, alpha from TEXA.
+pub(crate) fn expand24(texa: u64, c: u32) -> u32 {
+    let c = c & 0x00FF_FFFF;
+    let a = if bits(texa, 15, 1) != 0 && c == 0 {
+        0
+    } else {
+        bits(texa, 0, 8)
+    };
+    c | (a << 24)
 }

@@ -6,6 +6,8 @@
 //! pixel orders (PCSX2's tables, in `tables.rs`). Every access goes through
 //! [`Memory::read`] and [`Memory::write`].
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::tables::{
     BLOCK4, BLOCK8, BLOCK16, BLOCK16S, BLOCK32, COLUMN4, COLUMN8, COLUMN16, COLUMN32,
 };
@@ -264,14 +266,18 @@ fn place(psm: Psm, bp: u32, bw: u32, x: u32, y: u32) -> Pixel {
 }
 
 /// GS local memory, as 32-bit words.
+///
+/// The words are atomics (relaxed loads and stores, plain moves on x86) so
+/// threads drawing different tiles can share the memory without `unsafe`:
+/// a word belongs to one block, and a block to one tile.
 pub struct Memory {
-    words: Box<[u32]>,
+    words: Box<[AtomicU32]>,
 }
 
 impl Default for Memory {
     fn default() -> Self {
         Self {
-            words: vec![0; SIZE / 4].into_boxed_slice(),
+            words: (0..SIZE / 4).map(|_| AtomicU32::new(0)).collect(),
         }
     }
 }
@@ -290,14 +296,18 @@ impl Memory {
     #[inline]
     #[must_use]
     pub fn get(&self, p: Pixel) -> u32 {
-        (self.words[p.word] >> p.shift) & p.mask
+        (self.words[p.word].load(Ordering::Relaxed) >> p.shift) & p.mask
     }
 
     /// Writes the pixel at `p`; bits the format does not hold are kept.
     #[inline]
-    pub fn set(&mut self, p: Pixel, value: u32) {
-        let w = &mut self.words[p.word];
-        *w = (*w & !(p.mask << p.shift)) | ((value & p.mask) << p.shift);
+    pub fn set(&self, p: Pixel, value: u32) {
+        let w = &self.words[p.word];
+        let old = w.load(Ordering::Relaxed);
+        w.store(
+            (old & !(p.mask << p.shift)) | ((value & p.mask) << p.shift),
+            Ordering::Relaxed,
+        );
     }
 
     /// Pixel (`x`, `y`) of the `psm` buffer at `bp` with width `bw`, as the
@@ -310,21 +320,36 @@ impl Memory {
 
     /// Writes pixel (`x`, `y`); bits the format does not hold are kept.
     #[inline]
-    pub fn write(&mut self, psm: Psm, bp: u32, bw: u32, x: u32, y: u32, value: u32) {
+    pub fn write(&self, psm: Psm, bp: u32, bw: u32, x: u32, y: u32, value: u32) {
         self.set(place(psm, bp, bw, x, y), value);
     }
 
     /// Replaces the memory with `bytes`, little-endian (from dumps).
     pub fn load_bytes(&mut self, bytes: &[u8]) {
         for (w, b) in self.words.iter_mut().zip(bytes.as_chunks::<4>().0) {
-            *w = u32::from_le_bytes(*b);
+            *w.get_mut() = u32::from_le_bytes(*b);
         }
     }
 
     /// The memory as bytes, little-endian (for dumps).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.words.iter().flat_map(|w| w.to_le_bytes()).collect()
+        self.words
+            .iter()
+            .flat_map(|w| w.load(Ordering::Relaxed).to_le_bytes())
+            .collect()
+    }
+}
+
+/// The page shape of a format: width and height as powers of two, and pages
+/// per row of a buffer `bw` wide.
+#[must_use]
+pub(crate) const fn page_shape(psm: Psm, bw: u32) -> (u32, u32, u32) {
+    match psm {
+        Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (6, 6, bw),
+        Psm::T8 => (7, 6, bw >> 1),
+        Psm::T4 => (7, 7, bw >> 1),
+        _ => (6, 5, bw),
     }
 }
 
@@ -363,7 +388,7 @@ mod tests {
     #[test]
     fn every_format_round_trips_without_collisions() {
         for psm in ALL {
-            let mut mem = Memory::default();
+            let mem = Memory::default();
             let (bw, w, h) = (4, 256, 128);
             let value = |x: u32, y: u32| {
                 (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) & mask(psm)
@@ -426,7 +451,7 @@ mod tests {
 
     #[test]
     fn formats_sharing_words_keep_each_others_bits() {
-        let mut mem = Memory::default();
+        let mem = Memory::default();
         mem.write(Psm::Ct24, 0, 1, 3, 3, 0x00AB_CDEF);
         mem.write(Psm::T8h, 0, 1, 3, 3, 0x12);
         mem.write(Psm::T4hl, 0, 1, 3, 3, 0x7);

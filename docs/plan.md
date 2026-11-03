@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:37:29Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:02:54Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -673,9 +673,10 @@ given: the gates are the schedule.
     dialog, its title over the first level's night scene, and the level's
     intro ([research/sly1-graphics.md](research/sly1-graphics.md)).
     Nothing is compared with PCSX2 yet.
-  - Speed, with the EE interpreted: 1300 fields of the replay in 37.4 s
-    (was 73.5 s). The heaviest 3D stretch runs at 81 ms a field (was 158;
-    real time is 16.7). See [research/sly1-graphics.md](research/sly1-graphics.md).
+  - Speed, with the EE interpreted: 1300 fields of the replay in 32.4 s
+    (was 73.5 s). The heaviest 3D stretch runs at 40 ms a field (was 158;
+    real time is 16.7), drawing on 8 threads. See
+    [research/sly1-graphics.md](research/sly1-graphics.md).
   - Compared with PCSX2 ([research/sly1-graphics.md](research/sly1-graphics.md)):
     - `sly-rs run --gs-dump` writes PCSX2 GS dumps, so PCSX2 draws our
       exact packets. This replaces sub-gate (b), a GS conformance program:
@@ -684,8 +685,8 @@ given: the gates are the schedule.
       field, 16,561 of 143,360 pixels differ, by at most 11, and 45 by
       more than 8: rounding of perspective texture coordinates and
       shading.
-  - Next: drawing on several threads (the GS thread is the limit), then
-    translating VU1 microcode.
+  - Next: the machine's thread (EE and VU1) is the limit: translating VU1
+    microcode, and speeding up the interpreted EE.
 
 ### Phase 7 - Playable Sly 1
 

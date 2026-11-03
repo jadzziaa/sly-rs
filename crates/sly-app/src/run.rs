@@ -65,10 +65,10 @@ pub(crate) fn run(
         None => sly_common::replay::run(&mut machine, fields, &presses),
     };
     // The GS draws on its own thread: the run is over once it has caught up.
-    machine.hw.borrow().gs.with(|_| ());
+    machine.hw.borrow_mut().gs.with(|_| ());
     let elapsed = started.elapsed();
     if let Some(path) = pictures.screenshot {
-        let hw = machine.hw.borrow();
+        let mut hw = machine.hw.borrow_mut();
         let regs = hw.gs_display();
         let frame = hw.gs.with(move |gs| gs.display(&regs));
         std::fs::write(path, frame.png()).with_context(|| format!("writing {}", path.display()))?;
@@ -128,7 +128,7 @@ pub(crate) fn run(
         "  semaphores: {}",
         machine.kernel.semas.iter().flatten().count()
     )?;
-    let hw = machine.hw.borrow();
+    let mut hw = machine.hw.borrow_mut();
     writeln!(out, "  DMA kicks: {:?}", hw.dma_kicks)?;
     let (memory_hash, d, drawn) = hw.gs.with(|gs| {
         let hash = gs
@@ -143,6 +143,11 @@ pub(crate) fn run(
     writeln!(out, "  GS memory hash {memory_hash:016x}")?;
     writeln!(
         out,
+        "  the machine waited for the GS {:.2} s",
+        hw.gs.waited.as_secs_f64()
+    )?;
+    writeln!(
+        out,
         "  VU1: {} programs, {} pairs from VIF1; VIF1 with VU1 {:.2} s",
         hw.vif1.programs,
         hw.vif1.pairs,
@@ -153,12 +158,8 @@ pub(crate) fn run(
     let pct = |x: std::time::Duration| 100.0 * x.as_secs_f64() / total;
     writeln!(
         out,
-        "  host time: GS drawing {:.1}% on its own thread (points {:.1}%, lines {:.1}%, triangles {:.1}%, sprites {:.1}%); VIF1 with VU1 {:.1}%; VIF0 with VU0 {:.1}%; VU programs the EE starts {:.1}%",
-        pct(d.iter().sum()),
-        pct(d[0]),
-        pct(d[1]),
-        pct(d[2]),
-        pct(d[3]),
+        "  host time: the GS thread queueing and drawing {:.1}%; VIF1 with VU1 {:.1}%; VIF0 with VU0 {:.1}%; VU programs the EE starts {:.1}%",
+        pct(d),
         pct(t.vif1),
         pct(t.vif0),
         pct(t.vu_calls),

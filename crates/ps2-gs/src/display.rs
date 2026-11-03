@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn reads_out_circuit_one_over_the_background() {
-        let mut gs = Gs::default();
+        let gs = Gs::default();
         gs.mem.write(Psm::Ct32, 0, 1, 1, 0, 0x80_33_22_11);
         let regs = Privileged {
             pmode: 1,

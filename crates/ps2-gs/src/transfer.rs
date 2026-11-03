@@ -6,6 +6,7 @@
 //! packed as the format's transfer size: 32, 24, 16, 8 or 4 bits (low
 //! nibble first); PSMT8H, 4HL and 4HH transfer 8 or 4 bits.
 
+use crate::batch::Region;
 use crate::regs::bits;
 use crate::{Gs, Psm};
 
@@ -24,6 +25,8 @@ pub(crate) struct Transfer {
     y: u32,
     /// Bytes of a pixel split across writes.
     pending: Vec<u8>,
+    /// The blocks it writes (for drawing on several threads).
+    region: Region,
 }
 
 /// Bits a pixel of `psm` takes in a transfer.
@@ -47,21 +50,37 @@ impl Gs {
                 let Some(psm) = Psm::from_bits(u64::from(bits(b, 56, 6))) else {
                     return;
                 };
+                let (bp, bw) = (bits(b, 32, 14), bits(b, 48, 6));
+                let (x0, y0) = (bits(self.trxpos, 32, 11), bits(self.trxpos, 48, 11));
+                // Coordinates wrap at 2048: a rectangle that does, anywhere.
+                let region = if x0 + w > 2048 || y0 + h > 2048 {
+                    Region::ALL
+                } else {
+                    let rect = [x0, x0 + w - 1, y0, y0 + h - 1].map(|c| c as i32);
+                    Region::of(psm, bp, bw, rect)
+                };
                 self.transfer = (w > 0 && h > 0).then(|| Transfer {
                     psm,
-                    bp: bits(b, 32, 14),
-                    bw: bits(b, 48, 6),
-                    x0: bits(self.trxpos, 32, 11),
-                    y0: bits(self.trxpos, 48, 11),
+                    bp,
+                    bw,
+                    x0,
+                    y0,
                     w,
                     h,
                     x: 0,
                     y: 0,
                     pending: Vec::new(),
+                    region,
                 });
             }
-            1 => self.read_back(w, h),
-            2 => self.copy(w, h),
+            1 => {
+                self.flush();
+                self.read_back(w, h);
+            }
+            2 => {
+                self.flush();
+                self.copy(w, h);
+            }
             _ => {}
         }
     }
@@ -71,6 +90,7 @@ impl Gs {
         let Some(mut t) = self.transfer.take() else {
             return;
         };
+        self.before_upload(t.region);
         let size = transfer_bits(t.psm);
         let write = |gs: &mut Self, t: &mut Transfer, value: u32| {
             if t.y >= t.h {

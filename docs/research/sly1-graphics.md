@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:37:29Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:02:54Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T05:37:29Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T06:02:54Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -114,7 +114,8 @@ through our GS alone, a repeatable benchmark of drawing.
 | | 1300 fields | fields 1100-1200 | fields 1200-1300 (3D) |
 | --- | --- | --- | --- |
 | Before (`3ed1483`) | 73.5 s | 101 ms a field | 158 ms a field |
-| Now | 37.4 s | 32 ms a field | 81 ms a field |
+| GS on one thread (`d0824b6`) | 37.4 s | 32 ms a field | 81 ms a field |
+| Drawing on 8 threads | 32.4 s | 25 ms a field | 40 ms a field |
 
 Real time is 16.7 ms a field. Earlier figures in this note (29.7 s, about
 35 ms a 3D field) timed the machine without waiting for the GS thread to
@@ -147,12 +148,29 @@ replay's state hashes are unchanged. The changes:
 
   VU1 programs went from 17.1 s to 13.0 s of the run.
 
+- **Drawing on several threads** (`ps2-gs` `batch`, after rac-rs's
+  `gsfull`):
+  - Primitives queue in a batch. When the batch is drawn, each primitive
+    is split into 32 × 32-pixel tiles, and tiles draw in parallel, each in
+    primitive order. A tile holds whole blocks of local memory in every
+    format, so no two threads touch the same word.
+  - A batch is drawn first whenever one primitive would read what another
+    writes elsewhere: a texture from blocks the batch writes, a write over
+    blocks it textures from, another frame or depth buffer, an upload or
+    CLUT load touching its blocks, a copy, a read back, a picture or dump.
+  - A primitive textured from its own frame, or reaching past its frame's
+    width, is drawn alone.
+  - Local memory is atomic words, so the threads share it without
+    `unsafe`.
+  - The GS dump replay draws in 0.055 s on 8 threads (0.204 s on one).
+  - The number of threads is `$SLY_RS_GS_THREADS`, by default all but two
+    of the host's, at most 8. Past 4 it gains nothing in the game.
+
 Where the time is now:
-- **Drawing.** The GS thread is the limit: in the 3D stretch it is busy
-  all the time, and the game's full-screen blend of the previous frame
-  costs about 11 ms a field even in 2D. The next step is drawing with
-  several threads, which needs sync points wherever one primitive reads
-  what another thread drew (render to texture, CLUT loads, copies).
+- **The machine's thread.** EE and VU1 are the limit. It waits for the GS
+  only 3.9 s of a 32 s run, when the GS's single front end (parsing,
+  batching, waiting for each batch) falls behind. Overlapping a batch's
+  drawing with the next batch's parsing is a further step.
 - **VU1.** It runs about 1 million pairs a 3D field at about 17 ns each,
   close to the hardware's own instruction rate, so the interpreter does no
   wasted work. The remaining lever there is translating the microcode
