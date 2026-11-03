@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:43:30Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:57:48Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -754,7 +754,7 @@ given: the gates are the schedule.
 - **Status, 2026-11-03: in progress.**
   - `sly-rs play`: a window (winit, softbuffer; wgpu waits for the
     hardware renderer), fields paced to 59.94 Hz on a thread of their own,
-    each 224-line field shown line-doubled (the odd field a line lower) at
+    each 224-line field deinterlaced with the one before (see below) at
     4:3; keyboard and gamepad (gilrs) mapped to the DualShock; pause on
     focus loss.
   - Replays gain `inputs`, the pad's exact state as it changes (sticks
@@ -774,6 +774,10 @@ given: the gates are the schedule.
   - The title's lamp lit nothing: VIF0 started with CYCLE 0 (the BIOS
     leaves 4, 4) and its reset cleared CYCLE, so VIF0 stalled at boot and
     VU0's light tests ran on empty memory. Fixed; hashes re-recorded.
+  - The window deinterlaces adaptively (still areas weave both fields,
+    moving ones interpolate the latest), with each field's parity from
+    the GS's CSR FIELD: bobbing the fields made still 2D jump a line
+    every field.
   - Next: memory card saves.
 
 ### Phase 8 - Sound and movies

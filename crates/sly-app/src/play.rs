@@ -60,7 +60,7 @@ struct Shared {
 /// What the machine's thread tells the window.
 enum Event {
     /// A field's picture.
-    Frame(u64, Frame),
+    Frame(Field),
     /// The machine's thread is done (with an error, if it failed).
     Done(Option<String>),
 }
@@ -92,6 +92,7 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
         shared: Arc::clone(&shared),
         window: None,
         surface: None,
+        fields: Vec::new(),
         frame: None,
         keys: Vec::new(),
         bindings,
@@ -153,9 +154,13 @@ fn emulate(
         if live || field.is_multiple_of(30) {
             let mut hw = machine.hw.borrow_mut();
             let regs = hw.gs_display();
+            // CSR's FIELD: the field the display shows next, as the game's
+            // V-blank handler has just set it up.
+            let odd = hw.gs_csr >> 13 & 1 == 1;
             let proxy = proxy.clone();
             hw.gs.post(move |gs| {
-                let _ = proxy.send_event(Event::Frame(field, gs.display(&regs)));
+                let frame = gs.display(&regs);
+                let _ = proxy.send_event(Event::Frame(Field { frame, odd }));
             });
         }
         if live {
@@ -408,8 +413,10 @@ struct App {
     shared: Arc<Shared>,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-    /// The latest picture and its field.
-    frame: Option<(u64, Frame)>,
+    /// The latest fields, newest last (at most three).
+    fields: Vec<Field>,
+    /// The picture they make.
+    frame: Option<Frame>,
     /// Keys held.
     keys: Vec<KeyCode>,
     bindings: Bindings,
@@ -455,8 +462,12 @@ impl ApplicationHandler<Event> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
-            Event::Frame(field, frame) => {
-                self.frame = Some((field, frame));
+            Event::Frame(field) => {
+                if self.fields.len() == 3 {
+                    self.fields.remove(0);
+                }
+                self.fields.push(field);
+                self.frame = Some(deinterlace(&self.fields));
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -529,8 +540,7 @@ impl App {
         }
     }
 
-    /// Shows the latest picture: each field's lines doubled (the odd
-    /// field one line lower), at 4:3 in the window, black around it.
+    /// Shows the latest picture at 4:3 in the window, black around it.
     fn draw(&mut self) -> Result<(), String> {
         let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
             return Ok(());
@@ -545,21 +555,113 @@ impl App {
         surface.resize(w, h).map_err(|e| e.to_string())?;
         let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
         buffer.fill(0);
-        if let Some((field, frame)) = &self.frame {
-            paint(
-                &mut buffer,
-                (size.width, size.height),
-                frame,
-                field % 2 == 1,
-            );
+        if let Some(frame) = &self.frame {
+            paint(&mut buffer, (size.width, size.height), frame);
         }
         buffer.present().map_err(|e| e.to_string())
     }
 }
 
-/// Paints `frame` (one field) into `buffer` (`width` × `height`, 0RGB):
-/// lines doubled, the odd field one line lower, at 4:3, centred.
-fn paint(buffer: &mut [u32], (width, height): (u32, u32), frame: &Frame, odd: bool) {
+/// A field as the display showed it.
+struct Field {
+    frame: Frame,
+    /// The odd field: its lines sit one line lower in the picture.
+    odd: bool,
+}
+
+/// Row `index` of a picture.
+fn row(frame: &Frame, index: usize) -> &[u8] {
+    let stride = frame.width as usize * 3;
+    &frame.rgb[index * stride..(index + 1) * stride]
+}
+
+/// The difference (summed over red, green and blue, above and below)
+/// under which a pixel counts as unchanged between two fields of the same
+/// parity.
+const STILL: u32 = 24;
+
+/// The picture the latest of `fields` (newest last) makes, deinterlaced
+/// adaptively, roughly as PCSX2's default does: the latest field's lines
+/// in their rows (the odd field's one row lower); each row between them
+/// woven in from the field before where the picture is still, and
+/// interpolated from the latest field's rows above and below where it
+/// moves. Still means the latest field's rows above and below match the
+/// field two before (the same parity). Still 2D then does not bob, still
+/// 3D shows all 448 lines, and moving edges do not comb. A frame-mode
+/// picture is already whole.
+fn deinterlace(fields: &[Field]) -> Frame {
+    let Some(latest) = fields.last() else {
+        return Frame {
+            width: 0,
+            height: 0,
+            rgb: Vec::new(),
+        };
+    };
+    let (width, height) = (latest.frame.width as usize, latest.frame.height as usize);
+    if height > 256 || width == 0 || height == 0 {
+        return latest.frame.clone();
+    }
+    let same =
+        |f: &Field| f.frame.width == latest.frame.width && f.frame.height == latest.frame.height;
+    let back = |k: usize| {
+        fields
+            .len()
+            .checked_sub(k)
+            .map(|k| &fields[k])
+            .filter(|f| same(f))
+    };
+    // The field before (the other parity) and the one before that (this
+    // parity again).
+    let before = back(2).filter(|f| f.odd != latest.odd);
+    let earlier = back(3).filter(|f| before.is_some() && f.odd == latest.odd);
+    let own = usize::from(latest.odd);
+    let mut rgb = Vec::with_capacity(width * height * 2 * 3);
+    for line in 0..height * 2 {
+        let index = line / 2;
+        if line % 2 == own {
+            rgb.extend_from_slice(row(&latest.frame, index));
+            continue;
+        }
+        // The latest field's rows above and below this line.
+        let (up, down) = if latest.odd {
+            (index.saturating_sub(1), index)
+        } else {
+            (index, (index + 1).min(height - 1))
+        };
+        let (above, below) = (row(&latest.frame, up), row(&latest.frame, down));
+        let was = earlier.map(|f| (row(&f.frame, up), row(&f.frame, down)));
+        let woven = before.map(|f| row(&f.frame, index));
+        for x in 0..width {
+            let px = 3 * x..3 * x + 3;
+            let differ = |a: &[u8], b: &[u8]| -> u32 {
+                a[px.clone()]
+                    .iter()
+                    .zip(&b[px.clone()])
+                    .map(|(&p, &q)| u32::from(p.abs_diff(q)))
+                    .sum()
+            };
+            let still = was.is_some_and(|(a, b)| differ(above, a) + differ(below, b) <= STILL);
+            match woven {
+                Some(n) if still => rgb.extend_from_slice(&n[px]),
+                _ => rgb.extend(
+                    above[px.clone()]
+                        .iter()
+                        .zip(&below[px])
+                        .map(|(&a, &b)| a.midpoint(b)),
+                ),
+            }
+        }
+    }
+    Frame {
+        width: latest.frame.width,
+        height: latest.frame.height * 2,
+        rgb,
+    }
+}
+
+/// Paints `frame` into `buffer` (`width` × `height`, 0RGB) at 4:3,
+/// centred; a field's lines are doubled.
+fn paint(buffer: &mut [u32], (width, height): (u32, u32), frame: &Frame) {
     let (fw, fh) = (frame.width as usize, frame.height as usize);
     if fw == 0 || fh == 0 {
         return;
@@ -575,12 +677,7 @@ fn paint(buffer: &mut [u32], (width, height): (u32, u32), frame: &Frame, odd: bo
     let (ox, oy) = ((width - tw) / 2, (height - th) / 2);
     for y in 0..th {
         let line = y * lines / th;
-        let row = if lines == fh * 2 {
-            // Bob: picture line `line` comes from field line (line - odd) / 2.
-            (line.saturating_sub(usize::from(odd)) / 2).min(fh - 1)
-        } else {
-            line.min(fh - 1)
-        };
+        let row = (line * fh / lines).min(fh - 1);
         let source = &frame.rgb[row * fw * 3..(row + 1) * fw * 3];
         let target = &mut buffer[(oy + y) * width + ox..(oy + y) * width + ox + tw];
         for (x, pixel) in target.iter_mut().enumerate() {
@@ -626,6 +723,54 @@ mod tests {
         assert_eq!(pad.sticks, [0xF0, 0x80, 0x00, 0x80]);
     }
 
+    fn field(rows: &[u8], odd: bool) -> Field {
+        Field {
+            frame: Frame {
+                width: 1,
+                height: u32::try_from(rows.len()).unwrap_or(0),
+                rgb: rows.iter().flat_map(|&v| [v, v, v]).collect(),
+            },
+            odd,
+        }
+    }
+
+    fn rows(frame: &Frame) -> Vec<u8> {
+        frame.rgb.iter().step_by(3).copied().collect()
+    }
+
+    #[test]
+    fn still_fields_weave_and_do_not_bob() {
+        // The same picture in every field: the odd field's rows land one
+        // line lower, and the rows between come from the other field, so
+        // the picture is identical whichever field is the latest.
+        let still = [10, 200, 30];
+        let even = deinterlace(&[
+            field(&still, false),
+            field(&still, true),
+            field(&still, false),
+        ]);
+        let odd = deinterlace(&[
+            field(&still, true),
+            field(&still, false),
+            field(&still, true),
+        ]);
+        assert_eq!(rows(&even), [10, 10, 200, 200, 30, 30]);
+        assert_eq!(rows(&odd), rows(&even));
+    }
+
+    #[test]
+    fn moving_fields_interpolate_instead_of_combing() {
+        // The latest field differs from the one two before: the field
+        // before is not woven in; the latest field's neighbours are
+        // averaged.
+        let latest = field(&[0, 100, 200], false);
+        let picture = deinterlace(&[field(&[9, 9, 9], false), field(&[50, 50, 50], true), latest]);
+        assert_eq!(rows(&picture), [0, 50, 100, 150, 200, 200]);
+        // With no history, the same.
+        let alone = deinterlace(&[field(&[0, 100, 200], true)]);
+        assert_eq!(rows(&alone), [0, 0, 50, 100, 150, 200]);
+    }
+
     #[test]
     fn fields_are_line_doubled_at_four_by_three() {
         let frame = Frame {
@@ -634,7 +779,7 @@ mod tests {
             rgb: vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
         };
         let mut buffer = vec![0u32; 8 * 4];
-        paint(&mut buffer, (8, 4), &frame, false);
+        paint(&mut buffer, (8, 4), &frame);
         // 4:3 in 8 × 4 is 5 × 4 (rounded down), starting at column 1.
         assert_eq!(buffer[1], 0xFF_0000);
         assert_eq!(buffer[4 * 8 - 1 - 2], 0xFF_FFFF);
