@@ -1,5 +1,7 @@
 # sly-rs
 
+[![CI](https://github.com/jadzziaa/sly-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/jadzziaa/sly-rs/actions/workflows/ci.yml)
+
 A Rust static recompilation of the PlayStation 2 Sly Cooper trilogy, built
 from your own discs:
 
@@ -52,7 +54,7 @@ Commands so far:
 ## Development
 
 ```bash
-cargo xtask ci           # format, clippy, rustdoc, tests, cargo deny, dependency rules
+cargo xtask ci           # format, clippy, rustdoc, tests, cargo deny, dependency rules (also run by GitHub Actions)
 cargo xtask test-full    # the tests that need your discs, and the exhaustive ones
 cargo xtask recomp sly1 --check  # recompile Sly 1, build it, run it in lockstep with the interpreter
 cargo xtask conformance-build   # rebuild conformance/conformance.elf (podman, ps2dev image)

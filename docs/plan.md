@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:03:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:04:57Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -280,7 +280,10 @@ given: the gates are the schedule.
     confirms all three executables and full-image SHA-1s (9 GB hashed in
     5 s). 13 unit tests pass.
   - Gaps: `cargo deny` is wired into `cargo xtask ci` but skipped until
-    `cargo-deny` is installed. There is no hosted CI yet (O7).
+    `cargo-deny` is installed. There is no hosted CI yet (O7). Since
+    2026-11-03, with the repository public, GitHub Actions runs
+    `cargo xtask ci` on every push to `main` and every pull request
+    (`.github/workflows/ci.yml`); the disc tests stay local.
 
 ### Phase 1 - Instruction set
 
