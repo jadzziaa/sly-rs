@@ -27,7 +27,7 @@ fn replay() -> Replay {
 
 /// Runs the replay; returns the hashes at its checkpoints.
 fn run(replay: &Replay, check_anticrack: bool) -> Vec<String> {
-    let presses = replay::parse_presses(&replay.presses).unwrap();
+    let script = replay::Script::of(replay).unwrap();
     let (mut machine, image) = sly_common::machine::boot(Game::Sly1).unwrap();
     if check_anticrack {
         for check in CHECKS {
@@ -37,7 +37,7 @@ fn run(replay: &Replay, check_anticrack: bool) -> Vec<String> {
     let mut hashes = Vec::new();
     let mut done = 0;
     for checkpoint in &replay.checkpoints {
-        let stop = replay::run(&mut machine, checkpoint.field - done, &presses);
+        let stop = replay::run(&mut machine, checkpoint.field - done, &script);
         assert_eq!(
             stop,
             Stop::Budget,

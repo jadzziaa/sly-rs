@@ -9,6 +9,7 @@ mod elf_run;
 mod gs_replay;
 mod info;
 mod lockstep;
+mod play;
 mod replay;
 mod run;
 mod vu_bench;
@@ -158,6 +159,26 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         repeat: u32,
     },
+    /// Play the game in a window, in real time, with the keyboard or a
+    /// gamepad. Keys: WASD left stick, IJKL right stick, arrows D-pad,
+    /// Space Cross, E Circle, Q Square, F Triangle, 2/3 L1/R1, 1/4 L2/R2,
+    /// G/H L3/R3, Enter Start, Backspace Select; P pauses, Escape quits.
+    /// The game pauses while the window is not focused.
+    Play {
+        /// Game key (sly1, sly2, sly3).
+        game: String,
+        /// Record the session as a replay in this file (written on quitting;
+        /// `sly-rs replay FILE` checks it reproduces).
+        #[arg(long)]
+        record: Option<PathBuf>,
+        /// Play this replay through first, at full speed, then hand over
+        /// (the recording keeps its input).
+        #[arg(long)]
+        replay: Option<PathBuf>,
+        /// Use the interpreter only.
+        #[arg(long)]
+        interpret: bool,
+    },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
     /// end.
@@ -220,7 +241,7 @@ enum Command {
 /// Runs the command line; `recompiled` is the generated code this binary
 /// carries, if any.
 #[must_use]
-pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
+pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("SLY_RS_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -273,6 +294,23 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
         Command::VuBench { path, repeat } => {
             vu_bench::bench(&path, repeat, recompiled.map_or(&[], |r| r.vu))
         }
+        Command::Play {
+            game,
+            record,
+            replay,
+            interpret,
+        } => sly_common::Game::from_key(&game)
+            .ok_or_else(|| anyhow::anyhow!("unknown game {game:?}"))
+            .and_then(|game| {
+                play::run(
+                    play::Options {
+                        game,
+                        record,
+                        replay,
+                    },
+                    recompiled.filter(|_| !interpret),
+                )
+            }),
         Command::GsReplay {
             path,
             repeat,

@@ -31,7 +31,7 @@ pub(crate) fn run(
     pictures: &Pictures<'_>,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
-    let presses = sly_common::replay::parse_presses(press)?;
+    let presses = sly_common::replay::Script::from(sly_common::replay::parse_presses(press)?);
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
     let recompiled = recompiled.filter(|_| watch.is_empty());
     let (mut machine, image) = crate::boot(game, recompiled)?;

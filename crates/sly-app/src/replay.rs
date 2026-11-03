@@ -15,13 +15,13 @@ pub(crate) fn run(path: &Path, record: bool, recompiled: Option<&Recompiled>) ->
     let mut replay = Replay::load(path)?;
     let game =
         Game::from_key(&replay.game).with_context(|| format!("unknown game {:?}", replay.game))?;
-    let presses = replay::parse_presses(&replay.presses)?;
+    let script = replay::Script::of(&replay)?;
     let (mut machine, _) = crate::boot(game, recompiled)?;
     let mut out = io::stdout().lock();
     let mut failures = 0;
     let mut done = 0;
     for checkpoint in &mut replay.checkpoints {
-        let stop = replay::run(&mut machine, checkpoint.field - done, &presses);
+        let stop = replay::run(&mut machine, checkpoint.field - done, &script);
         done = checkpoint.field;
         if stop != ps2_ee::Stop::Budget {
             bail!("stopped at field {done}: {stop:?}");

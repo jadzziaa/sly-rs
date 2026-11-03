@@ -49,6 +49,15 @@ Commands so far:
   from power-on to the first level and checks the game's state at each
   checkpoint (`--record` writes new state hashes); `sly-rs run sly1 --press
   cross@700` presses buttons at chosen fields.
+- `sly-rs play sly1 --record session.toml` plays the game in a window, in
+  real time, with the keyboard or a gamepad, and records the session as a
+  replay (written on quitting; `sly-rs replay session.toml` checks it
+  reproduces). `--replay FILE` plays a replay through first, at full speed,
+  then hands over. Keys: WASD left stick, IJKL right stick, arrows D-pad,
+  Space Cross, E Circle, Q Square, F Triangle, 2/3 L1/R1, 1/4 L2/R2, G/H
+  L3/R3, Enter Start, Backspace Select; P pauses, Escape quits. The game
+  pauses while the window is not focused. The recompiled binary below plays
+  faster in busy scenes.
 - `cargo xtask recomp sly1 --build` recompiles Sly 1 into Rust and builds
   `generated/sly1/target/release/sly1`: the same command line with the game's
   code compiled. Its `run` uses the generated code (`--interpret` for the

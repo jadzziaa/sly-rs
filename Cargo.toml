@@ -28,6 +28,8 @@ sly-common = { path = "crates/sly-common" }
 # Third-party crates: few, mainstream, audited by `cargo deny` (deny.toml).
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+# Gamepads in the window (`play`).
+gilrs = "0.11.2"
 # Benchmarks only.
 divan = "0.1.21"
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
@@ -36,12 +38,17 @@ rabbitizer = { version = "=2.0.0-alpha.9", default-features = false, features = 
 # The GS's drawing threads.
 rayon = "1.11.0"
 serde = { version = "1.0.229", features = ["derive"] }
+# The window's pixels (`play`).
+softbuffer = "0.4.8"
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 thiserror = "2.0.21"
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# The window (`play`). Without Wayland's client-side decorations, whose
+# font stack carries an unmaintained crate (cargo deny).
+winit = { version = "0.30.13", default-features = false, features = ["x11", "wayland", "wayland-dlopen", "rwh_06"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
