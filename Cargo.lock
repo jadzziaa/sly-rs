@@ -401,6 +401,7 @@ dependencies = [
  "ps2-gs",
  "ps2-iop",
  "ps2-isa",
+ "ps2-vu",
  "thiserror",
  "tracing",
 ]
@@ -423,6 +424,16 @@ version = "0.1.0"
 dependencies = [
  "divan",
  "rabbitizer",
+]
+
+[[package]]
+name = "ps2-vu"
+version = "0.1.0"
+dependencies = [
+ "ps2-core",
+ "ps2-gs",
+ "ps2-isa",
+ "tracing",
 ]
 
 [[package]]

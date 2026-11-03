@@ -262,6 +262,7 @@ impl Machine {
         }
         if self.hw.borrow().next_dma().is_some_and(|due| due <= now) {
             self.hw.borrow_mut().finish_dma(now);
+            self.run_vif0();
         }
         if now >= self.next_vblank_start {
             // V-blank start: interrupt, GS CSR (V-sync bit, field flip), the
@@ -340,6 +341,27 @@ impl Machine {
         hash
     }
 
+    /// Runs VIF0's completed transfers (and FIFO writes) into VU0, whose
+    /// registers are the EE's COP2 registers.
+    fn run_vif0(&mut self) {
+        let mut hw = self.hw.borrow_mut();
+        let hw = &mut *hw;
+        if hw.vif0_ready.is_empty() {
+            return;
+        }
+        for words in std::mem::take(&mut hw.vif0_ready) {
+            hw.vif0.push(&words);
+        }
+        let regions = &mut self.mem.regions;
+        let mut mem = ps2_vu::Memories {
+            code: &mut regions.vu0_code,
+            data: &mut regions.vu0_data,
+        };
+        if hw.vif0.run(&mut self.cpu.vu0, &mut mem, &mut hw.gs) == ps2_vu::vif::Stop::Interrupt {
+            hw.raise_intc(intc::VIF0);
+        }
+    }
+
     /// Runs until `budget` more cycles have passed or the machine stops.
     pub fn run(&mut self, budget: u64) -> Stop {
         let end = self.cpu.cycles.saturating_add(budget);
@@ -414,6 +436,39 @@ impl Machine {
         Stop::Budget
     }
 
+    /// Runs a VU program the EE started (`vcallms` for VU0, CMSAR1 for
+    /// VU1) to its end.
+    fn run_vu(&mut self, vu1: bool, address: u32) {
+        let regions = &mut self.mem.regions;
+        if !vu1 {
+            ps2_vu::micro::run(
+                &mut ps2_vu::micro::Unit {
+                    regs: &mut self.cpu.vu0,
+                    code: &regions.vu0_code,
+                    data: &mut regions.vu0_data,
+                    vu1: None,
+                },
+                address,
+            );
+            return;
+        }
+        let mut hw = self.hw.borrow_mut();
+        let hw = &mut *hw;
+        ps2_vu::micro::run(
+            &mut ps2_vu::micro::Unit {
+                regs: &mut hw.vu1,
+                code: &regions.vu1_code,
+                data: &mut regions.vu1_data,
+                vu1: Some(ps2_vu::micro::Vu1Link {
+                    itop: hw.vif1.read(0xD0),
+                    top: hw.vif1.read(0xE0),
+                    gs: &mut hw.gs,
+                }),
+            },
+            address,
+        );
+    }
+
     /// Runs one instruction (with its delay slot).
     fn step(&mut self) -> Option<Stop> {
         let pc = self.cpu.pc;
@@ -482,17 +537,11 @@ impl Machine {
                 }
             }
             Outcome::VuCall(address) => {
-                *self
-                    .skipped
-                    .entry(format!("VU0 micro program at {address:#06x}"))
-                    .or_default() += 1;
+                self.run_vu(false, address);
                 self.cpu.pc = pc.wrapping_add(4);
             }
             Outcome::Vu1Call(address) => {
-                *self
-                    .skipped
-                    .entry(format!("VU1 micro program at {address:#06x}"))
-                    .or_default() += 1;
+                self.run_vu(true, address);
                 self.cpu.pc = pc.wrapping_add(4);
             }
             Outcome::Break => return Some(Stop::Fault(format!("break at {pc:#010x}"))),

@@ -3,7 +3,7 @@ type: Finding
 title: How Sly 1 boots in the interpreter
 description: The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver on the emulated IOP, DMA and GS events, the pad, the memory card check, the title and a new game - up to its first level.
 tags: [finding, boot, sly1, kernel, sif, rpc, iop, sound, phase-3, phase-5]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T02:06:17Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T03:14:22Z }
 sources:
   - id: run
     resource: sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02
@@ -21,7 +21,7 @@ sources:
     resource: games/sly1/symbols.tsv
     title: Sly 1 function names (TheOnlyZac/sly1, CC0)
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T02:06:17Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T03:29:05Z }
 ---
 
 # How Sly 1 boots in the interpreter
@@ -107,32 +107,34 @@ instructions per second, about 0.6 times real time.
     (level 3); Start at field 900 plays a movie, which three hooks skip
     (`CMpeg::Start`, `sceMpegIsEnd`, `CMpeg::Finish`). The level then
     decompresses its data, builds geometry and draws text.
-16. **First level frame: stalled.** From about field 1000 no DMA is kicked
-    at all, and all four EE threads wait on semaphores. The main thread
-    waits in `OpenFrame` on `g_semaFrmMac` (`0x2623B4`). The frame loop
-    needs VIF1's interrupt: `StartupFrame` registers `VU1_Interrupt` for
-    INTC cause 5 (VIF1), which a VIF code with its interrupt bit raises
-    while VIF1 stalls. The handler reads results from the slice list and
-    writes STC to `VIF1_FBRST` (`0x10003C10`) to resume it. VIF1 is not
-    modelled yet (phase 6), so the interrupt never comes. The title's
-    frames did not depend on it.
+16. **First level frame.** Until phase 6 modelled VIF1, the machine
+    stalled here (about field 1000). No DMA was kicked, and all four EE
+    threads waited on semaphores, the main one in `OpenFrame` on
+    `g_semaFrmMac` (`0x2623B4`). The frame loop needs VIF1's interrupt:
+    `StartupFrame` registers `VU1_Interrupt` for INTC cause 5. The handler
+    reads results from the slice list and writes STC to `VIF1_FBRST`
+    (`0x10003C10`) to resume the chain. With VIF0, VIF1, both VUs and
+    scratchpad DMA modelled, frames run; see
+    [sly1-graphics.md](sly1-graphics.md).
+17. **Title and new game.** The title is drawn over `jb_intro` itself:
+    the logo, "Press START button for New Game", and the night scene with
+    Sly. It takes Start from about field 2000 (Start at 1600 is ignored).
+    Start then begins the level's intro: Bentley on the binocucom.
 
 ## Graphics, in passing
 
-DMA transfers are followed through memory. Their GIF packets (PATH3 from the
-GIF channel, PATH2 from VIF1's DIRECT commands) reach `ps2-gs` when the
-transfer completes, and their GS events (SIGNAL, FINISH, LABEL) are raised.
-At field 600, `sly-rs run --screenshot` shows the game's "no memory card"
-dialog, drawn in software. VIF1's other commands and VU1 are not modelled
-yet.
+Frames go through scratchpad DMA, VIF0 and VU0, VIF1 and VU1 to
+`ps2-gs`, which draws them in software. `sly-rs run --screenshot` shows the
+dialog, the title and the level's intro;
+[sly1-graphics.md](sly1-graphics.md) has the details.
 
 ## Where it is now
 
-Loading the first level, under the replay
-`games/sly1/replays/new-game.toml` (the phase 5 gate), then stalled at its
-first frame (step 16). The gate's checkpoints at fields 1000 and 2000 are
-taken from that stalled machine: they still certify determinism, but not
-that the level runs.
+In the first level's intro, under the replay
+`games/sly1/replays/new-game.toml` (the phase 5 gate), re-tuned and
+re-recorded once frames ran. Its checkpoints are at field 600 (the dialog),
+1500 (the title over `jb_intro`) and 2600 (the intro, confirmed by
+screenshot).
 
 The phase 3 gate test still runs this boot twice for 300 fields and checks
 that both runs end with the same state hash, now including the IOP's

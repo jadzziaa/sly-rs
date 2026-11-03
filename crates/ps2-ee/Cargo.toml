@@ -11,6 +11,7 @@ publish.workspace = true
 ps2-analysis.workspace = true
 ps2-core.workspace = true
 ps2-gs.workspace = true
+ps2-vu.workspace = true
 ps2-iop.workspace = true
 ps2-isa.workspace = true
 thiserror.workspace = true

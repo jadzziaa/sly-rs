@@ -1,48 +1,47 @@
-//! DMA transfers as sinks: a kicked channel's transfer is followed through
-//! memory (normal mode, or source chain with its DMA tags), takes a
-//! modelled time, then completes: the channel's `D_STAT` bit is set and its
-//! start bit clears. The data goes nowhere yet (phase 6 renders it), except
-//! the GS gets its GIF packets when the transfer completes (PATH3 from the
-//! GIF channel, PATH2 from VIF1's DIRECT commands), and the GS events a
-//! GIF packet asks for: writes to SIGNAL, FINISH and LABEL
-//! set the GS's CSR when the transfer completes, and raise the GS interrupt
-//! unless the IMR masks it. GIF packets come straight through the GIF
-//! channel (PATH3) or inside VIF1's DIRECT commands (PATH2).
+//! DMA transfers: a kicked channel's data is followed through memory
+//! (normal mode, or source chain with its DMA tags), takes a modelled time,
+//! then completes: the channel's `D_STAT` bit is set and its start bit
+//! clears.
+//!
+//! - The GIF channel's packets reach the GS (PATH3) when it is kicked, so
+//!   the GS sees every path's packets in the order the EE kicked them.
+//! - VIF1 is fed word by word into its VIF, which may stop the transfer
+//!   part-way (an interrupt bit) until the EE resumes it; the rest of the
+//!   chain is read from memory only then, as the hardware does, so an
+//!   interrupt handler can patch what follows.
+//! - VIF0's words reach VIF0 when it completes; VU0's registers are the
+//!   EE's, so the machine runs them.
+//! - toSPR and fromSPR copy between memory and the scratchpad when kicked.
+//! - Other channels move their data nowhere yet.
+//!
+//! GS events the packets ask for (SIGNAL, FINISH, LABEL) are raised when the
+//! transfer completes.
 //!
 //! Time: two cycles per quadword plus eight per DMA tag, a fixed and
-//! deterministic stand-in for the bus until the GS is modelled.
+//! deterministic stand-in for the bus until it is modelled.
 
 use ps2_core::Regions;
 
 /// Cycles per quadword moved.
-const CYCLES_PER_QWORD: u64 = 2;
+pub const CYCLES_PER_QWORD: u64 = 2;
 /// Cycles per DMA tag read, and to start a transfer.
-const CYCLES_PER_TAG: u64 = 8;
+pub const CYCLES_PER_TAG: u64 = 8;
 /// The most DMA tags followed in one transfer (a guard against loops).
 const MAX_TAGS: u32 = 1 << 16;
 
-/// GS events a transfer's packets cause.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct GsEvents {
-    /// SIGNAL was written: its value.
-    pub signal: Option<u64>,
-    /// FINISH was written.
-    pub finish: bool,
-    /// LABEL was written: its value.
-    pub label: Option<u64>,
-}
-
-/// A transfer under way.
+/// A transfer under way: something happens on `channel` at `due`.
 #[derive(Clone, Debug)]
 pub struct Transfer {
     /// The channel.
     pub channel: usize,
-    /// When it completes.
+    /// When it completes (or interrupts).
     pub due: u64,
-    /// What it does to the GS.
-    pub gs: GsEvents,
-    /// Its GIF packets, by path, for the GS.
-    pub packets: Vec<(usize, Vec<u128>)>,
+    /// GS events its packets asked for, raised when it completes.
+    pub events: ps2_gs::Events,
+    /// It stops at an interrupt instead of completing (VIF1).
+    pub interrupt: bool,
+    /// VIF0's words, for VIF0 when the transfer completes.
+    pub words: Vec<u32>,
 }
 
 /// A quadword of EE memory (bit 31 of the address selects the
@@ -60,13 +59,129 @@ fn qword(regions: &Regions, address: u32) -> u128 {
     })
 }
 
-/// What a transfer moves: blocks of memory (address and quadword count),
-/// and with TTE the upper half of each DMA tag, sent before its block (VIF
-/// channels read VIF codes there).
+/// A block of a transfer: its DMA tag when the tag is sent too (TTE), its
+/// address and its quadword count. VIFs take the tag's upper 64 bits; the
+/// scratchpad takes all of it.
+pub type Block = (Option<u128>, u32, u32);
+
+/// A transfer's DMA tags, followed one block at a time.
+#[derive(Clone, Debug)]
+pub struct Chain {
+    chcr: u32,
+    madr: u32,
+    qwc: u32,
+    /// The next tag, or `None` once an end tag (or normal mode's block)
+    /// was taken.
+    tag_at: Option<u32>,
+    started: bool,
+    stack: Vec<u32>,
+    /// DMA tags read.
+    pub tags: u32,
+    /// The block being sent, and the quadwords of it left.
+    cursor: Option<(u32, u32)>,
+    /// Quadwords sent through [`Chain::next_words`].
+    pub qwords: u64,
+}
+
+impl Chain {
+    /// The transfer a channel's registers describe when its CHCR is written.
+    #[must_use]
+    pub fn new(chcr: u32, madr: u32, qwc: u32, tadr: u32) -> Self {
+        Self {
+            chcr,
+            madr,
+            qwc: qwc & 0xFFFF,
+            tag_at: Some(tadr),
+            started: false,
+            stack: Vec::new(),
+            tags: 0,
+            cursor: None,
+            qwords: 0,
+        }
+    }
+
+    /// The next block, reading its DMA tag from memory.
+    pub fn next_block(&mut self, regions: &Regions) -> Option<Block> {
+        let chain = (self.chcr >> 2) & 3 == 1;
+        if !self.started {
+            self.started = true;
+            if !chain {
+                self.tag_at = None;
+                return Some((None, self.madr, self.qwc));
+            }
+            // Source chain: an optional first block from MADR/QWC.
+            if self.qwc != 0 {
+                return Some((None, self.madr, self.qwc));
+            }
+        }
+        let tag_at = self.tag_at?;
+        if self.tags >= MAX_TAGS {
+            self.tag_at = None;
+            return None;
+        }
+        self.tags += 1;
+        let full = qword(regions, tag_at);
+        let tag = full as u64;
+        let count = (tag & 0xFFFF) as u32;
+        let id = (tag >> 28) & 7;
+        let irq = tag & 0x8000_0000 != 0;
+        let address = (tag >> 32) as u32;
+        let after = tag_at.wrapping_add(16);
+        let (data, next) = match id {
+            0 => (address, None),                               // refe
+            1 => (after, Some(after.wrapping_add(count * 16))), // cnt
+            2 => (after, Some(address)),                        // next
+            3 | 4 => (address, Some(after)),                    // ref, refs
+            5 => {
+                // call: data follows; return after it.
+                self.stack.push(after.wrapping_add(count * 16));
+                (after, Some(address))
+            }
+            6 => (after, self.stack.pop()), // ret
+            _ => (after, None),             // end
+        };
+        let tie = self.chcr & 0x80 != 0;
+        self.tag_at = next.filter(|_| !(irq && tie));
+        let tte = self.chcr & 0x40 != 0;
+        Some((tte.then_some(full), data, count))
+    }
+
+    /// Appends the next words of the transfer to `out`: a block's tag words
+    /// (with TTE) or one quadword. False when the transfer is over.
+    pub fn next_words(&mut self, regions: &Regions, out: &mut Vec<u32>) -> bool {
+        loop {
+            if let Some((at, left)) = self.cursor
+                && left > 0
+            {
+                let q = qword(regions, at);
+                out.extend((0..4).map(|k| (q >> (32 * k)) as u32));
+                self.cursor = Some((at.wrapping_add(16), left - 1));
+                self.qwords += 1;
+                return true;
+            }
+            let Some((tag, at, count)) = self.next_block(regions) else {
+                return false;
+            };
+            self.cursor = Some((at, count));
+            if let Some(tag) = tag {
+                out.extend([(tag >> 64) as u32, (tag >> 96) as u32]);
+                return true;
+            }
+        }
+    }
+
+    /// The time the work done so far took.
+    #[must_use]
+    pub fn cycles(&self) -> u64 {
+        CYCLES_PER_TAG * (1 + u64::from(self.tags)) + CYCLES_PER_QWORD * self.qwords
+    }
+}
+
+/// What a transfer moves: its blocks, and the DMA tags read.
 #[derive(Clone, Debug, Default)]
 pub struct Moves {
     /// Blocks, each with the tag words sent before it, if any.
-    pub blocks: Vec<(Option<u64>, u32, u32)>,
+    pub blocks: Vec<Block>,
     /// DMA tags read.
     pub tags: u32,
 }
@@ -84,7 +199,7 @@ impl Moves {
         let mut out = Vec::new();
         for &(tag, at, n) in &self.blocks {
             if let Some(tag) = tag {
-                out.extend([tag as u32, (tag >> 32) as u32]);
+                out.extend([(tag >> 64) as u32, (tag >> 96) as u32]);
             }
             for i in 0..n {
                 let q = qword(regions, at.wrapping_add(16 * i));
@@ -93,193 +208,63 @@ impl Moves {
         }
         out
     }
+
+    /// The data as quadwords (tag words left out).
+    pub fn quadwords<'a>(&'a self, regions: &'a Regions) -> impl Iterator<Item = u128> + 'a {
+        self.blocks.iter().flat_map(move |&(_, at, n)| {
+            (0..n).map(move |i| qword(regions, at.wrapping_add(16 * i)))
+        })
+    }
 }
 
-/// What a transfer moves, from the channel's registers when its CHCR is
-/// written.
+/// What a whole transfer moves, from the channel's registers when its CHCR
+/// is written.
 #[must_use]
 pub fn moves(regions: &Regions, chcr: u32, madr: u32, qwc: u32, tadr: u32) -> Moves {
-    let mode = (chcr >> 2) & 3;
-    if mode != 1 {
-        return Moves {
-            blocks: vec![(None, madr, qwc & 0xFFFF)],
-            tags: 0,
-        };
-    }
-    let tte = chcr & 0x40 != 0;
-    // Source chain: an optional first block from MADR/QWC, then tags.
-    let mut out = Vec::new();
-    if qwc & 0xFFFF != 0 {
-        out.push((None, madr, qwc & 0xFFFF));
-    }
-    let mut tag_at = tadr;
-    let mut stack: Vec<u32> = Vec::new();
-    let tie = chcr & 0x80 != 0;
-    for tags in 1..=MAX_TAGS {
-        let full = qword(regions, tag_at);
-        let tag = full as u64;
-        let count = (tag & 0xFFFF) as u32;
-        let id = (tag >> 28) & 7;
-        let irq = tag & 0x8000_0000 != 0;
-        let address = (tag >> 32) as u32;
-        let after = tag_at.wrapping_add(16);
-        let (data, next) = match id {
-            0 => (address, None),                               // refe
-            1 => (after, Some(after.wrapping_add(count * 16))), // cnt
-            2 => (after, Some(address)),                        // next
-            3 | 4 => (address, Some(after)),                    // ref, refs
-            5 => {
-                // call: data follows; return after it.
-                stack.push(after.wrapping_add(count * 16));
-                (after, Some(address))
-            }
-            6 => (after, stack.pop()), // ret
-            _ => (after, None),        // end
-        };
-        out.push((tte.then_some((full >> 64) as u64), data, count));
-        match next {
-            Some(n) if !(irq && tie) => tag_at = n,
-            _ => return Moves { blocks: out, tags },
-        }
+    let mut chain = Chain::new(chcr, madr, qwc, tadr);
+    let mut blocks = Vec::new();
+    while let Some(block) = chain.next_block(regions) {
+        blocks.push(block);
     }
     Moves {
-        blocks: out,
-        tags: MAX_TAGS,
+        blocks,
+        tags: chain.tags,
     }
 }
 
-/// The GS events in GIF packets (PACKED A+D writes to SIGNAL 0x60, FINISH
-/// 0x61 and LABEL 0x62), from their quadwords.
-pub fn gif_events(data: impl Iterator<Item = u128>, events: &mut GsEvents) {
-    let mut data = data;
-    while let Some(tag) = data.next() {
-        let nloop = (tag & 0x7FFF) as u32;
-        let flg = (tag >> 58) & 3;
-        let nreg = match ((tag >> 60) & 0xF) as u32 {
-            0 => 16,
-            n => n,
-        };
-        let regs = (tag >> 64) as u64;
-        match flg {
-            0 => {
-                for _ in 0..nloop {
-                    for r in 0..nreg {
-                        let Some(q) = data.next() else {
-                            return;
-                        };
-                        if (regs >> (4 * r)) & 0xF == 0xE {
-                            let (value, register) = (q as u64, (q >> 64) as u8);
-                            match register {
-                                0x60 => events.signal = Some(value),
-                                0x61 => events.finish = true,
-                                0x62 => events.label = Some(value),
-                                _ => {}
-                            }
-                        }
-                    }
+/// A scratchpad transfer, done when kicked: toSPR (`to_spr`) copies the
+/// blocks (and with TTE their tags) to the scratchpad at `sadr`; fromSPR
+/// copies the scratchpad from `sadr` to memory at MADR (normal mode).
+pub fn scratchpad(regions: &mut Regions, to_spr: bool, moves: &Moves, sadr: u32) {
+    let mut at = sadr & 0x3FF0;
+    let mut put = |regions: &mut Regions, q: u128| {
+        regions.scratchpad[at as usize..at as usize + 16].copy_from_slice(&q.to_le_bytes());
+        at = (at + 16) & 0x3FF0;
+    };
+    if to_spr {
+        for &(tag, from, n) in &moves.blocks {
+            if let Some(tag) = tag {
+                put(regions, tag);
+            }
+            for i in 0..n {
+                let q = qword(regions, from.wrapping_add(16 * i));
+                put(regions, q);
+            }
+        }
+    } else {
+        for &(_, to, n) in &moves.blocks {
+            for i in 0..n {
+                let from = (at as usize + 16 * i as usize) & 0x3FF0;
+                let mut raw = [0; 16];
+                raw.copy_from_slice(&regions.scratchpad[from..from + 16]);
+                let dest = (to.wrapping_add(16 * i) & 0x01FF_FFF0) as usize;
+                if let Some(d) = regions.ram.get_mut(dest..dest + 16) {
+                    d.copy_from_slice(&raw);
                 }
             }
-            1 => {
-                let words = u64::from(nloop) * u64::from(nreg);
-                for _ in 0..words.div_ceil(2) {
-                    data.next();
-                }
-            }
-            _ => {
-                for _ in 0..nloop {
-                    data.next();
-                }
-            }
+            at = (at + 16 * n) & 0x3FF0;
         }
     }
-}
-
-/// The GS events a transfer on `channel` causes: GIF packets on the GIF
-/// channel, or inside VIF1's DIRECT commands.
-#[must_use]
-pub fn gs_events(regions: &Regions, channel: usize, moves: &Moves) -> GsEvents {
-    let mut events = GsEvents::default();
-    match channel {
-        2 => {
-            let words = moves.words(regions);
-            gif_events(quadwords(&words), &mut events);
-        }
-        1 => {
-            for packet in vif_direct(&moves.words(regions)) {
-                gif_events(quadwords(&packet), &mut events);
-            }
-        }
-        _ => {}
-    }
-    events
-}
-
-/// The GIF packets a transfer on `channel` carries, by path.
-#[must_use]
-pub fn gif_packets(regions: &Regions, channel: usize, moves: &Moves) -> Vec<(usize, Vec<u128>)> {
-    match channel {
-        2 => vec![(3, quadwords(&moves.words(regions)).collect())],
-        1 => vif_direct(&moves.words(regions))
-            .iter()
-            .map(|p| (2, quadwords(p).collect()))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn quadwords(words: &[u32]) -> impl Iterator<Item = u128> + '_ {
-    words.as_chunks::<4>().0.iter().map(|c| {
-        u128::from(c[0]) | u128::from(c[1]) << 32 | u128::from(c[2]) << 64 | u128::from(c[3]) << 96
-    })
-}
-
-/// The DIRECT and DIRECTHL payloads (GIF packets) in a VIF1 stream.
-fn vif_direct(words: &[u32]) -> Vec<Vec<u32>> {
-    let mut out = Vec::new();
-    let (mut cl, mut wl) = (1u32, 1u32);
-    let mut i = 0;
-    while i < words.len() {
-        let code = words[i];
-        i += 1;
-        let command = (code >> 24) & 0x7F;
-        let imm = code & 0xFFFF;
-        let num = match (code >> 16) & 0xFF {
-            0 => 256,
-            n => n,
-        };
-        match command {
-            0x01 => {
-                cl = imm & 0xFF;
-                wl = imm >> 8;
-            }
-            0x00 | 0x02..=0x07 | 0x10 | 0x11 | 0x13 | 0x14 | 0x15 | 0x17 => {}
-            0x20 => i += 1,
-            0x30 | 0x31 => i += 4,
-            0x4A => i += 2 * num as usize,
-            0x50 | 0x51 => {
-                let n = if imm == 0 { 65_536 } else { imm } as usize * 4;
-                out.push(
-                    words
-                        .get(i..(i + n).min(words.len()))
-                        .unwrap_or_default()
-                        .to_vec(),
-                );
-                i += n;
-            }
-            0x60..=0x7F => {
-                let (vn, vl) = (command & 3, (command >> 2) & 3);
-                let elements = if wl <= cl || wl == 0 {
-                    num
-                } else {
-                    cl * (num / wl) + (num % wl).min(cl)
-                };
-                let bits = (32 >> vl) * (vn + 1) * elements;
-                i += bits.div_ceil(32) as usize;
-            }
-            _ => break,
-        }
-    }
-    out
 }
 
 /// The time a transfer takes.

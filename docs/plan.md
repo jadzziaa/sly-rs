@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T02:06:17Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T03:14:22Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -608,12 +608,16 @@ given: the gates are the schedule.
     - Caveat: "title" and "first level" are the game state's world ids
       (decompilation, `include/game.h`); nothing is drawn yet to confirm it
       by eye.
-    - Found in phase 6: the machine stalls at the level's first frame
-      (about field 1000), waiting for VIF1's interrupt, which needs VIF1
-      modelled (phase 6). The checkpoints at 1000 and 2000 are therefore
-      taken from a stalled machine.
-      - The survey of the "level" DMA was of that stalled machine, so the
-        level is not 2D-only. Its 3D goes through VU1 and PATH1.
+    - Found in phase 6: the machine stalled at the level's first frame
+      (about field 1000), waiting for VIF1's interrupt. The checkpoints at
+      1000 and 2000 were taken from that stalled machine, and "first
+      level" at 1000 was the title, which Sly 1 draws over `jb_intro`.
+      - The survey of the "level" DMA was of the stalled machine, so it
+        missed the 3D, which goes through VU1 and PATH1.
+      - Fixed in phase 6 ([research/sly1-graphics.md](research/sly1-graphics.md)).
+        The replay is re-tuned (Start on the title at field 2000) and
+        re-recorded. Its checkpoints are at 600 (the dialog), 1500 (the
+        title) and 2600 (the level's intro, confirmed by screenshot).
   - Outstanding, carried to the phases that need them:
     - A memory card image (PCSX2-compatible `.ps2`), for saving.
     - One disc drive model with modelled read times shared by `cdvdfsv` and
@@ -654,15 +658,27 @@ given: the gates are the schedule.
     - texturing (nearest and bilinear), fog, the alpha, destination-alpha
       and depth tests, blending, `COLCLAMP` and `FBA`;
     - the display read-out to PNG.
-  - The machine feeds it GIF packets as DMA completes: PATH3, and PATH2
-    through VIF1's DIRECT commands.
-  - At field 600, `sly-rs run --screenshot` shows the game's "no memory
-    card" dialog.
+  - `ps2-vu` is built and unit-tested:
+    - VIF0 and VIF1: every command, UNPACK with masks, modes and
+      cycles, double buffering, the interrupt bit's stall and STC, and the
+      EE's writes to the FIFOs;
+    - one micro-mode interpreter for VU0 (on the EE's COP2 registers) and
+      VU1: upper and lower halves, delay slots, Q and P latencies, and
+      XGKICK to PATH1.
+  - The machine feeds them as DMA is kicked: GIF to PATH3, VIF1 word by
+    word from its chain (resumed after each interrupt), VIF0 at
+    completion. Scratchpad DMA copies its data. CHCR reads busy until a
+    transfer completes.
+  - With the replay's presses, `sly-rs run --screenshot` shows Sly 1's
+    dialog, its title over the first level's night scene, and the level's
+    intro ([research/sly1-graphics.md](research/sly1-graphics.md)).
+    Nothing is compared with PCSX2 yet.
+  - Speed: about 0.2 s per field once 3D draws.
   - Next:
-    - VIF1, with the interrupt bit, stalls and `FBRST`. The first level
-      waits for its interrupt (phase 5 status above).
-    - One VU core for VU0 micro mode and VU1, with XGKICK (PATH1).
+    - The title compared with PCSX2's at native resolution. Field
+      handling: the 3D scene tears and the logo's top is clipped.
     - A GS conformance program compared with PCSX2's software renderer.
+    - Speed, measured first.
 
 ### Phase 7 - Playable Sly 1
 

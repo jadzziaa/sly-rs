@@ -28,15 +28,19 @@ pub(crate) fn run(path: &Path, record: bool, recompiled: Option<&Recompiled>) ->
         }
         let state = Sly1State::read(&mut machine.mem);
         let hash = format!("{:016x}", machine.state_hash());
-        let place_ok = state.world.0 == checkpoint.world && state.world.1 == checkpoint.level;
+        let place_ok = state.world.0 == checkpoint.world
+            && state.world.1 == checkpoint.level
+            && checkpoint.interface.is_none_or(|ui| ui == state.ui);
         let hash_ok = record || checkpoint.hash.as_ref().is_none_or(|h| *h == hash);
         writeln!(
             out,
-            "field {done}: world {} level {} (expected {} {}), hash {hash}{}",
+            "field {done}: world {} level {} interface {} (expected {} {} {:?}), hash {hash}{}",
             state.world.0,
             state.world.1,
+            state.ui,
             checkpoint.world,
             checkpoint.level,
+            checkpoint.interface,
             if hash_ok {
                 ""
             } else {

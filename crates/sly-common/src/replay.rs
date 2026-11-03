@@ -9,8 +9,8 @@
 //!
 //! [[checkpoint]]
 //! field = 600
-//! world = 0          # what the game state says (Sly 1: world, level)
-//! level = 2
+//! world = 0          # what the game state says (Sly 1: world, level,
+//! level = 2          #   and optionally the interface state)
 //! hash = "…"         # the machine's state hash, filled in by --record
 //! ```
 //!
@@ -115,6 +115,10 @@ pub struct Checkpoint {
     pub world: i32,
     /// Its level.
     pub level: i32,
+    /// The interface state, when it matters (Sly 1's title and a new
+    /// game's intro are the same level: attract 1, in game 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<i32>,
     /// The machine's state hash, in hex, once recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,

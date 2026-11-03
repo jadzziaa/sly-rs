@@ -219,7 +219,7 @@ impl Gs {
                 let mut w = [0i64; 3];
                 let mut inside = true;
                 for (k, &(a, b)) in edges.iter().enumerate() {
-                    let e = -edge(a, b, sx, sy);
+                    let e = edge(a, b, sx, sy);
                     w[k] = e;
                     if e < 0 || (e == 0 && !owns(a, b)) {
                         inside = false;
@@ -548,4 +548,71 @@ impl Gs {
 /// RGBA8888 as RGB5A1.
 fn pack16(c: u32) -> u32 {
     ((c >> 3) & 0x1F) | (((c >> 11) & 0x1F) << 5) | (((c >> 19) & 0x1F) << 10) | ((c >> 31) << 15)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Gs;
+    use crate::Psm;
+    use crate::regs::addr;
+
+    /// A GS drawing to a 64-pixel-wide CT32 frame at block 0, scissor wide
+    /// open, no depth test.
+    fn gs() -> Gs {
+        let mut gs = Gs::default();
+        gs.write(addr::FRAME_1, 1 << 16);
+        gs.write(addr::SCISSOR_1, 63 << 16 | 63 << 48);
+        gs.write(addr::RGBAQ, 0x8011_2233);
+        gs
+    }
+
+    fn xyz(gs: &mut Gs, x: u32, y: u32) {
+        gs.write(addr::XYZ2, u64::from(x * 16) | u64::from(y * 16) << 16);
+    }
+
+    fn pixel(gs: &Gs, x: u32, y: u32) -> u32 {
+        gs.mem.read(Psm::Ct32, 0, 1, x, y)
+    }
+
+    #[test]
+    fn triangles_fill_their_inside_by_the_top_left_rule() {
+        for winding in [[(0, 0), (8, 0), (0, 8)], [(0, 0), (0, 8), (8, 0)]] {
+            let mut gs = gs();
+            gs.write(addr::PRIM, 3);
+            for (x, y) in winding {
+                xyz(&mut gs, x, y);
+            }
+            assert_eq!(pixel(&gs, 1, 1), 0x8011_2233, "{winding:?}");
+            // The top and left edges are in, the hypotenuse is out.
+            assert_eq!(pixel(&gs, 0, 0), 0x8011_2233);
+            assert_eq!(pixel(&gs, 4, 0), 0x8011_2233);
+            assert_eq!(pixel(&gs, 4, 4), 0, "on the hypotenuse");
+            assert_eq!(pixel(&gs, 8, 0), 0);
+        }
+    }
+
+    #[test]
+    fn sprites_cover_left_and_top_but_not_right_and_bottom() {
+        let mut gs = gs();
+        gs.write(addr::PRIM, 6);
+        xyz(&mut gs, 2, 2);
+        xyz(&mut gs, 6, 5);
+        assert_eq!(pixel(&gs, 2, 2), 0x8011_2233);
+        assert_eq!(pixel(&gs, 5, 4), 0x8011_2233);
+        assert_eq!(pixel(&gs, 6, 4), 0);
+        assert_eq!(pixel(&gs, 5, 5), 0);
+    }
+
+    #[test]
+    fn gouraud_interpolates_colour() {
+        let mut gs = gs();
+        gs.write(addr::PRIM, 3 | 1 << 3);
+        for (x, y, c) in [(0, 0, 0u64), (32, 0, 0xFF), (0, 32, 0)] {
+            gs.write(addr::RGBAQ, c | 0x8000_0000);
+            xyz(&mut gs, x, y);
+        }
+        let r = |x| pixel(&gs, x, 0) & 0xFF;
+        assert_eq!(r(0), 0);
+        assert!(r(16) > 0x70 && r(16) < 0x90, "{:#x}", r(16));
+    }
 }

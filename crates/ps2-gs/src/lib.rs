@@ -47,6 +47,18 @@ struct Vertex {
     v: u32,
 }
 
+/// Events GIF packets asked for (writes to SIGNAL, FINISH and LABEL),
+/// collected for the EE side to raise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Events {
+    /// SIGNAL was written: its value.
+    pub signal: Option<u64>,
+    /// FINISH was written.
+    pub finish: bool,
+    /// LABEL was written: its value.
+    pub label: Option<u64>,
+}
+
 /// The GS.
 pub struct Gs {
     /// Local memory.
@@ -85,6 +97,8 @@ pub struct Gs {
     readback: std::collections::VecDeque<u128>,
     /// GIF tag state, per path.
     paths: [gif::Path; 4],
+    /// Events since they were last taken.
+    events: Events,
     /// Primitives drawn (for reports).
     pub drawn: u64,
 }
@@ -119,6 +133,7 @@ impl Default for Gs {
             transfer: None,
             readback: std::collections::VecDeque::new(),
             paths: Default::default(),
+            events: Events::default(),
             drawn: 0,
         }
     }
@@ -207,10 +222,17 @@ impl Gs {
             addr::TRXREG => self.trxreg = value,
             addr::TRXDIR => self.start_transfer(bits(value, 0, 2)),
             addr::HWREG => self.image(&value.to_le_bytes()),
-            // TEXFLUSH, and SIGNAL, FINISH and LABEL, whose events the EE
-            // side follows; nothing else is a register.
+            addr::SIGNAL => self.events.signal = Some(value),
+            addr::FINISH => self.events.finish = true,
+            addr::LABEL => self.events.label = Some(value),
+            // TEXFLUSH; nothing else is a register.
             _ => {}
         }
+    }
+
+    /// Takes the events packets have asked for since the last call.
+    pub fn take_events(&mut self) -> Events {
+        std::mem::take(&mut self.events)
     }
 
     /// Queues a vertex, drawing when it completes a primitive and `kick`

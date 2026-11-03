@@ -20,6 +20,7 @@ ps2-core = { path = "crates/ps2-core" }
 ps2-disc = { path = "crates/ps2-disc" }
 ps2-ee = { path = "crates/ps2-ee" }
 ps2-gs = { path = "crates/ps2-gs" }
+ps2-vu = { path = "crates/ps2-vu" }
 ps2-iop = { path = "crates/ps2-iop" }
 ps2-isa = { path = "crates/ps2-isa" }
 sly-common = { path = "crates/sly-common" }

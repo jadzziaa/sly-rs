@@ -1,7 +1,7 @@
-//! The phase 5 gate: Sly 1 from power-on reaches its title (the attract
-//! world), starts a new game and loads the first level (`jb_intro`) under the
-//! scripted replay `games/sly1/replays/new-game.toml`; two runs give the
-//! recorded state hashes at every checkpoint. On the way, the game's
+//! The phase 5 gate: Sly 1 from power-on reaches its title, drawn over the
+//! first level (`jb_intro`), and starts a new game there, under the scripted
+//! replay `games/sly1/replays/new-game.toml`; two runs give the recorded
+//! state hashes at every checkpoint. On the way, the game's
 //! anticrack checks run and pass: its code in RAM is still the executable's.
 
 #![allow(clippy::unwrap_used, reason = "a test")]
@@ -51,6 +51,9 @@ fn run(replay: &Replay, check_anticrack: bool) -> Vec<String> {
             (checkpoint.world, checkpoint.level),
             "world and level at field {done}"
         );
+        if let Some(ui) = checkpoint.interface {
+            assert_eq!(state.ui, ui, "interface state at field {done}");
+        }
         hashes.push(format!("{:016x}", machine.state_hash()));
     }
     if check_anticrack {
@@ -85,8 +88,12 @@ fn sly1_new_game_reaches_the_first_level_deterministically() {
         .iter()
         .map(|c| c.hash.clone().unwrap_or_default())
         .collect();
-    let first = run(&replay, true);
-    let second = run(&replay, false);
+    // The two runs are independent machines: run them side by side.
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| run(&replay, true));
+        let second = scope.spawn(|| run(&replay, false));
+        (first.join().unwrap(), second.join().unwrap())
+    });
     assert_eq!(first, second, "two runs of the replay diverged");
     assert_eq!(
         first, recorded,

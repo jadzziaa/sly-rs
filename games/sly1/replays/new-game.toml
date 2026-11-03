@@ -1,24 +1,27 @@
-# Sly 1 from power-on: the title (attract world), a new game, the first
-# level (jb_intro). Our own input script; checkpoints are the game state's
-# world and level (decompilation: include/game.h) and sly-rs's state hash.
+# Sly 1 from power-on: the "no memory card" dialog (attract world), the
+# title over the first level (jb_intro), Start for a new game (taken at
+# 2000 only after the press at 1600), and the
+# level's intro (Bentley on the binocucom, confirmed by screenshot). Our own
+# input script; checkpoints are the game state's world and level
+# (decompilation: include/game.h) and sly-rs's state hash.
 game = "sly1"
-fields = 2000
-presses = ["start@300", "start@500", "cross@700", "start@900"]
+fields = 2600
+presses = ["start@300", "start@500", "cross@700", "start@1600", "start@2000"]
 
 [[checkpoint]]
 field = 600
 world = 0
 level = 2
-hash = "42f6f274a583316a"
+hash = "1c299f28d8fd6eb2"
 
 [[checkpoint]]
-field = 1000
+field = 1500
 world = 0
 level = 3
-hash = "676570c64b589d3c"
+hash = "ef21ef7c0e31e227"
 
 [[checkpoint]]
-field = 2000
+field = 2600
 world = 0
 level = 3
-hash = "44a0a79d91f47d46"
+hash = "3592570a6059ebd9"

@@ -1,9 +1,9 @@
-//! EE hardware registers, as far as phase 3 needs them: the interrupt and
-//! DMA controllers' status and mask registers, timers, the SIF/SBUS
-//! registers and the GS's CSR. Everything else is a plain store that keeps
-//! the last value written. Every register's first access is logged by
-//! name; DMA transfers complete at once with nothing moved (graphics and
-//! sound come in later phases), each logged.
+//! EE hardware registers: the interrupt and DMA controllers' status and
+//! mask registers, timers, the SIF/SBUS registers, the GS's CSR, the VIFs'
+//! registers and FIFOs, and the GIF's FIFO. Everything else is a plain store
+//! that keeps the last value written. Every register's first access is
+//! logged by name. DMA transfers take modelled time ([`crate::dma`]); the
+//! GS, VIF1 and VU1 live here, fed by them.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,6 +15,10 @@ use ps2_core::{Mmio, Regions};
 pub mod intc {
     /// The GS (its CSR events, unless the IMR masks them).
     pub const GS: u32 = 0;
+    /// VIF0 (a VIF code's interrupt bit).
+    pub const VIF0: u32 = 4;
+    /// VIF1 (a VIF code's interrupt bit).
+    pub const VIF1: u32 = 5;
     /// V-blank start.
     pub const VBLANK_START: u32 = 2;
     /// V-blank end.
@@ -79,6 +83,16 @@ pub struct Hardware {
     /// The GS itself (outside the state hash: it only follows what the
     /// EE sends it).
     pub gs: Box<ps2_gs::Gs>,
+    /// VIF0.
+    pub vif0: ps2_vu::Vif,
+    /// VIF0 transfers completed, for the machine to run through VIF0.
+    pub vif0_ready: Vec<Vec<u32>>,
+    /// VIF1.
+    pub vif1: ps2_vu::Vif,
+    /// VU1's registers (its memories are in [`Regions`]).
+    pub vu1: ps2_vu::Regs,
+    /// VIF1's transfer, while it is under way.
+    vif1_chain: Option<crate::dma::Chain>,
 }
 
 impl Hardware {
@@ -102,6 +116,11 @@ impl Hardware {
             transfers: Vec::new(),
             gs_signal_label: (0, 0),
             gs: Box::default(),
+            vif0: ps2_vu::Vif::new(false),
+            vif0_ready: Vec::new(),
+            vif1: ps2_vu::Vif::new(true),
+            vu1: ps2_vu::reset_regs(),
+            vif1_chain: None,
         }
     }
 
@@ -140,24 +159,135 @@ impl Hardware {
             .partition(|t| t.due <= now);
         self.transfers = rest;
         for t in due {
-            let chcr = DMA_CHANNELS[t.channel].0;
-            if let Some(value) = self.regs.get_mut(&chcr) {
-                *value &= !0x100;
+            if t.interrupt {
+                self.raise_intc(intc::VIF1);
+            } else {
+                let chcr = DMA_CHANNELS[t.channel].0;
+                if let Some(value) = self.regs.get_mut(&chcr) {
+                    *value &= !0x100;
+                }
+                self.complete_dma(t.channel);
             }
-            self.complete_dma(t.channel);
-            for (path, packet) in t.packets {
-                self.gs.gif(path, packet);
+            if t.channel == 0 {
+                self.vif0_ready.push(t.words);
             }
-            if let Some(signal) = t.gs.signal {
-                self.gs_signal_label.0 = signal;
-                self.gs_event(0);
+            self.raise_gs_events(t.events);
+        }
+    }
+
+    /// Raises what SIGNAL, FINISH and LABEL writes ask for.
+    fn raise_gs_events(&mut self, events: ps2_gs::Events) {
+        if let Some(signal) = events.signal {
+            self.gs_signal_label.0 = signal;
+            self.gs_event(0);
+        }
+        if let Some(label) = events.label {
+            self.gs_signal_label.1 = label;
+        }
+        if events.finish {
+            self.gs_event(1);
+        }
+    }
+
+    /// Starts a transfer on `channel` (its CHCR was written with STR set).
+    fn kick_dma(&mut self, regions: &mut Regions, channel: usize, chcr: u32) {
+        let (base, name) = DMA_CHANNELS[channel];
+        *self.dma_kicks.entry(name).or_default() += 1;
+        let reg =
+            |hw: &Self, offset: u32| hw.regs.get(&(base + offset)).copied().unwrap_or(0) as u32;
+        let (madr, qwc, tadr) = (reg(self, 0x10), reg(self, 0x20), reg(self, 0x30));
+        let moves = crate::dma::moves(regions, chcr, madr, qwc, tadr);
+        crate::dma::dump(regions, channel, self.clock.get(), &moves);
+        let count = self.dma_kicks[name];
+        if count.is_power_of_two() {
+            tracing::debug!(target: "ee::dma", "{name} kick #{count} (CHCR {chcr:#x}): {} quadwords, {} tags", moves.qwords(), moves.tags);
+        }
+        if matches!(channel, 8 | 9) {
+            crate::dma::scratchpad(regions, channel == 9, &moves, reg(self, 0x80));
+        }
+        if channel == 1 {
+            if self.vif1_chain.is_some() {
+                tracing::warn!(target: "ee::dma", "VIF1 kicked while its last transfer is under way");
             }
-            if let Some(label) = t.gs.label {
-                self.gs_signal_label.1 = label;
+            self.vif1_chain = Some(crate::dma::Chain::new(chcr, madr, qwc, tadr));
+            self.pump_vif1(regions);
+            return;
+        }
+        if channel == 2 {
+            self.gs.gif(3, moves.quadwords(regions));
+        }
+        let words = if channel == 0 {
+            moves.words(regions)
+        } else {
+            Vec::new()
+        };
+        let events = self.gs.take_events();
+        self.transfers.push(crate::dma::Transfer {
+            channel,
+            due: self.clock.get() + crate::dma::duration(&moves),
+            events,
+            interrupt: false,
+            words,
+        });
+    }
+
+    /// Words the EE writes into VIF1's FIFO register: they run at once,
+    /// unless a transfer is under way (the FIFO is the DMA's then).
+    fn write_vif1_fifo(&mut self, regions: &mut Regions, value: u128) {
+        if self.vif1_chain.is_some() {
+            // The FIFO is the DMA's while a transfer is under way.
+            tracing::warn!(target: "ee::dma", "VIF1 FIFO written during a transfer: dropped");
+            return;
+        }
+        let words: [u32; 4] = std::array::from_fn(|k| (value >> (32 * k)) as u32);
+        self.vif1.push(&words);
+        let mut mem = ps2_vu::Memories {
+            code: &mut regions.vu1_code,
+            data: &mut regions.vu1_data,
+        };
+        if self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs) == ps2_vu::vif::Stop::Interrupt {
+            self.raise_intc(intc::VIF1);
+        }
+    }
+
+    /// Feeds VIF1 from its transfer until the VIF stalls or the transfer
+    /// ends, and schedules the interrupt or the completion.
+    fn pump_vif1(&mut self, regions: &mut Regions) {
+        let Some(mut chain) = self.vif1_chain.take() else {
+            return;
+        };
+        let before = chain.cycles();
+        let mut words = Vec::with_capacity(4);
+        let interrupt = loop {
+            let mut mem = ps2_vu::Memories {
+                code: &mut regions.vu1_code,
+                data: &mut regions.vu1_data,
+            };
+            match self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs) {
+                ps2_vu::vif::Stop::NeedData => {
+                    words.clear();
+                    if !chain.next_words(regions, &mut words) {
+                        break false;
+                    }
+                    self.vif1.push(&words);
+                }
+                ps2_vu::vif::Stop::Interrupt => break true,
+                ps2_vu::vif::Stop::Stalled => {
+                    self.vif1_chain = Some(chain);
+                    return;
+                }
             }
-            if t.gs.finish {
-                self.gs_event(1);
-            }
+        };
+        let due = self.clock.get() + chain.cycles() - before;
+        self.transfers.push(crate::dma::Transfer {
+            channel: 1,
+            due,
+            events: self.gs.take_events(),
+            interrupt,
+            words: Vec::new(),
+        });
+        if interrupt {
+            self.vif1_chain = Some(chain);
         }
     }
 
@@ -297,13 +427,11 @@ impl Mmio for HardwareHandle {
             0x1000_0000 | 0x1000_0800 | 0x1000_1000 | 0x1000_1800 => {
                 u128::from(hw.timer_count(((address >> 11) & 3) as usize))
             }
-            _ => {
-                if let Some((base, _)) = DMA_CHANNELS.iter().find(|(base, _)| *base == address) {
-                    // CHCR: never busy, transfers complete at once.
-                    return hw.regs.get(base).copied().unwrap_or(0) & !0x100;
-                }
-                hw.regs.get(&address).copied().unwrap_or(0)
-            }
+            0x1000_3C00..0x1000_3D80 => u128::from(hw.vif1.read(address - 0x1000_3C00)),
+            0x1000_3800..0x1000_3980 => u128::from(hw.vif0.read(address - 0x1000_3800)),
+            // CHCR reads busy (STR) until the transfer completes, like every
+            // other register: the value last written, as completion left it.
+            _ => hw.regs.get(&address).copied().unwrap_or(0),
         }
     }
 
@@ -330,6 +458,33 @@ impl Mmio for HardwareHandle {
                 hw.gs_csr &= !(value as u64 & 0x1F);
             }
             0x1200_1010 => hw.gs_imr = value as u64,
+            0x1000_5000 => {
+                hw.write_vif1_fifo(regions, value);
+                return true;
+            }
+            0x1000_4000 => {
+                // VIF0's FIFO: the words run with the next VIF0 work.
+                let words: [u32; 4] = std::array::from_fn(|k| (value >> (32 * k)) as u32);
+                hw.vif0_ready.push(words.to_vec());
+                return true;
+            }
+            0x1000_3800..0x1000_3980 => hw.vif0.write(address - 0x1000_3800, value32),
+            0x1000_6000 => {
+                // The GIF's FIFO: PATH3 packets written by the EE. Their
+                // events are raised at once.
+                hw.gs.gif(3, [value]);
+                let events = hw.gs.take_events();
+                hw.raise_gs_events(events);
+                return true;
+            }
+            0x1000_3C00..0x1000_3D80 => {
+                hw.vif1.write(address - 0x1000_3C00, value32);
+                if address == 0x1000_3C10 && value32 & 8 != 0 {
+                    // STC: the stalled transfer goes on.
+                    hw.pump_vif1(regions);
+                    return true;
+                }
+            }
             0x1000_0000 | 0x1000_0800 | 0x1000_1000 | 0x1000_1800 => {
                 let index = ((address >> 11) & 3) as usize;
                 let now = hw.clock.get();
@@ -347,27 +502,7 @@ impl Mmio for HardwareHandle {
                 if let Some(channel) = DMA_CHANNELS.iter().position(|(base, _)| *base == address)
                     && value32 & 0x100 != 0
                 {
-                    let name = DMA_CHANNELS[channel].1;
-                    *hw.dma_kicks.entry(name).or_default() += 1;
-                    let reg = |hw: &Hardware, offset: u32| {
-                        hw.regs.get(&(address + offset)).copied().unwrap_or(0) as u32
-                    };
-                    let (madr, qwc, tadr) = (reg(&hw, 0x10), reg(&hw, 0x20), reg(&hw, 0x30));
-                    let moves = crate::dma::moves(regions, value32, madr, qwc, tadr);
-                    crate::dma::dump(regions, channel, hw.clock.get(), &moves);
-                    let gs = crate::dma::gs_events(regions, channel, &moves);
-                    let due = hw.clock.get() + crate::dma::duration(&moves);
-                    let count = hw.dma_kicks[name];
-                    if count.is_power_of_two() || gs != crate::dma::GsEvents::default() {
-                        tracing::debug!(target: "ee::dma", "{name} kick #{count} (CHCR {value32:#x}): {} quadwords, {} tags, {gs:?}", moves.qwords(), moves.tags);
-                    }
-                    let packets = crate::dma::gif_packets(regions, channel, &moves);
-                    hw.transfers.push(crate::dma::Transfer {
-                        channel,
-                        due,
-                        gs,
-                        packets,
-                    });
+                    hw.kick_dma(regions, channel, value32);
                     // The machine's next event changed: recompiled code
                     // must hand back so it is taken at the exact cycle.
                     return true;
