@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:09:10Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:25:20Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:16:20Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:25:20Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -88,19 +88,23 @@ field).
     pixel.
   - The dialog, field 599: **0 of 143,360 pixels differ**, including the
     game's blend of the previous frame.
-  - The title's 3D scene, field 1299: 26,094 pixels differ, 17,496 of
-    them by 1 or 2 (perspective texture coordinates, rounded differently
-    by two float implementations) and 6,282 by more than 8. The large
-    ones are in the spotlight, which is drawn as about 30 additive
-    passes, where we come out darker.
+  - The title's 3D scene, field 1299: 16,561 of 143,360 pixels differ,
+    14,135 by 1 and 45 by more than 8; the largest difference is 11.
+    These are rounding differences in perspective texture coordinates and
+    shading between two implementations.
+    - Before, 26,094 differed, by up to 127, in the spotlight. PCSX2's
+      per-draw framebuffers (`SAVE_RT=1`) showed where. The game marks
+      pixels with alpha 0x80 from a Gouraud-shaded fan, then darkens only
+      where the destination alpha's top bit is clear. Our float
+      interpolation turned 0x80 into 0x7F at some pixels. Colour, depth
+      and fog are now interpolated exactly from the integer edge weights
+      (a unit test covers it).
 - The comparison also found two machine bugs: `SetGsCrt` now sets the CRT
   registers as the BIOS does for NTSC, and the GS CSR's revision and ID sit
   in bits 16 to 31.
 
 ## Open
 
-- The spotlight: find the first draw whose result differs (PCSX2's
-  `SaveRT`), and make it a unit test.
 - The logo's top edge looked clipped in earlier pictures; field and
   interlace handling in the display are checked only for this game's
   mode (NTSC, field mode).

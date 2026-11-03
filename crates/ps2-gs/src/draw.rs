@@ -242,9 +242,18 @@ impl Gs {
                 let b = w.map(|e| e as f64 * inv);
                 let lerp =
                     |g: &dyn Fn(&Frag) -> f64| b[0] * g(&f[0]) + b[1] * g(&f[1]) + b[2] * g(&f[2]);
-                let z = lerp(&|q| f64::from(q.z)).clamp(0.0, f64::from(u32::MAX)) as u32;
+                // Depth, colour and fog from the exact integer weights
+                // (they sum to the area), so a value all three vertices
+                // share comes out exactly.
+                let exact = |g: &dyn Fn(&Frag) -> i64| {
+                    let sum: i128 = (0..3)
+                        .map(|k| i128::from(w[k]) * i128::from(g(&f[k])))
+                        .sum();
+                    (sum / i128::from(area)) as i64
+                };
+                let z = exact(&|q| i64::from(q.z)) as u32;
                 let rgba = if p.iip {
-                    std::array::from_fn(|k| lerp(&|q| f64::from(q.rgba[k])) as i32)
+                    std::array::from_fn(|k| exact(&|q| i64::from(q.rgba[k])) as i32)
                 } else {
                     last.rgba
                 };
@@ -265,7 +274,7 @@ impl Gs {
                     let q = if q == 0.0 { f64::MIN_POSITIVE } else { q };
                     ((s / q * tw) as f32, (t / q * th) as f32)
                 };
-                let fog = lerp(&|q| f64::from(q.f)) as i32;
+                let fog = exact(&|q| i64::from(q.f)) as i32;
                 self.fragment(
                     p,
                     x,
@@ -613,6 +622,29 @@ mod tests {
         assert_eq!(pixel(&gs, 5, 4), 0x8011_2233);
         assert_eq!(pixel(&gs, 6, 4), 0);
         assert_eq!(pixel(&gs, 5, 5), 0);
+    }
+
+    #[test]
+    fn gouraud_keeps_a_value_all_vertices_share() {
+        // Sly 1 marks pixels with alpha 0x80 from a shaded fan, then tests
+        // the destination alpha's top bit: 0x7F would be a different mark.
+        let mut gs = gs();
+        gs.write(addr::PRIM, 3 | 1 << 3);
+        for (x, y, c) in [(3, 1, 0x10u64), (61, 7, 0x20), (17, 59, 0x30)] {
+            gs.write(addr::RGBAQ, c | 0x80 << 24);
+            xyz(&mut gs, x, y);
+        }
+        let mut covered = 0;
+        for y in 0..64 {
+            for x in 0..64 {
+                let p = pixel(&gs, x, y);
+                if p != 0 {
+                    covered += 1;
+                    assert_eq!(p >> 24, 0x80, "alpha at {x},{y}");
+                }
+            }
+        }
+        assert!(covered > 1000);
     }
 
     #[test]

@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:09:09Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:25:20Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -678,12 +678,11 @@ given: the gates are the schedule.
     - `sly-rs run --gs-dump` writes PCSX2 GS dumps, so PCSX2 draws our
       exact packets. This replaces sub-gate (b), a GS conformance program:
       it tests the drawing on the game's own input.
-    - The dialog field matches PCSX2 pixel for pixel. The title's 3D
-      field differs in 26,094 of 143,360 pixels: 17,496 by 1 or 2, and
-      6,282 by more than 8, in the spotlight's additive passes.
-  - Next:
-    - The spotlight's first differing draw, made a unit test.
-    - Speed, measured first.
+    - The dialog field matches PCSX2 pixel for pixel. In the title's 3D
+      field, 16,561 of 143,360 pixels differ, by at most 11, and 45 by
+      more than 8: rounding of perspective texture coordinates and
+      shading.
+  - Next: speed, measured first.
 
 ### Phase 7 - Playable Sly 1
 

@@ -18,6 +18,9 @@
 # F-1, and field F is never shown. To compare field F, dump up to F+1 and
 # take frame N-1 (compare with `tools/imgcmp.py`).
 #
+# With SAVE_RT=1, PCSX2 also saves the framebuffer after every draw in
+# those frames (`*_rt*`), to find the first draw that differs.
+#
 # PCSX2 runs inside `gamescope --backend headless` (no window opens) with a
 # data folder of its own in a temporary directory, no memory cards (as
 # sly-rs has none yet), the software renderer at native resolution, and the
@@ -55,6 +58,7 @@ Renderer = 13
 upscale_multiplier = 1
 DumpGSData = true
 SaveFrame = true
+SaveRT = $([ "${SAVE_RT:-0}" = 1 ] && echo true || echo false)
 SaveInfo = true
 SaveDrawStart = 0
 SaveDrawCount = -1
