@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-02
+* **Update**: Decided O7: the repository goes public after auditing its history against the [ground rules](plan.md); NOTICE.md credits ps2sdk and the ps2dev toolchain.
 * **Update**: [Phase 4](plan.md) built and its gate passed: Sly 1 runs recompiled in lockstep with the interpreter for 300 fields, 99.958% compiled. [Why the generated code needs no stack switching](research/recompiled-control.md) for EE threads (O4 settled as neither option).
 * **Update**: Conformance: [our test program](research/conformance.md) run in the interpreter and, headless, in PCSX2's recompiler and interpreter; three MMI bugs fixed; PCSX2 found to be no reference for float and VU0 rules, which stay unverified. [Plan](plan.md) phase 3 status updated.
 * **Update**: [Phase 3](plan.md) gate passed: the interpreter, kernel HLE and IOP side boot Sly 1 to its sound driver deterministically; [the boot sequence](research/sly1-boot.md) recorded. Conformance programs outstanding.

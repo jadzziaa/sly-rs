@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-02T23:57:09Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T00:03:08Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -89,9 +89,8 @@ other USB devices; any online feature; shipping any byte of game code or data.
   checks some in; sly-rs does not: [rac-rs §6](research/rac-rs.md)). Committed
   per-game data is limited to addresses, sizes, hashes, names and structure
   layouts.
-- **The discs stay where the user keeps them.** They are in
-  `/home/august/Projects/sly-rs/oracle/` (not `~/oracle`), inside the future
-  repository: phase 0 adds `oracle/` and `generated/` to `.gitignore` before
+- **The discs stay where the user keeps them.** They are in `oracle/` at
+  the root of the repository (not `~/oracle`): phase 0 adds `oracle/` and `generated/` to `.gitignore` before
   the first commit. Tools find discs through `sly-rs.toml` or `SLY_RS_DISC_*`
   environment variables, never through a path in source.
 - **One known build per game.** The tools accept only images and executables
@@ -754,7 +753,7 @@ on 2026-11-02: **O0 (a)**, build sly-rs; **O1 GPL-3.0-or-later**.
 | O4 | Host mechanism for guest threads | host threads handing over a baton; stackful coroutines (`corosensei`) | **neither**, decided in phase 4: generated code hands control back to the machine instead ([finding](research/recompiled-control.md)) |
 | O5 | Platforms | Linux; Linux then Windows; plus macOS | **Linux, then Windows** from phase 9; macOS untested |
 | O6 | Order after Sly 1 | Sly 2 then 3; Sly 3 then 2 | **Sly 2 then 3**: Sly 3's engine descends from Sly 2's, and Sly 2 has public notes to check against |
-| O7 | Repository hosting | private until a gate; public from phase 0 | **private until phase 4's gate**, then public, with the ground rules of §3 audited before the first push |
+| O7 | Repository hosting | private until a gate; public from phase 0 | **private until phase 4's gate**, then public, with the ground rules of §3 audited before the first push. Decided 2026-11-03: public after the audit (no game bytes or generated code in the history; commit emails rewritten to the GitHub no-reply address) |
 
 ## 12. What the user provides
 
