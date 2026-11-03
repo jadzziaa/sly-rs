@@ -7,3 +7,4 @@
 /sly-rs.toml
 # Caches of local tools.
 /graft/
+__pycache__/

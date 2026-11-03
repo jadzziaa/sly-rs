@@ -50,7 +50,8 @@ here=$(dirname "$(realpath "$0")")
 bios=${BIOS:-$(ls "$here"/../oracle/ps2-bios/ps2-*a-*.bin | head -n 1)}
 
 work=$(mktemp -d)
-trap 'kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
+# KEEP=1 leaves the temporary data folder (logs, settings) for debugging.
+trap 'kill "$pid" 2>/dev/null || true; [ "${KEEP:-0}" = 1 ] && echo "kept $work" >&2 || rm -rf "$work"' EXIT
 data=$work/PCSX2
 mkdir -p "$data/inis" "$data/bios" "$data/memcards" "$out"
 cp "$bios" "$data/bios/"
@@ -138,7 +139,7 @@ until ls "$out" 2>/dev/null | grep -q "$last"; do
     sleep 0.5
 done
 # GS dumps taken with the gsdump press.
-for dump in "$work"/snaps/*.gs "$work"/snaps/*/*.gs; do
+for dump in "$data"/snaps/*.gs "$data"/snaps/*/*.gs; do
     [ -e "$dump" ] && cp "$dump" "$out/"
 done
 echo "$(ls "$out" | grep -c '_fr[0-9]_.*png') framebuffers from PCSX2 in $out"

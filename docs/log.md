@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: [Graphics](research/sly1-graphics.md): compared with the real game in PCSX2. The GS draws PCSX2's dump correctly; our intro lacks the sky and the toon outlines, which the game's frame blending turns into stale, smeared pictures.
 * **Update**: New crate `ps2-memcard`: formatted 8 MB memory card images as PCSX2 keeps them, and `sly-rs format-card`; `tools/pcsx2-frames.sh` takes a card (CARD), pad presses (PRESS, through XTEST inside gamescope) and GS dump hotkeys, so headless PCSX2 reaches the real game's intro and title ([plan](plan.md)).
 * **Update**: Phase 7 started: `sly-rs play` (window, pacing, keyboard and gamepad, pause on focus loss) and exact replay inputs recorded from live play; see [plan.md](plan.md).
 * **Update**: Phase 6 gate met: GS dumps of the dialog, title 3D and level intro match PCSX2's software renderer within 8 levels on at least 99.9% of pixels, after porting PCSX2's AA1 edges and point placement; see [research/sly1-graphics.md](research/sly1-graphics.md) and [plan.md](plan.md).

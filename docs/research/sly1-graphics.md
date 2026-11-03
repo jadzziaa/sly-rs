@@ -11,12 +11,15 @@ sources:
   - id: symbols
     resource: games/sly1/symbols.tsv
     title: Sly 1 function and variable names (TheOnlyZac/sly1, CC0)
+  - id: paris
+    resource: tools/pcsx2-frames.sh with CARD, PRESS=cross@400,gsdump@1550; sly-rs run sly1 --press cross@500 --fields 860 --gs-dump
+    title: PCSX2 GS dump of the intro's "Paris, France" shot, and ours of the same shot, 2026-11-03
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:52:51Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:52:17Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:56:10Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:52:17Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -134,6 +137,30 @@ field).
   **The gate's tolerance:** in every scene at least 99.9% of pixels within
   8 levels (of 255, on any channel) of PCSX2's software renderer, the rest
   at texel boundaries of scaled sprites or in perspective rounding.
+- **The real game, in PCSX2.** With a formatted memory card
+  (`sly-rs format-card`) and Cross pressed through XTEST
+  (`tools/pcsx2-frames.sh` with `CARD`, `PRESS`), headless PCSX2 gets past
+  Sly's "create a save file?" dialog to the Sony and Sucker Punch logo
+  movies and the intro ("Paris, France, 4:20 am"). A `gsdump` press saves
+  PCSX2's own GS dump of a frame of the real game.[^paris]
+  - Our intro is dark and smeared: no sky, no moon, stale pixels dragged
+    across the screen.
+  - Our GS draws PCSX2's dump of the real game correctly (moon, stars,
+    Eiffel Tower), so the GS is not at fault.
+  - The two dumps of the same shot (ours at field 856, PCSX2's at frame
+    1550) agree closely: the camera, about 3,300 triangle strips and
+    3,300 points, the full-screen passes, the display registers, and
+    textures in GS memory outside the framebuffers.
+  - Our commands drawn over PCSX2's starting GS memory give PCSX2's
+    picture. PCSX2's commands over ours start wrong and recover within
+    three frames. Swapping regions shows that only the two framebuffers
+    carry the error.
+  - The game blends each frame with the previous one, so whatever is not
+    redrawn persists. What we never draw: three textures PCSX2 draws with
+    (`TBP` 0x2CE0 and 0x2CE8, 64 × 64, and 0x3AE4, 32 × 32, all 4-bit;
+    about 1,150 vertices), most likely the sky, clouds and moon. We also
+    draw none of PCSX2's 1,100-odd line primitives (the toon outlines).
+    Both come from the EE or VU1 side, not the GS.
 - The comparison also found two machine bugs: `SetGsCrt` now sets the CRT
   registers as the BIOS does for NTSC, and the GS CSR's revision and ID sit
   in bits 16 to 31.
@@ -371,9 +398,13 @@ Where the time is now, and how much is left to win:
 
 ## Open
 
+- The sky and the toon outlines are missing from the intro and the title
+  (above): find which code draws them in PCSX2 and why ours does not.
+
 - The logo's top edge looked clipped in earlier pictures; field and
   interlace handling in the display are checked only for this game's
   mode (NTSC, field mode).
 
+[^paris]: PCSX2 GS dump of the intro's "Paris, France" shot, and ours of the same shot, 2026-11-03
 [^runs]: Runs of Sly 1 with the GS, VIFs and VUs modelled
 [^symbols]: Sly 1 function and variable names (TheOnlyZac/sly1, CC0)
