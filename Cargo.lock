@@ -570,6 +570,7 @@ name = "sly-common"
 version = "0.1.0"
 dependencies = [
  "ps2-analysis",
+ "ps2-core",
  "ps2-disc",
  "ps2-ee",
  "ps2-iop",
