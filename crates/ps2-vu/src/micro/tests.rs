@@ -143,3 +143,96 @@ fn xgkick_sends_a_packet_to_path1() {
     exec(&code, &mut regs, &mut data, Some(&mut gs));
     assert_eq!(gs.take_events().signal, Some(0x1234));
 }
+
+/// `sub.xyzw fd, fs, ft`.
+const fn sub(fd: u32, fs: u32, ft: u32) -> u32 {
+    0x01E0_002C | (ft << 16) | (fs << 11) | (fd << 6)
+}
+/// `clipw.xyz fs, ft`.
+const fn clip(fs: u32, ft: u32) -> u32 {
+    0x01C0_01FF | (ft << 16) | (fs << 11)
+}
+/// `fsand it, imm12`.
+const fn fsand(it: u32, imm: u32) -> u32 {
+    0x2C00_0000 | (it << 16) | ((imm & 0x800) << 10) | (imm & 0x7FF)
+}
+/// `fsset imm12` (the sticky bits).
+const fn fsset(imm: u32) -> u32 {
+    0x2A00_0000 | ((imm & 0x800) << 10) | (imm & 0x7FF)
+}
+/// `fmand it, is`.
+const fn fmand(it: u32, is: u32) -> u32 {
+    0x3400_0000 | (it << 16) | (is << 11)
+}
+/// `fcget it`.
+const fn fcget(it: u32) -> u32 {
+    0x3800_0000 | (it << 16)
+}
+
+#[test]
+fn flags_become_visible_four_cycles_after_issue() {
+    let mut regs = crate::reset_regs();
+    regs.vf[1] = [ONE; 4];
+    regs.vi[6] = 0xFFFF;
+    let code = program(&[
+        // 0 - 1.0: the sign flags.
+        (sub(5, 0, 1), "sub", LNOP, "move"),
+        (UNOP, "nop", fsand(1, 0x002), "fsand"),
+        (UNOP, "nop", fsand(2, 0x002), "fsand"),
+        (UNOP, "nop", fmand(3, 6), "fmand"),
+        (UNOP, "nop", fsand(4, 0x002), "fsand"),
+        (UNOP | E, "nop", fmand(5, 6), "fmand"),
+        (UNOP, "nop", LNOP, "move"),
+    ]);
+    exec(&code, &mut regs, &mut vec![0; 0x4000], None);
+    assert_eq!(
+        regs.vi[1..4],
+        [0, 0, 0],
+        "one to three cycles later: the old flags"
+    );
+    assert_eq!(regs.vi[4], 0x002, "four cycles later: S");
+    assert_eq!(
+        regs.vi[5], 0x0E1,
+        "MAC: x, y and z negative, w (1.0 - 1.0) zero"
+    );
+    assert_eq!(regs.status & 0x82, 0x82, "S and its sticky bit");
+}
+
+#[test]
+fn clipping_flags_become_visible_four_cycles_after_clip() {
+    let mut regs = crate::reset_regs();
+    regs.vf[1] = [TWO, TWO, TWO, ONE];
+    let code = program(&[
+        // x, y and z beyond +w: bits 0, 2 and 4.
+        (clip(1, 1), "clipw", LNOP, "move"),
+        (UNOP, "nop", LNOP, "move"),
+        (UNOP, "nop", LNOP, "move"),
+        (UNOP, "nop", fcget(1), "fcget"),
+        (UNOP | E, "nop", fcget(2), "fcget"),
+        (UNOP, "nop", LNOP, "move"),
+    ]);
+    exec(&code, &mut regs, &mut vec![0; 0x4000], None);
+    assert_eq!(regs.vi[1], 0, "three cycles later: the old flags");
+    assert_eq!(regs.vi[2], 0x15, "four cycles later");
+}
+
+#[test]
+fn fsset_is_delayed_and_flags_land_when_the_program_ends() {
+    let mut regs = crate::reset_regs();
+    regs.vf[1] = [ONE; 4];
+    let code = program(&[
+        (UNOP, "nop", fsset(0x800), "fsset"),
+        (UNOP, "nop", fsand(1, 0x800), "fsand"),
+        (UNOP, "nop", LNOP, "move"),
+        (UNOP, "nop", LNOP, "move"),
+        (UNOP, "nop", fsand(2, 0x800), "fsand"),
+        // Flags issued in the last pairs still land.
+        (sub(5, 0, 1) | E, "sub", LNOP, "move"),
+        (UNOP, "nop", LNOP, "move"),
+    ]);
+    exec(&code, &mut regs, &mut vec![0; 0x4000], None);
+    assert_eq!(regs.vi[1], 0);
+    assert_eq!(regs.vi[2], 0x800);
+    assert_eq!(regs.mac, 0x0E1);
+    assert_eq!(regs.status & 0x2, 0x2);
+}

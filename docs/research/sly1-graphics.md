@@ -17,9 +17,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:59:17Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T12:39:58Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T11:59:17Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T12:39:58Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -163,11 +163,32 @@ field).
     vertices in the same area (the tower's lattice, by position), and
     large strips spanning the screen, likely the sky, drawn with a fifth of
     PCSX2's vertices (`TBP` 0x2D10 and 0x2DA0 to 0x2DA6).
-  - The EE does send these objects: their `TEX0` settings reach VU1
-    through VIF1 UNPACKs every frame, but no GIF packet carrying them
-    leaves VU1. The fault is in VU1, likely a clipping or culling decision
-    in the microprogram that draws them, which phase 6 could not see: it
-    compared only our own packets drawn by both GSes.
+  - **The cause: VU flags arrived too early.** The EE sends these objects
+    to VU1 every frame, and VU1 sends them on, but with the ADC bit set on
+    every vertex, so the GS draws nothing. VU1's program at 0x1AB0 (MSCAL
+    0x356) projects strips. Its vertices arrive with ADC set (w =
+    2²³ + 0x8000 + fog × 16), and the program adds 0x4000 to a vertex's w
+    when its triangle faces away, which carries out of the ADC bit. The
+    facing test is `MSUBY.x vf0, ...`, a 2D cross product, whose sign
+    `FSAND vi11, 0x002` reads four pairs later, with three more multiplies
+    in between. On the hardware (and in PCSX2) MAC, status and clipping
+    flags become visible four cycles after their instruction issues. Ours
+    were visible at the next pair, so `FSAND` read the sign of the last
+    `MADDAZ` instead, and every triangle of these objects counted as
+    facing away.
+  - The fix: flags travel through the FMAC pipeline (`ps2_vu::micro`)
+    and land four cycles after issue; FSSET and FCSET go the same way; the
+    rest land when the program ends. Translated microcode shares the
+    interpreter's code, so both changed. The intro and the title now
+    match PCSX2 by eye: sky, moon, Eiffel Tower and its lines, town
+    lights, Sly on the rooftop.
+  - Not modelled: stalls when an instruction reads a VF register an FMAC
+    instruction still writes. On the hardware they advance the clock, so
+    flags land after fewer pairs. Sly 1's code here is scheduled without
+    stalls, and the pictures match without them.
+  - `sly-rs vu-trace` (hidden) lists the programs of a VU1 recording or
+    steps one pair by pair, with the registers each pair changes; that is
+    how the test was found.
 - The comparison also found two machine bugs: `SetGsCrt` now sets the CRT
   registers as the BIOS does for NTSC, and the GS CSR's revision and ID sit
   in bits 16 to 31.
@@ -195,6 +216,11 @@ through our GS alone, a repeatable benchmark of drawing.
 | Interpreted, faster EE | 23.4 s | | |
 | Recompiled, cheaper pixels | 15.0 s | | |
 | Interpreted, cheaper pixels | 22.5 s | | |
+| Recompiled, VU flags with their four-cycle latency | 17.5 s | | |
+
+The last row costs 2.5 s, from two sources not yet separated: queueing
+each FMAC instruction's flags, and the sky, moon and Eiffel Tower, which
+are drawn now.
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals
@@ -405,9 +431,9 @@ Where the time is now, and how much is left to win:
 
 ## Open
 
-- Distant objects (the sky, the Eiffel Tower and its lines) are culled
-  in VU1 in the intro and the title (above): find the microprogram that
-  draws them and the decision that drops them.
+- A pixel-level comparison of the intro and the title with PCSX2 at the
+  same moment: our timeline runs about 750 fields ahead, as the hooks
+  skip the logo movies, so frames are matched by eye for now.
 
 - The logo's top edge looked clipped in earlier pictures; field and
   interlace handling in the display are checked only for this game's

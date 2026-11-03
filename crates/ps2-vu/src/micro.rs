@@ -10,6 +10,14 @@
 //! that reads Q or P early sees the old value, as on the hardware. A pair
 //! takes one cycle.
 //!
+//! Flags go through the FMAC pipeline: the MAC and status flags an upper
+//! instruction sets, the clipping flags CLIP shifts in, and FSSET's and
+//! FCSET's writes become visible to the flag instructions (FSAND, FMAND,
+//! FCAND, ...) four cycles after they issue, as on the hardware and in
+//! PCSX2. Games read them at that distance on purpose: Sly 1's VU1
+//! backface test reads the sign of a cross product four pairs later, with
+//! other arithmetic in between.
+//!
 //! Arithmetic is `ps2_core::float`'s, as in macro mode.
 
 use std::fmt::Write as _;
@@ -311,16 +319,11 @@ fn load(data: &[u8], at: u32) -> [u32; 4] {
     ]
 }
 
-/// The MAC flags and the new status for results in `dest`.
+/// The MAC flags and the status's Z, S, U and O bits for results in
+/// `dest`.
 #[allow(clippy::inline_always, reason = "translations specialise it by `dest`")]
 #[inline(always)]
-fn flags(
-    status: u32,
-    out: [u32; 4],
-    overflow: [u32; 4],
-    underflow: [u32; 4],
-    dest: u32,
-) -> (u32, u32) {
+fn flags(out: [u32; 4], overflow: [u32; 4], underflow: [u32; 4], dest: u32) -> (u32, u32) {
     // Each group's four lane bits, x in bit 3 as `dest`'s.
     let lanes = |bit: &dyn Fn(usize) -> u32| (bit(0) << 3) | (bit(1) << 2) | (bit(2) << 1) | bit(3);
     let groups = [
@@ -336,8 +339,7 @@ fn flags(
         | (u32::from(groups[1] != 0) << 1)
         | (u32::from(groups[2] != 0) << 2)
         | (u32::from(groups[3] != 0) << 3);
-    let sticky = (status & 0xFC0) | (current << 6);
-    (mac, (status & (status::I | status::D)) | current | sticky)
+    (mac, current)
 }
 
 /// A register write a pair makes, applied after both halves have read.
@@ -382,6 +384,32 @@ struct Pending {
 const DIV_LATENCY: u64 = 7;
 const RSQRT_LATENCY: u64 = 13;
 
+/// Cycles from an FMAC instruction's issue until its flags are visible.
+const FLAG_LATENCY: u64 = 4;
+
+/// Flags on their way through the FMAC pipeline.
+#[derive(Clone, Copy, Debug, Default)]
+struct FlagWrite {
+    /// The cycle from which they are visible.
+    ready: u64,
+    /// MAC flags and the status's Z, S, U and O bits, from arithmetic.
+    mac: Option<(u32, u32)>,
+    /// The status's sticky bits from FSSET, with Z, S, U and O as they
+    /// ran when it issued (as PCSX2 lands an FSSET).
+    sticky: Option<u32>,
+    /// The clipping flags, from CLIP or FCSET.
+    clip: Option<u32>,
+}
+
+/// The flags as the latest instruction left them, before they are
+/// visible: what the next CLIP shifts and FSSET keeps.
+#[derive(Clone, Copy, Debug, Default)]
+struct Running {
+    mac: u32,
+    current: u32,
+    clip: u32,
+}
+
 /// Where a program stands between two pairs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct State {
@@ -396,6 +424,63 @@ pub struct State {
     delayed: Option<u32>,
     /// The pair before had the E bit: the next one is the last.
     ending: bool,
+    /// Flags not yet visible: a ring of `pending` from `oldest` (at most
+    /// one a half a cycle, visible after four, so never more than eight).
+    flags: [FlagWrite; 8],
+    oldest: usize,
+    pending: usize,
+    running: Running,
+}
+
+impl State {
+    /// A program about to start at byte address `pc`, with the flags as
+    /// `regs` hold them.
+    #[must_use]
+    pub fn new(pc: u32, regs: &Regs) -> Self {
+        Self {
+            pc,
+            running: Running {
+                mac: regs.mac,
+                current: regs.status & 0xF,
+                clip: regs.clip,
+            },
+            ..Self::default()
+        }
+    }
+
+    fn push_flags(&mut self, w: FlagWrite) {
+        let n = self.flags.len();
+        if self.pending == n {
+            self.oldest = (self.oldest + 1) % n;
+            self.pending -= 1;
+        }
+        self.flags[(self.oldest + self.pending) % n] = w;
+        self.pending += 1;
+    }
+
+    /// Makes visible the flags whose time has come (all of them with
+    /// `all`).
+    #[inline]
+    fn land_flags(&mut self, regs: &mut Regs, all: bool) {
+        while self.pending > 0 {
+            let w = self.flags[self.oldest];
+            if !all && w.ready > self.cycle {
+                break;
+            }
+            self.oldest = (self.oldest + 1) % self.flags.len();
+            self.pending -= 1;
+            if let Some((mac, current)) = w.mac {
+                regs.mac = mac;
+                regs.status = (regs.status & 0xFF0) | current | (current << 6);
+            }
+            if let Some(st) = w.sticky {
+                regs.status = (regs.status & (status::I | status::D)) | st;
+            }
+            if let Some(clip) = w.clip {
+                regs.clip = clip;
+            }
+        }
+    }
 }
 
 /// Translated microcode: the function that runs it, and the bytes it was
@@ -417,10 +502,7 @@ pub struct Translation {
 pub fn run(unit: &mut Unit<'_>, pc: u32) -> Run {
     static DUMP: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
     let code_mask = unit.code.len() as u32 - 1;
-    let mut s = State {
-        pc: pc & code_mask & !7,
-        ..State::default()
-    };
+    let mut s = State::new(pc & code_mask & !7, unit.regs);
     let start = s.pc;
     // A debugging aid: with `$SLY_RS_VU_DUMP` set, the memories and integer
     // registers as the program starts are written there if it runs away.
@@ -517,6 +599,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
             _ => {}
         }
     }
+    s.land_flags(unit.regs, false);
     let r = &*unit.regs;
 
     // Upper half.
@@ -528,6 +611,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     );
     let bc = (upper & 3) as usize;
     let mut upper_acc: Option<[u32; 4]> = None;
+    // MAC flags and Z, S, U, O.
     let mut upper_flags: Option<(u32, u32)> = None;
     let mut upper_clip: Option<u32> = None;
     let mut upper_vf: Option<(usize, [u32; 4])> = None;
@@ -560,7 +644,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
                 upper_vf = Some((fd, out));
             }
             if !matches!(arith, Arith::Max | Arith::Min) {
-                upper_flags = Some(flags(r.status, out, overflow, underflow, dest));
+                upper_flags = Some(flags(out, overflow, underflow, dest));
             }
         }
         op @ (Upper::Opmula | Upper::Opmsub) => {
@@ -585,7 +669,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
                 f.map(|f| u32::from(f.overflow)),
                 f.map(|f| u32::from(f.underflow)),
             );
-            upper_flags = Some(flags(r.status, out, overflow, underflow, dest));
+            upper_flags = Some(flags(out, overflow, underflow, dest));
         }
         Upper::Itof(scale) => upper_vf = Some((ft, float::x4::from_fixed(r.vf[fs], scale))),
         Upper::Ftoi(scale) => upper_vf = Some((ft, float::x4::to_fixed(r.vf[fs], scale))),
@@ -599,7 +683,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
                 bits |= u32::from(x > limit) << (2 * i);
                 bits |= u32::from(x < -limit) << (2 * i + 1);
             }
-            upper_clip = Some(((r.clip << 6) | bits) & 0x00FF_FFFF);
+            upper_clip = Some(((s.running.clip << 6) | bits) & 0x00FF_FFFF);
         }
         Upper::Nop => {}
     }
@@ -763,7 +847,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
                     L::Fseq => writes.push(Write::Vi(it, u32::from(st == imm12))),
                     L::Fsand => writes.push(Write::Vi(it, st & imm12)),
                     L::Fsor => writes.push(Write::Vi(it, st | imm12)),
-                    _ => new_status = Some((r.status & 0x3F) | (imm12 & 0xFC0)),
+                    _ => new_status = Some(imm12 & 0xFC0),
                 }
             }
             L::Fmeq => writes.push(Write::Vi(
@@ -826,11 +910,21 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     if let Some(v) = new_r {
         regs.r = v;
     }
+    let ready = s.cycle + FLAG_LATENCY;
     if let Some(v) = new_clip {
-        regs.clip = v;
+        s.running.clip = v;
+        s.push_flags(FlagWrite {
+            ready,
+            clip: Some(v),
+            ..FlagWrite::default()
+        });
     }
     if let Some(v) = new_status {
-        regs.status = v;
+        s.push_flags(FlagWrite {
+            ready,
+            sticky: Some(v | s.running.current),
+            ..FlagWrite::default()
+        });
     }
     if let Some((reg, value)) = upper_vf
         && reg != 0
@@ -840,12 +934,24 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     if let Some(acc) = upper_acc {
         regs.acc = merge(regs.acc, acc, dest);
     }
-    if let Some((mac, st)) = upper_flags {
-        regs.mac = mac;
-        regs.status = st;
-    }
-    if let Some(clip) = upper_clip {
-        regs.clip = clip;
+    // The upper half's flags land after the lower's: with an FCSET and a
+    // CLIP in one pair, the CLIP's flags (shifted from those before the
+    // pair) win, as an upper write does.
+    if upper_flags.is_some() || upper_clip.is_some() {
+        let mac = upper_flags;
+        if let Some((m, current)) = mac {
+            s.running.mac = m;
+            s.running.current = current;
+        }
+        if let Some(clip) = upper_clip {
+            s.running.clip = clip;
+        }
+        s.push_flags(FlagWrite {
+            ready,
+            mac,
+            clip: upper_clip,
+            ..FlagWrite::default()
+        });
     }
     if let Some(address) = kick
         && let Some(link) = unit.vu1.as_mut()
@@ -857,6 +963,7 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
     if s.ending {
         // The pair after the E bit has run: the program is over.
         unit.regs.tpc = next_pc;
+        s.land_flags(unit.regs, true);
         if let Some(p) = s.q {
             land_q(p, unit.regs);
         }

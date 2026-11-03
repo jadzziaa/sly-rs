@@ -159,6 +159,24 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         repeat: u32,
     },
+    /// List the programs of a VU1 recording, or step one through the
+    /// interpreter, printing each pair and the registers it changed.
+    #[command(hide = true)]
+    VuTrace {
+        /// The recording.
+        path: PathBuf,
+        /// The program to step (default: list them all).
+        #[arg(long)]
+        program: Option<usize>,
+        /// A 32-bit word (hex) to look for in data memory and the packets
+        /// sent.
+        #[arg(long, value_parser = parse_hex)]
+        word: Option<u32>,
+        /// Data memory to print as the program starts: the first qword
+        /// (hex) and how many (`238,16`).
+        #[arg(long, value_parser = parse_range)]
+        data: Option<(usize, usize)>,
+    },
     /// Play the game in a window, in real time, with the keyboard or a
     /// gamepad. Keys: WASD left stick, IJKL right stick, arrows D-pad,
     /// Space Cross, E Circle, Q Square, F Triangle, 2/3 L1/R1, 1/4 L2/R2,
@@ -303,6 +321,12 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
         Command::VuBench { path, repeat } => {
             vu_bench::bench(&path, repeat, recompiled.map_or(&[], |r| r.vu))
         }
+        Command::VuTrace {
+            path,
+            program,
+            word,
+            data,
+        } => vu_bench::trace(&path, program, word, data),
         Command::Play {
             game,
             record,
@@ -368,4 +392,20 @@ fn format_card(path: &std::path::Path, check: bool) -> anyhow::Result<()> {
         .with_context(|| format!("writing {}", path.display()))?;
     println!("{}: a formatted 8 MB memory card", path.display());
     Ok(())
+}
+
+fn parse_hex(s: &str) -> Result<u32, std::num::ParseIntError> {
+    u32::from_str_radix(s.trim_start_matches("0x"), 16)
+}
+
+fn parse_range(s: &str) -> Result<(usize, usize), String> {
+    let (from, count) = s.split_once(',').ok_or("expected FIRST,COUNT")?;
+    let from =
+        usize::from_str_radix(from.trim_start_matches("0x"), 16).map_err(|e| e.to_string())?;
+    Ok((
+        from,
+        count
+            .parse()
+            .map_err(|e: std::num::ParseIntError| e.to_string())?,
+    ))
 }

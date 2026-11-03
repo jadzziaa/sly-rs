@@ -10,9 +10,9 @@ sources:
   - id: plan
     resource: docs/plan.md, phase 6
     title: 'The plan: ahead-of-time translation of every .DVP overlay'
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:20:37Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T12:29:12Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T09:20:37Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T12:42:53Z }
 ---
 
 # VU microcode translated ahead of time
@@ -69,7 +69,8 @@ of the two. Sly 1 enters its programs at 28 addresses.
 - The replay's checkpoints now hash both VUs' memories and VU1's
   registers too; lockstep compares them. The recompiled binary, with
   translated microcode, gives the interpreter's hashes at every checkpoint,
-  and the same GS memory at field 1300 (`eb7df7d73cee4d19`).
+  and the same GS memory at field 1300 (`eb7df7d73cee4d19` when this was
+  written, before flags were given their four-cycle latency).
 - `vu-bench` (hidden) replays VU1 programs recorded with
   `$SLY_RS_VU_RECORD=PATH,SKIP,COUNT`, through the interpreter and the
   translations, and compares registers, data memory, the packets sent and
