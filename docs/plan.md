@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T15:59:56Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T22:01:05Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -194,6 +194,8 @@ sly-rs/
 │  │                  scheduler, BIOS-free boot, recompiled-code dispatcher, hooks
 │  ├─ ps2-iop         SIF and SIF RPC; HLE servers for cdvd, pad, memory card; IOP kernel
 │  │                  HLE (threads, semaphores, timers, interrupts) for recompiled IRX
+│  ├─ ps2-fenv        the VU floating-point environment (MXCSR round toward zero,
+│  │                  denormals flushed); the one crate with `unsafe`
 │  ├─ ps2-memcard     8 MB memory card images as PCSX2 keeps them (`.ps2`, with ECC):
 │  │                  formatting, superblock, FAT, directories
 │  ├─ ps2-dma         DMAC channels, VIF0/VIF1, GIF path arbitration
@@ -794,8 +796,9 @@ given: the gates are the schedule.
     59.7% with the game built for the host CPU. VU1 takes 84.5% of host
     time in gameplay (1.4 million pairs a field); the title runs at 124%.
     Tuning `exec` in place gains little; the way forward is a specialising
-    VU translator as rac-rs has ([research/sly1-graphics.md](research/sly1-graphics.md)),
-    with a decision on the float model to come.
+    VU translator as rac-rs has ([research/sly1-graphics.md](research/sly1-graphics.md)).
+    The user chose PCSX2's float model for the VUs: with VU code on host
+    single-precision operations, the prologue's workload runs at 67.6%.
   - Open from that test: Sly's shadow in the opening cutscene (to compare
     with PCSX2), pressure mode (the real game reaches mode 0x79, Shock2;
     ours stays at 0x73, Shock).

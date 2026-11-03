@@ -17,6 +17,7 @@ workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+ps2-fenv.workspace = true
 
 [[bench]]
 name = "float"

@@ -465,6 +465,70 @@ pub mod x4 {
         sub(acc, mul(a, b))
     }
 
+    /// The same operations for code run in the VU environment
+    /// (`ps2_fenv::with_vu_rounding`: rounding toward zero, denormals
+    /// flushed): one host single-precision operation per lane, which there
+    /// gives exactly what [`add`], [`mul`] and the rest give. Outside it
+    /// they round to nearest, so they must not run there; and the exact
+    /// forms must not run inside, where `f64` rounds toward zero too.
+    pub mod rtz {
+        use super::{MAX, V};
+
+        /// The lanes as singles, exponent 255 read as ±`MAX` (denormals
+        /// read as zero by themselves, in the VU environment).
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        fn singles(a: V) -> [f32; 4] {
+            a.map(|x| {
+                let huge = (x >> 23) & 0xFF == 0xFF;
+                f32::from_bits(if huge { (x & 0x8000_0000) | MAX } else { x })
+            })
+        }
+
+        /// [`super::add`].
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn add(a: V, b: V) -> V {
+            let (x, y) = (singles(a), singles(b));
+            std::array::from_fn(|i| (x[i] + y[i]).to_bits())
+        }
+
+        /// [`super::sub`].
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn sub(a: V, b: V) -> V {
+            let (x, y) = (singles(a), singles(b));
+            std::array::from_fn(|i| (x[i] - y[i]).to_bits())
+        }
+
+        /// [`super::mul`].
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn mul(a: V, b: V) -> V {
+            let (x, y) = (singles(a), singles(b));
+            std::array::from_fn(|i| (x[i] * y[i]).to_bits())
+        }
+
+        /// [`super::madd`]: the product rounded, then added.
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn madd(acc: V, a: V, b: V) -> V {
+            add(acc, mul(a, b))
+        }
+
+        /// [`super::msub`].
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn msub(acc: V, a: V, b: V) -> V {
+            sub(acc, mul(a, b))
+        }
+    }
+
     /// ITOF: each lane as a signed integer with `scale` fraction bits,
     /// rounded toward zero to a PS2 single.
     #[allow(clippy::inline_always, reason = "the VUs' hot path")]

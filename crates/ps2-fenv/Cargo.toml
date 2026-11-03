@@ -1,0 +1,30 @@
+[package]
+name = "ps2-fenv"
+description = "The host's floating-point environment for VU code: round toward zero, denormals flushed (MXCSR)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+# The workspace's lints, except that `unsafe` is denied rather than
+# forbidden: the two instructions that read and write MXCSR need it, and
+# allow it where they are.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+print_stderr = "warn"
+dbg_macro = "deny"
+todo = "warn"
+module_name_repetitions = "allow"

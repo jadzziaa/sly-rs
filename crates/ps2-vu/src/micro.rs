@@ -18,7 +18,10 @@
 //! backface test reads the sign of a cross product four pairs later, with
 //! other arithmetic in between.
 //!
-//! Arithmetic is `ps2_core::float`'s, as in macro mode.
+//! Arithmetic is `ps2_core::float`'s VU model, as in macro mode. Programs
+//! run in the VU floating-point environment (`ps2_fenv`), where on x86-64
+//! the four lanes are host single-precision operations (`float::x4::rtz`),
+//! exactly what the `f64` forms give; elsewhere the `f64` forms run.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -505,6 +508,17 @@ pub struct Translation {
 /// through translations wherever micro memory holds what they were
 /// translated from, and the interpreter elsewhere.
 pub fn run(unit: &mut Unit<'_>, pc: u32) -> Run {
+    ps2_fenv::with_vu_rounding(|| run_program(unit, pc))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+use float::x4 as lanes;
+/// The four-lane arithmetic: host single precision in the VU environment
+/// where there is one, the exact `f64` forms elsewhere.
+#[cfg(target_arch = "x86_64")]
+use float::x4::rtz as lanes;
+
+fn run_program(unit: &mut Unit<'_>, pc: u32) -> Run {
     static DUMP: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
     let code_mask = unit.code.len() as u32 - 1;
     let mut s = State::new(pc & code_mask & !7, unit.regs);
@@ -633,11 +647,11 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
             // All four lanes at once (the compiler vectorises them); the
             // lanes in `dest` are kept.
             let result = match arith {
-                Arith::Add => float::x4::add(a, b),
-                Arith::Sub => float::x4::sub(a, b),
-                Arith::Mul => float::x4::mul(a, b),
-                Arith::Madd => float::x4::madd(acc, a, b),
-                Arith::Msub => float::x4::msub(acc, a, b),
+                Arith::Add => lanes::add(a, b),
+                Arith::Sub => lanes::sub(a, b),
+                Arith::Mul => lanes::mul(a, b),
+                Arith::Madd => lanes::madd(acc, a, b),
+                Arith::Msub => lanes::msub(acc, a, b),
                 Arith::Max => float::x4::max(a, b),
                 Arith::Min => float::x4::min(a, b),
             };
@@ -654,14 +668,16 @@ pub fn exec(unit: &mut Unit<'_>, s: &mut State, pc: u32, pair: Pair, class: Uppe
         op @ (Upper::Opmula | Upper::Opmsub) => {
             let (a, b, acc) = (r.vf[fs], r.vf[ft], r.acc);
             let mut out = if op == Upper::Opmula { acc } else { r.vf[fd] };
-            for (i, (j, k)) in [(1, 2), (2, 0), (0, 1)].into_iter().enumerate() {
-                if in_dest(dest, i) {
-                    out[i] = if op == Upper::Opmula {
-                        float::vu::mul(a[j], b[k])
-                    } else {
-                        float::vu::msub(acc[i], a[j], b[k])
-                    };
-                }
+            // The cross product's terms: x = a.y*b.z, y = a.z*b.x,
+            // z = a.x*b.y (w is not written).
+            let (x, y) = ([a[1], a[2], a[0], 0], [b[2], b[0], b[1], 0]);
+            let terms = if op == Upper::Opmula {
+                lanes::mul(x, y)
+            } else {
+                lanes::msub(acc, x, y)
+            };
+            for i in (0..3).filter(|&i| in_dest(dest, i)) {
+                out[i] = terms[i];
             }
             if op == Upper::Opmula {
                 upper_acc = Some(out);

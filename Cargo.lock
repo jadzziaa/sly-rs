@@ -1422,6 +1422,7 @@ name = "ps2-core"
 version = "0.1.0"
 dependencies = [
  "divan",
+ "ps2-fenv",
  "ps2-isa",
 ]
 
@@ -1446,6 +1447,10 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
 ]
+
+[[package]]
+name = "ps2-fenv"
+version = "0.1.0"
 
 [[package]]
 name = "ps2-gs"
@@ -1479,6 +1484,7 @@ name = "ps2-vu"
 version = "0.1.0"
 dependencies = [
  "ps2-core",
+ "ps2-fenv",
  "ps2-gs",
  "ps2-isa",
  "tracing",

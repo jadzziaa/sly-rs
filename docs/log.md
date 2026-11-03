@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: VU programs run in the VU float environment (new crate `ps2-fenv`), on host single-precision operations: translated microcode 11.5 → 7.8 ns a pair ([graphics](research/sly1-graphics.md)).
 * **Update**: The VUs follow PCSX2's float model (exact result toward zero, no guard bits; zero and sign flags only): VU0 results agree with PCSX2's interpreter in 1,142 of 1,200 conformance lines, from 916 ([conformance](research/conformance.md)). Replay hashes and conformance/expected.txt re-recorded.
 * **Update**: VU1 speed measured and compared with rac-rs; the generated game builds for the host CPU ([graphics](research/sly1-graphics.md)).
 * **Update**: `[play.gamepad]` remaps gamepad buttons; the prologue plays through; gameplay runs at 56% of console speed headless, VU1 taking 84.5% of host time ([plan](plan.md)).

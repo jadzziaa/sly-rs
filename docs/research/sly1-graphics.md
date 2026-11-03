@@ -17,9 +17,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T15:59:56Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T21:52:57Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T15:59:56Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T21:52:57Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -268,6 +268,18 @@ rare; and computes VU floats with one SSE instruction each under a
 round-toward-zero, flush-to-zero MXCSR with operands clamped: PCSX2's
 default model, without the guard-bit truncation sly-rs models. Its main
 3D does not go through VU1 at all (a renderer of its own).
+
+**PCSX2's float model for the VUs** (the user's decision): VU arithmetic
+rounds the exact result toward zero, without the guard-bit truncation
+(see [conformance.md](conformance.md)). Programs run in the VU float
+environment (`ps2-fenv`: MXCSR round toward zero, denormals flushed),
+where the four lanes are host single-precision operations
+(`float::x4::rtz`), equal to the exact `f64` forms on a million random
+cases of each operation (`crates/ps2-core/tests/vu_rounding.rs`). On the
+gameplay programs: the interpreter from 16.5 to 10.7 ns a pair,
+translated microcode from 11.5 to 7.8 ns. Division, square root and the
+EFU compute in `f64` inside that environment and so round toward zero
+there too, which moved the replay's hashes.
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals
