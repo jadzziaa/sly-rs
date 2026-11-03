@@ -13,10 +13,11 @@
 #
 # DISC may also be a GS dump (`.gs`), such as `sly-rs run --gs-dump`
 # writes: PCSX2 then draws exactly the packets sly-rs's GS was sent. Its
-# frames count from the dump's start. With a dump of N fields ending at
-# field F, replay frame k shows sly-rs's field F-N+k: frame N-1 is field
-# F-1, and field F is never shown. To compare field F, dump up to F+1 and
-# take frame N-1 (compare with `tools/imgcmp.py`).
+# frames count from the dump's start: frame k is what the display shows at
+# the dump's k+1-th V-sync, which `sly-rs gs-replay DUMP --frames DIR`
+# writes as DIR/frame<k>.png (not the replay's end, which holds part of the
+# next field). Compare a pair with `tools/imgcmp.py`, whole directories
+# with `tools/framecmp.py`.
 #
 # With SAVE_RT=1, PCSX2 also saves the framebuffer after every draw in
 # those frames (`*_rt*`), to find the first draw that differs.

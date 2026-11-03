@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: Phase 6 gate met: GS dumps of the dialog, title 3D and level intro match PCSX2's software renderer within 8 levels on at least 99.9% of pixels, after porting PCSX2's AA1 edges and point placement; see [research/sly1-graphics.md](research/sly1-graphics.md) and [plan.md](plan.md).
 * **Update**: GIF parsing without per-quadword tag copies; parallel batches from 4,096 pixels; two VU interpreter experiments recorded as dropped; what is left and its ceilings in [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: Cheaper GS pixels: addressing and wrapping per primitive, flat sprites written directly; measurements in [research/sly1-graphics.md](research/sly1-graphics.md).
 * **Update**: Interpreted EE: decode cache, direct fetch, hook filter, instructions back to back between hand-back points; PCSX2's interpreter read for comparison. Figures and what limits the interpreted build now in [research/sly1-graphics.md](research/sly1-graphics.md).

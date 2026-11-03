@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:24:15Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:52:12Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -648,7 +648,7 @@ given: the gates are the schedule.
 - **Gate**: Sly 1's title screen and first level draw; replayed GS dumps match
   PCSX2's software renderer within a stated per-pixel tolerance.
 
-- **Status, 2026-11-03: in progress.**
+- **Status, 2026-11-03: gate met (see the end of this list).**
   - `ps2-gs` is built and unit-tested:
     - local memory in all 13 formats, with PCSX2's swizzle tables;
     - GIF PACKED, REGLIST and IMAGE packets;
@@ -725,6 +725,21 @@ given: the gates are the schedule.
     [research/sly1-graphics.md](research/sly1-graphics.md): at most about
     3.8 s from VU dispatch in the interpreted build; per-state GS pixel
     pipelines as a project of their own.
+  - Speed work is set aside for now (2026-11-03): the recompiled build
+    averages about 132% of NTSC over the replay's first 1300 fields and
+    runs the heaviest 3D at about console speed; the interpreted build,
+    for debugging, about 97% on average and 75-85% in 3D.
+  - **Gate met (2026-11-03).** Sly 1's title screen and first level draw.
+    Replayed GS dumps of the dialog (100 fields), the title's 3D (30) and
+    the level intro (30) match PCSX2's software renderer within the stated
+    tolerance: in every scene at least 99.9% of pixels within 8 levels,
+    the rest explained ([research/sly1-graphics.md](research/sly1-graphics.md),
+    "Whole dumps, frame by frame"). Antialiasing (`AA1`) and point
+    placement were brought in line with PCSX2 to get there.
+  - Not done in this phase, carried to phase 7: presenting frames through
+    wgpu (the window), field and interlace handling beyond NTSC field
+    mode, and the toon outlines' lines, which only appear with characters
+    in view (antialiased lines follow PCSX2 but are untested against it).
 
 ### Phase 7 - Playable Sly 1
 

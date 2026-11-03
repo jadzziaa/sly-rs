@@ -14,9 +14,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:24:15Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:52:51Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:24:15Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T10:56:10Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -99,6 +99,41 @@ field).
       interpolation turned 0x80 into 0x7F at some pixels. Colour, depth
       and fog are now interpolated exactly from the integer edge weights
       (a unit test covers it).
+- **Whole dumps, frame by frame** (the phase 6 gate). `gs-replay
+  --frames` writes what the display shows at each V-sync, numbered as
+  PCSX2 numbers a dump's frames, and `tools/framecmp.py` compares the two
+  sets. (Comparing the replay's end with PCSX2's last frame, as before,
+  was off: the end already holds part of the next field.) What it found:
+  - **Antialiasing (`AA1`)** was missing. The binocucom's border and HUD
+    are antialiased triangles: PCSX2 draws a triangle's inside, then one
+    pixel per step along each edge with the share of the pixel covered,
+    which becomes the pixel's alpha (shifted right by 9). Without `ABE`,
+    an `AA1` primitive's inside takes alpha 0x80 and its edges their
+    coverage; with `ABE`, only alpha 0x80 is replaced. Edge pixels test
+    depth but never write it, and `AA1` blends (with ALPHA) even without
+    `ABE`. `crates/ps2-gs/src/aa.rs` ports PCSX2's edge and line walks;
+    edge pixels take their colour, depth and texture coordinates from our
+    own interpolation along the edge.
+  - **Points** light the pixel at their position plus half a pixel,
+    truncated, as PCSX2 places them (we took the ceiling): the static in
+    the binocucom's side panels.
+  - Together, on the level intro: within 8 levels of PCSX2, 96.8% of
+    pixels before (differences up to 115), 100% after (up to 6).
+  - What is left: in the dialog, glyph edges of scaled sprites, where
+    PCSX2 steps texture coordinates in floats (per row, then per group of
+    pixels) and we interpolate them exactly in the GS's fixed point; one
+    column can land on the next texel. In the title's 3D, rounding of
+    perspective texture coordinates and shading.
+
+  | GS dump (fields) | identical | within 2 | within 8 | within 17 | largest |
+  | --- | --- | --- | --- | --- | --- |
+  | Dialog, 300-399 (100) | 99.93% | 99.98% | 99.987% | 99.9997% | 79 |
+  | Title's 3D, 1270-1299 (30) | 85.1% | 99.57% | 99.970% | 100% | 17 |
+  | Level intro, 2570-2599 (30) | 98.1% | 99.98% | 100% | 100% | 6 |
+
+  **The gate's tolerance:** in every scene at least 99.9% of pixels within
+  8 levels (of 255, on any channel) of PCSX2's software renderer, the rest
+  at texel boundaries of scaled sprites or in perspective rounding.
 - The comparison also found two machine bugs: `SetGsCrt` now sets the CRT
   registers as the BIOS does for NTSC, and the GS CSR's revision and ID sit
   in bits 16 to 31.

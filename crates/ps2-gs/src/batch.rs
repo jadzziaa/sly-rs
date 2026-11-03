@@ -874,7 +874,8 @@ mod tests {
             gs.write(addr::ALPHA_1, 0x44);
             for k in 0..40u64 {
                 gs.write(addr::RGBAQ, 0x4000_0000 | (k * 0x0105_0709));
-                gs.write(addr::PRIM, 3 | 1 << 3 | 1 << 6);
+                // Every third antialiased: its edges reach past its box.
+                gs.write(addr::PRIM, 3 | 1 << 3 | 1 << 6 | u64::from(k % 3 == 0) << 7);
                 for (x, y) in [
                     (k * 13 % 600, k * 7 % 400),
                     (k * 31 % 640, 447 - k),

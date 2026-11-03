@@ -13,6 +13,7 @@ pub(crate) fn run(
     repeat: u32,
     threads: usize,
     screenshot: Option<&Path>,
+    frames: Option<&Path>,
 ) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let mut out = io::stdout().lock();
@@ -27,7 +28,17 @@ pub(crate) fn run(
             match packet {
                 Packet::Transfer(path, data) => gs.gif(path, data),
                 Packet::Registers(block) => privileged = block,
-                Packet::VSync(_) => fields += 1,
+                Packet::VSync(_) => {
+                    fields += 1;
+                    if let Some(dir) = frames {
+                        // Numbered as PCSX2 numbers a dump's frames.
+                        gs.flush();
+                        let frame = gs.display(&Privileged::from_block(&privileged[..]));
+                        let png = dir.join(format!("frame{:05}.png", fields - 1));
+                        std::fs::write(&png, frame.png())
+                            .with_context(|| format!("writing {}", png.display()))?;
+                    }
+                }
             }
         }
         gs.flush();

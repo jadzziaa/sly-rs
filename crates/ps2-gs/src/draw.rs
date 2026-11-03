@@ -29,6 +29,8 @@ pub(crate) struct Pipe {
     tme: bool,
     fge: bool,
     abe: bool,
+    /// Antialiasing (`AA1`), for lines and triangles: coverage alpha.
+    aa1: bool,
     fst: bool,
     iip: bool,
     /// Scissor, inclusive, in pixels: x0, x1, y0, y1.
@@ -228,6 +230,9 @@ struct Frag {
     /// S, T and Q, for perspective interpolation.
     stq: [f32; 3],
     f: i32,
+    /// On an antialiased edge, the share of the pixel covered (0 to
+    /// 0xFFFF).
+    coverage: Option<u32>,
 }
 
 impl Gs {
@@ -261,6 +266,8 @@ impl Gs {
             tme: bits(attrs, 4, 1) != 0,
             fge: bits(attrs, 5, 1) != 0,
             abe: bits(attrs, 6, 1) != 0,
+            // Lines and triangles only: `draw` clears it for the others.
+            aa1: bits(attrs, 7, 1) != 0,
             fst: bits(attrs, 8, 1) != 0,
             iip: bits(attrs, 3, 1) != 0,
             scissor: [
@@ -308,8 +315,9 @@ impl Gs {
     pub(crate) fn draw(&mut self, v: &[Vertex]) {
         self.drawn += 1;
         let started = std::time::Instant::now();
-        let pipe = self.pipe();
+        let mut pipe = self.pipe();
         let kind = self.prim & 7;
+        pipe.aa1 &= matches!(kind, 1..=5);
         let mut vertices = [Vertex::default(); 3];
         vertices[..v.len()].copy_from_slice(v);
         if let Some(bbox) = bounds(&pipe, kind, &vertices) {
@@ -327,6 +335,17 @@ impl Gs {
         }
         self.draw_time += started.elapsed();
     }
+}
+
+/// The pixel a point at `pos` (1/16 pixel) lights: its position plus half
+/// a pixel, truncated toward zero (as PCSX2's software renderer).
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the truncation is the rule"
+)]
+fn point(pos: (i32, i32)) -> (i32, i32) {
+    let at = |c: i32| (c as f32 / 16.0 + 0.5) as i32;
+    (at(pos.0), at(pos.1))
 }
 
 /// The pixels a primitive may touch (x0, x1, y0, y1, inclusive), inside
@@ -348,12 +367,10 @@ fn bounds(p: &Pipe, kind: u64, v: &[Vertex; 3]) -> Option<[i32; 4]> {
     );
     // The sample points each rasteriser can reach.
     let [x0, x1, y0, y1] = match kind {
-        0 => [
-            (min_x + 15) >> 4,
-            (min_x + 15) >> 4,
-            (min_y + 15) >> 4,
-            (min_y + 15) >> 4,
-        ],
+        0 => {
+            let (x, y) = point((min_x, min_y));
+            [x, x, y, y]
+        }
         1 | 2 => [
             (min_x + 8) >> 4,
             (max_x + 8) >> 4,
@@ -367,6 +384,12 @@ fn bounds(p: &Pipe, kind: u64, v: &[Vertex; 3]) -> Option<[i32; 4]> {
             ((max_y + 15) >> 4) - 1,
         ],
         _ => [(min_x + 15) >> 4, max_x >> 4, (min_y + 15) >> 4, max_y >> 4],
+    };
+    // Antialiased edges reach a pixel further on every side.
+    let [x0, x1, y0, y1] = if p.aa1 {
+        [x0 - 1, x1 + 1, y0 - 1, y1 + 1]
+    } else {
+        [x0, x1, y0, y1]
     };
     let [sx0, sx1, sy0, sy1] = p.scissor;
     let b = [
@@ -393,10 +416,12 @@ impl Raster<'_> {
         let at = |v: &Vertex| (v.x as i32 - p.offset.0, v.y as i32 - p.offset.1);
         match prim.kind {
             0 => {
-                let (x, y) = at(&v[0]);
-                let frag = attrs(p, &v[0]);
-                self.fragment(p, (x + 15) >> 4, (y + 15) >> 4, frag);
+                let (x, y) = point(at(&v[0]));
+                if (clip[0]..=clip[1]).contains(&x) && (clip[2]..=clip[3]).contains(&y) {
+                    self.fragment(p, x, y, attrs(p, &v[0]));
+                }
             }
+            1 | 2 if p.aa1 => self.aa_line(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
             1 | 2 => self.line(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
             3..=5 => self.triangle(p, clip, [at(&v[0]), at(&v[1]), at(&v[2])], v),
             _ => self.sprite(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
@@ -457,6 +482,8 @@ impl Raster<'_> {
         // The last vertex gives flat colour; keep it before reordering.
         let f = [attrs(p, &v[0]), attrs(p, &v[1]), attrs(p, &v[2])];
         let last = f[2];
+        // As given, for antialiased edges.
+        let (given_pos, given) = (pos, f);
         let edge = |a: (i32, i32), b: (i32, i32), x: i64, y: i64| {
             i64::from(b.0 - a.0) * (y - i64::from(a.1))
                 - i64::from(b.1 - a.1) * (x - i64::from(a.0))
@@ -550,6 +577,63 @@ impl Raster<'_> {
                 );
             }
         }
+        if p.aa1 {
+            self.aa_edges(p, clip, given_pos, &given, &last);
+        }
+    }
+
+    /// An antialiased triangle's edges (`AA1`), after its inside: PCSX2's
+    /// walk, each pixel with the share of it the triangle covers.
+    fn aa_edges(
+        &self,
+        p: &Pipe,
+        clip: [i32; 4],
+        pos: [(i32, i32); 3],
+        given: &[Frag; 3],
+        last: &Frag,
+    ) {
+        crate::aa::triangle(pos, p.scissor, &mut |e| {
+            if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
+                let frag = edge_frag(p, &given[e.from], &given[e.to], e.t, last);
+                self.fragment(
+                    p,
+                    e.x,
+                    e.y,
+                    Frag {
+                        coverage: Some(e.coverage),
+                        ..frag
+                    },
+                );
+            }
+        });
+    }
+
+    /// An antialiased line (`AA1`): PCSX2's walk, two pixels a step, every
+    /// one an edge pixel.
+    fn aa_line(
+        &self,
+        p: &Pipe,
+        clip: [i32; 4],
+        a: (i32, i32),
+        b: (i32, i32),
+        va: &Vertex,
+        vb: &Vertex,
+    ) {
+        let (fa, fb) = (attrs(p, va), attrs(p, vb));
+        crate::aa::line(a, b, p.scissor, &mut |e| {
+            if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
+                let frag = edge_frag(p, &fa, &fb, e.t, &fb);
+                self.fragment(
+                    p,
+                    e.x,
+                    e.y,
+                    Frag {
+                        coverage: Some(e.coverage),
+                        ..frag
+                    },
+                );
+            }
+        });
     }
 
     fn line(
@@ -759,6 +843,15 @@ impl Raster<'_> {
                 }
             }
         }
+        if p.aa1 {
+            // Coverage alpha (as PCSX2's software renderer): an edge's
+            // share of the pixel, else 0x80; it replaces alpha, or with
+            // blending on only an alpha of 0x80.
+            let a = frag.coverage.map_or(0x80, |c| (c >> 9) as i32);
+            if !p.abe || c[3] == 0x80 {
+                c[3] = a;
+            }
+        }
         if p.fge {
             let fc = [
                 bits(p.fogcol, 0, 8),
@@ -770,7 +863,9 @@ impl Raster<'_> {
             }
         }
         // Alpha test: which writes survive.
-        let (mut write_fb, mut write_z, mut write_alpha) = (true, !p.zmsk, true);
+        // Antialiased edges test depth but never write it.
+        let (mut write_fb, mut write_z, mut write_alpha) =
+            (true, !p.zmsk && frag.coverage.is_none(), true);
         if bits(t, 0, 1) != 0 {
             let (a, aref) = (c[3], bits(t, 4, 8) as i32);
             let pass = match bits(t, 1, 3) {
@@ -810,7 +905,8 @@ impl Raster<'_> {
             _ => dst,
         };
         let dc = [d & 0xFF, (d >> 8) & 0xFF, (d >> 16) & 0xFF, d >> 24].map(|v| v as i32);
-        if p.abe && (!p.pabe || c[3] & 0x80 != 0) {
+        // AA1 blends (with ALPHA) even without ABE, as PCSX2 does.
+        if (p.abe || p.aa1) && (!p.pabe || c[3] & 0x80 != 0) {
             let a = p.alpha;
             let cs = c;
             let pick = |sel: u32, k: usize| match sel {
@@ -871,6 +967,7 @@ impl Fill {
         if p.tme
             || p.fge
             || p.abe
+            || p.aa1
             || bits(t, 0, 1) != 0
             || bits(t, 14, 1) != 0
             || (p.zbuf.is_some() && ztst != 1)
@@ -922,6 +1019,37 @@ fn sprite_coord(fst: bool, c0: f32, c1: f32, s0: i32, s1: i32, s: i32) -> f32 {
     }
 }
 
+/// Attributes `t` of the way from `a` to `b` along an antialiased edge
+/// (held to the edge's ends); flat colour from `last`.
+fn edge_frag(p: &Pipe, a: &Frag, b: &Frag, t: f32, last: &Frag) -> Frag {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: i32, b: i32| a + ((b - a) as f32 * t) as i32;
+    let rgba = if p.iip {
+        std::array::from_fn(|k| mix(a.rgba[k], b.rgba[k]))
+    } else {
+        last.rgba
+    };
+    let z = (f64::from(a.z) + (f64::from(b.z) - f64::from(a.z)) * f64::from(t)) as u32;
+    let uv = if p.tme {
+        let (tw, th) = (
+            f64::from(1u16 << p.tex.tw.min(10)),
+            f64::from(1u16 << p.tex.th.min(10)),
+        );
+        let t = f64::from(t);
+        tex_coords(p, &[*a, *b, *b], [1.0 - t, t, 0.0], (tw, th))
+    } else {
+        (0.0, 0.0)
+    };
+    Frag {
+        z,
+        rgba,
+        uv,
+        f: mix(a.f, b.f),
+        coverage: None,
+        ..*last
+    }
+}
+
 /// A vertex's attributes as a fragment's.
 fn attrs(p: &Pipe, v: &Vertex) -> Frag {
     let (w, h) = (
@@ -940,6 +1068,7 @@ fn attrs(p: &Pipe, v: &Vertex) -> Frag {
         uv,
         stq: [v.s, v.t, v.q],
         f: i32::from(v.f),
+        coverage: None,
     }
 }
 
@@ -1029,6 +1158,7 @@ mod tests {
                         uv: (0.0, 0.0),
                         stq: [0.0; 3],
                         f: 0,
+                        coverage: None,
                     };
                     let fill = Fill::of(&p, &frag).expect("a fill");
                     let reference = Gs::default();
@@ -1066,6 +1196,47 @@ mod tests {
 
     fn pixel(gs: &Gs, x: u32, y: u32) -> u32 {
         gs.mem.read(Psm::Ct32, 0, 1, x, y)
+    }
+
+    /// An antialiased triangle (AA1, no ABE) draws its inside as a plain
+    /// one does, then blends its edge pixels by their coverage (with
+    /// ALPHA, `(Cs - Cd) * As + Cd`): they land between the background and
+    /// its colour. Nothing further out changes.
+    #[test]
+    fn antialiased_triangles_blend_their_edges_by_coverage() {
+        let draw = |aa1: bool| {
+            let mut gs = gs();
+            gs.write(addr::ALPHA_1, 0x44);
+            gs.write(addr::RGBAQ, 0x0040_4040);
+            gs.write(addr::PRIM, 6);
+            xyz(&mut gs, 0, 0);
+            xyz(&mut gs, 64, 64);
+            gs.write(addr::RGBAQ, 0x80C0_C0C0);
+            gs.write(addr::PRIM, 3 | u64::from(aa1) << 7);
+            for (x, y) in [(10, 10), (50, 14), (20, 50)] {
+                xyz(&mut gs, x, y);
+            }
+            gs
+        };
+        let (plain, aa) = (draw(false), draw(true));
+        let mut between = 0;
+        for y in 0..64 {
+            for x in 0..64 {
+                let (p, a) = (
+                    pixel(&plain, x, y) & 0xFF_FFFF,
+                    pixel(&aa, x, y) & 0xFF_FFFF,
+                );
+                if p == 0xC0_C0C0 {
+                    assert_eq!(a, p, "inside at ({x}, {y})");
+                } else if a != p {
+                    let r = a & 0xFF;
+                    assert!((0x40..=0xC0).contains(&r), "({x}, {y}): {a:#x}");
+                    between += 1;
+                }
+            }
+        }
+        assert!(between > 40, "{between} edge pixels");
+        assert_eq!(pixel(&aa, 2, 2) & 0xFF_FFFF, 0x40_4040);
     }
 
     #[test]

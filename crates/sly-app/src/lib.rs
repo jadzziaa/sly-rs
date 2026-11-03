@@ -173,6 +173,12 @@ enum Command {
         /// Write what the display shows at the end to this PNG file.
         #[arg(long)]
         screenshot: Option<PathBuf>,
+        /// Write what the display shows at every V-sync into this
+        /// directory, `frameNNNNN.png` numbered as PCSX2 numbers the
+        /// dump's frames (pictures of the game: keep them out of the
+        /// repository).
+        #[arg(long)]
+        frames: Option<PathBuf>,
     },
     /// Run a replay (scripted presses) and check its checkpoints: the game's
     /// world and level, and the machine's state hash.
@@ -272,7 +278,14 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
             repeat,
             threads,
             screenshot,
-        } => gs_replay::run(&path, repeat, threads, screenshot.as_deref()),
+            frames,
+        } => gs_replay::run(
+            &path,
+            repeat,
+            threads,
+            screenshot.as_deref(),
+            frames.as_deref(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

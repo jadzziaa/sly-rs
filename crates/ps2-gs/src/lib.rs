@@ -18,6 +18,7 @@
     reason = "register fields"
 )]
 
+mod aa;
 mod batch;
 pub mod display;
 mod draw;
