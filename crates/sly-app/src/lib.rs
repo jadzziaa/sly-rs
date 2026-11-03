@@ -121,6 +121,14 @@ enum Command {
         /// Write what the display shows at the end to this PNG file.
         #[arg(long)]
         screenshot: Option<PathBuf>,
+        /// Write the last --gs-dump-fields fields' GS traffic to this file
+        /// as a PCSX2 GS dump (`.gs`), for comparing pictures with PCSX2.
+        /// It holds the game's graphics: keep it out of the repository.
+        #[arg(long)]
+        gs_dump: Option<PathBuf>,
+        /// Fields the GS dump covers.
+        #[arg(long, default_value_t = 2)]
+        gs_dump_fields: u64,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -201,12 +209,17 @@ pub fn main(recompiled: Option<&Recompiled>) -> ExitCode {
             interpret,
             press,
             screenshot,
+            gs_dump,
+            gs_dump_fields,
         } => run::run(
             &game,
             fields,
             &watch,
             &press,
-            screenshot.as_deref(),
+            &run::Pictures {
+                screenshot: screenshot.as_deref(),
+                gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
+            },
             recompiled.filter(|_| !interpret),
         ),
         Command::Lockstep {

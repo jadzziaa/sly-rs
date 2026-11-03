@@ -105,7 +105,8 @@ impl Hardware {
             intc_stat: 0,
             intc_mask: 0,
             d_stat: 0,
-            gs_csr: 0x551B_0000_0000_0000,
+            // ID 0x55 and revision 0x1B in bits 31..16; FIFO empty (bit 14).
+            gs_csr: 0x551B_4000,
             gs_imr: 0x7F00,
             sbus: [0, 0, 0, sif::SIFINIT | sif::CMDINIT | sif::BOOTEND],
             timers: [(0, 0, 0, 0); 4],
@@ -131,6 +132,20 @@ impl Hardware {
         if self.gs_imr & (1 << (bit + 8)) == 0 {
             self.raise_intc(intc::GS);
         }
+    }
+
+    /// The GS privileged registers as the block at `0x12000000` holds them
+    /// (for GS dumps).
+    #[must_use]
+    pub fn gs_privileged(&self) -> Box<[u8; ps2_gs::dump::PRIV_SIZE]> {
+        let mut block = Box::new([0u8; ps2_gs::dump::PRIV_SIZE]);
+        for (&address, &value) in self.regs.range(0x1200_0000..0x1200_2000) {
+            let at = (address - 0x1200_0000) as usize & !7;
+            block[at..at + 8].copy_from_slice(&(value as u64).to_le_bytes());
+        }
+        block[0x1000..0x1008].copy_from_slice(&self.gs_csr.to_le_bytes());
+        block[0x1010..0x1018].copy_from_slice(&self.gs_imr.to_le_bytes());
+        block
     }
 
     /// The GS privileged registers the display read-out uses.

@@ -10,6 +10,14 @@ use sly_common::Game;
 
 use crate::Recompiled;
 
+/// Pictures a run writes at its end.
+pub(crate) struct Pictures<'a> {
+    /// What the display shows, as a PNG.
+    pub(crate) screenshot: Option<&'a std::path::Path>,
+    /// A PCSX2 GS dump of the last fields, and how many.
+    pub(crate) gs_dump: Option<(&'a std::path::Path, u64)>,
+}
+
 #[allow(
     clippy::too_many_lines,
     clippy::cast_precision_loss,
@@ -20,7 +28,7 @@ pub(crate) fn run(
     fields: u64,
     watch: &[String],
     press: &[String],
-    screenshot: Option<&std::path::Path>,
+    pictures: &Pictures<'_>,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
     let presses = sly_common::replay::parse_presses(press)?;
@@ -36,9 +44,28 @@ pub(crate) fn run(
         machine.watches.insert(address, Vec::new());
     }
     let started = Instant::now();
-    let stop = sly_common::replay::run(&mut machine, fields, &presses);
+    let stop = match pictures.gs_dump {
+        Some((path, dumped)) => {
+            let before = fields.saturating_sub(dumped);
+            let stop = sly_common::replay::run(&mut machine, before, &presses);
+            {
+                let mut hw = machine.hw.borrow_mut();
+                let block = hw.gs_privileged();
+                hw.gs.start_dump(&block);
+            }
+            let stop = if stop == ps2_ee::Stop::Budget {
+                sly_common::replay::run(&mut machine, fields - before, &presses)
+            } else {
+                stop
+            };
+            let bytes = machine.hw.borrow_mut().gs.finish_dump().unwrap_or_default();
+            std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+            stop
+        }
+        None => sly_common::replay::run(&mut machine, fields, &presses),
+    };
     let elapsed = started.elapsed();
-    if let Some(path) = screenshot {
+    if let Some(path) = pictures.screenshot {
         let hw = machine.hw.borrow();
         let frame = hw.gs.display(&hw.gs_display());
         std::fs::write(path, frame.png()).with_context(|| format!("writing {}", path.display()))?;

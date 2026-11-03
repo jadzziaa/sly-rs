@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T03:14:22Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T04:09:09Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -674,10 +674,15 @@ given: the gates are the schedule.
     intro ([research/sly1-graphics.md](research/sly1-graphics.md)).
     Nothing is compared with PCSX2 yet.
   - Speed: about 0.2 s per field once 3D draws.
+  - Compared with PCSX2 ([research/sly1-graphics.md](research/sly1-graphics.md)):
+    - `sly-rs run --gs-dump` writes PCSX2 GS dumps, so PCSX2 draws our
+      exact packets. This replaces sub-gate (b), a GS conformance program:
+      it tests the drawing on the game's own input.
+    - The dialog field matches PCSX2 pixel for pixel. The title's 3D
+      field differs in 26,094 of 143,360 pixels: 17,496 by 1 or 2, and
+      6,282 by more than 8, in the spotlight's additive passes.
   - Next:
-    - The title compared with PCSX2's at native resolution. Field
-      handling: the 3D scene tears and the logo's top is clipped.
-    - A GS conformance program compared with PCSX2's software renderer.
+    - The spotlight's first differing draw, made a unit test.
     - Speed, measured first.
 
 ### Phase 7 - Playable Sly 1

@@ -167,12 +167,22 @@ impl Gs {
         let px1 = ((x1 + 15) >> 4).min(sx1 + 1);
         let py0 = ((y0 + 15) >> 4).max(sy0);
         let py1 = ((y1 + 15) >> 4).min(sy1 + 1);
-        let du = (u1 - u0) / (x1 - x0) as f32;
-        let dv = (v1 - v0) / (y1 - y0) as f32;
+        // Texture coordinates at each sample point. UV (FST) is fixed
+        // point, 1/16 texel, and interpolates exactly; S/T/Q in floats.
+        let fst = p.fst;
+        let at = |c0: f32, c1: f32, s0: i32, s1: i32, s: i32| -> f32 {
+            if fst {
+                let (c0, c1) = ((c0 * 16.0) as i64, (c1 * 16.0) as i64);
+                let c = c0 + ((c1 - c0) * i64::from(s - s0)).div_euclid(i64::from(s1 - s0));
+                c as f32 / 16.0
+            } else {
+                c0 + (c1 - c0) / (s1 - s0) as f32 * (s - s0) as f32
+            }
+        };
         for y in py0..py1 {
-            let v = v0 + dv * (y * 16 - y0) as f32;
+            let v = at(v0, v1, y0, y1, y * 16);
             for x in px0..px1 {
-                let u = u0 + du * (x * 16 - x0) as f32;
+                let u = at(u0, u1, x0, x1, x * 16);
                 self.fragment(p, x, y, Frag { uv: (u, v), ..fb });
             }
         }
@@ -359,7 +369,8 @@ impl Gs {
         if !p.linear {
             return channels(self.texel(p, u.floor() as i32, v.floor() as i32));
         }
-        // Bilinear, with 4-bit weights.
+        // Bilinear, with 4-bit weights: across, then down, each step
+        // truncated (as PCSX2's software renderer does).
         let (u, v) = ((u * 16.0) as i32 - 8, (v * 16.0) as i32 - 8);
         let (iu, iv, fu, fv) = (u >> 4, v >> 4, u & 15, v & 15);
         let t = [
@@ -368,10 +379,11 @@ impl Gs {
             channels(self.texel(p, iu, iv + 1)),
             channels(self.texel(p, iu + 1, iv + 1)),
         ];
+        let lerp = |a: i32, b: i32, f: i32| a + (((b - a) * f) >> 4);
         std::array::from_fn(|k| {
-            let top = t[0][k] * (16 - fu) + t[1][k] * fu;
-            let bottom = t[2][k] * (16 - fu) + t[3][k] * fu;
-            (top * (16 - fv) + bottom * fv) >> 8
+            let top = lerp(t[0][k], t[1][k], fu);
+            let bottom = lerp(t[2][k], t[3][k], fu);
+            lerp(top, bottom, fv)
         })
     }
 

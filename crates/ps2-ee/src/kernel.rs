@@ -193,6 +193,27 @@ fn arg(cpu: &Cpu, n: u8) -> u32 {
     cpu.r32(4 + n)
 }
 
+/// `SetGsCrt(interlace, mode, ffmd)`: the CRT registers as the BIOS sets
+/// them, with values read from PCSX2 running the real BIOS. Only NTSC
+/// interlaced (mode 2) is known; other modes set SMODE2 alone.
+fn set_gs_crt(hw: &mut Hardware, interlace: u32, mode: u32, ffmd: u32) {
+    if mode == 2 && interlace != 0 {
+        for (address, value) in [
+            (0x1200_0010, 0x7_4081_4504u64),    // SMODE1
+            (0x1200_0030, 8),                   // SRFSH
+            (0x1200_0040, 0x7_F5B6_1F06_F040),  // SYNCH1
+            (0x1200_0050, 0x33_A4D8),           // SYNCH2
+            (0x1200_0060, 0xC7_8006_01A0_1801), // SYNCV
+        ] {
+            hw.regs.insert(address, u128::from(value));
+        }
+    } else {
+        tracing::warn!(target: "ee::syscall", "SetGsCrt mode {mode:#x} (interlace {interlace}): only NTSC interlaced is known");
+    }
+    hw.regs
+        .insert(0x1200_0020, u128::from((interlace & 1) | ((ffmd & 1) << 1)));
+}
+
 fn ret(cpu: &mut Cpu, value: i64) {
     cpu.set64(2, value.cast_unsigned());
 }
@@ -246,7 +267,11 @@ impl Kernel {
         }
         let current = self.current.unwrap_or(0);
         match number.unsigned_abs() {
-            0x01 | 0x02 | 0x0D | 0x0E | 0x0F | 0x64 | 0x68 => ret(cpu, 0),
+            0x02 => {
+                set_gs_crt(hw, a0, a1, a2);
+                ret(cpu, 0);
+            }
+            0x01 | 0x0D | 0x0E | 0x0F | 0x64 | 0x68 => ret(cpu, 0),
             0x04 => return Effect::Exit(a0 as i32),
             0x10 | 0x12 => {
                 let id = self.next_handler_id;

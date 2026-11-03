@@ -36,6 +36,16 @@ impl Gs {
     /// Feeds quadwords of GIF packets on `path` (1 to 3).
     pub fn gif(&mut self, path: usize, data: impl IntoIterator<Item = u128>) {
         let path = path.min(3);
+        if self.dumping() {
+            let data: Vec<u128> = data.into_iter().collect();
+            self.dump_transfer(path, &data);
+            self.feed(path, data);
+        } else {
+            self.feed(path, data);
+        }
+    }
+
+    fn feed(&mut self, path: usize, data: impl IntoIterator<Item = u128>) {
         for q in data {
             match self.paths[path].tag {
                 None => self.gif_tag(path, q),

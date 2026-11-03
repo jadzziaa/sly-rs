@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-02
+* **Update**: Phase 6: Sly 1 compared with PCSX2, which draws sly-rs's own packets through GS dumps; the dialog matches pixel for pixel, the 3D title differs in its spotlight ([sly1-graphics.md](research/sly1-graphics.md), [plan](plan.md)).
 * **Update**: Phase 6: VIFs, VUs and scratchpad DMA modelled; Sly 1's title and the first level's intro draw ([sly1-graphics.md](research/sly1-graphics.md), new). The first level's stall is fixed and the phase 5 replay re-tuned ([plan](plan.md), [boot](research/sly1-boot.md)).
 * **Update**: Phase 6 started: [plan](plan.md) status, and [Sly 1 boot](research/sly1-boot.md) step 16, the first level's stall waiting for VIF1's interrupt.
 * **Update**: [Phase 5](plan.md) gate passed: under a scripted replay Sly 1 reaches its title, starts a new game and loads [its first level](research/sly1-boot.md) with recorded hashes, interpreted and recompiled alike; pad, memory card (no card), movie hooks.

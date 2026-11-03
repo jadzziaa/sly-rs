@@ -272,6 +272,11 @@ impl Machine {
                 hw.raise_intc(intc::VBLANK_START);
                 hw.gs_csr ^= 1 << 13;
                 hw.gs_event(3);
+                if hw.gs.dumping() {
+                    let field = ((hw.gs_csr >> 13) & 1) as u8;
+                    let block = hw.gs_privileged();
+                    hw.gs.dump_vsync(field, &block);
+                }
                 hw.gs_csr
             };
             self.iop.vblank(&mut self.mem);

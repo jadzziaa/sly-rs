@@ -20,6 +20,7 @@
 
 pub mod display;
 mod draw;
+pub mod dump;
 pub mod gif;
 pub mod mem;
 pub mod regs;
@@ -99,6 +100,8 @@ pub struct Gs {
     paths: [gif::Path; 4],
     /// Events since they were last taken.
     events: Events,
+    /// The PCSX2 dump being written, if any.
+    dump: Option<dump::Dump>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
 }
@@ -134,6 +137,7 @@ impl Default for Gs {
             readback: std::collections::VecDeque::new(),
             paths: Default::default(),
             events: Events::default(),
+            dump: None,
             drawn: 0,
         }
     }
