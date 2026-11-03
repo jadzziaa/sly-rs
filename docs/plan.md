@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:57:48Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:33Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -778,6 +778,16 @@ given: the gates are the schedule.
     moving ones interpolate the latest), with each field's parity from
     the GS's CSR FIELD: bobbing the fields made still 2D jump a line
     every field.
+  - Tested hands-on with a gamepad (2026-11-03): after the binocucom
+    the left stick did not move Sly. Our padman said the pad's modes
+    could not be configured, so Sly took it for a digital pad; now it
+    reports a configurable DualShock 2 as the real one does, and the
+    stick works at once, as in PCSX2. `replay --frames --beyond` shows a
+    recorded session's pictures and runs past its end. Interface states
+    are renamed from `UpdateUi` (3 is Playing).
+  - Open from that test: speed in a large window, Sly's shadow in the
+    opening cutscene (to compare with PCSX2), pressure mode (the real
+    game reaches mode 0x79, Shock2; ours stays at 0x73, Shock).
   - Next: memory card saves.
 
 ### Phase 8 - Sound and movies

@@ -17,9 +17,9 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:43:30Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:33Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T13:43:30Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:41Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -67,7 +67,7 @@ once.
 
 Sly 1 shows its title over the first level, `jb_intro` (world 0, level 3),
 with the interface state in Attract (1). Start begins the level's intro in
-place (interface Pausing, 3). World and level alone cannot tell the two
+place (interface Playing, 3). World and level alone cannot tell the two
 apart, so the replay's checkpoints also give the interface state.
 
 ## Compared with PCSX2

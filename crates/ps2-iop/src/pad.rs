@@ -77,6 +77,8 @@ struct Port {
     area: u32,
     /// The current mode id.
     mode: u8,
+    /// The mode lock `SET_MAIN_MODE` asked for.
+    lock: u8,
     /// Records written.
     frame: u32,
 }
@@ -125,6 +127,12 @@ impl Padman {
         for (k, bit) in order.iter().enumerate() {
             r[8 + k] = if pressed & (1 << bit) != 0 { 0xFF } else { 0 };
         }
+        // actData: the two motors (small, then large) and their
+        // combination, as the disc's padman reports a DualShock 2 (read
+        // from a PCSX2 savestate).
+        r[48..52].copy_from_slice(&[1, 2, 0, 0x0A]);
+        r[52..56].copy_from_slice(&[1, 1, 1, 0x14]);
+        r[64..68].copy_from_slice(&[2, 0, 1, 0]);
         // modeTable: digital, analog.
         r[80..82].copy_from_slice(&u16::from(DIGITAL >> 4).to_le_bytes());
         r[82..84].copy_from_slice(&u16::from(ANALOG >> 4).to_le_bytes());
@@ -132,14 +140,21 @@ impl Padman {
         // length: two bytes of header, then two per halfword the id counts.
         let length = 2 + 2 * u32::from(port.mode & 0xF);
         r[96..100].copy_from_slice(&length.to_le_bytes());
-        r[100] = 1; // modeConfig: modes can be changed
+        // modeConfig 2: modes and actuators can be configured. With 1,
+        // libpad reports no actuators and Sly 1 takes the pad for a
+        // digital one and never asks for analog mode.
+        r[100] = 2;
         r[101] = port.mode; // modeCurId
         r[102] = 3; // model: DualShock 2
         r[103] = 1; // buttonDataReady
         r[104] = 2; // nrOfModes
         r[105] = u8::from(port.mode != DIGITAL); // modeCurOffs
         r[106] = 2; // nrOfActuators
+        r[107] = 1; // numActComb
+        r[108] = 1; // val_c6
         r[109] = u8::from(port.mode != DIGITAL); // mode
+        r[110] = port.lock;
+        r[111] = 6; // actDirSize
         r[112] = STATE_STABLE;
         r[113] = REQUEST_COMPLETE;
         r[114] = 1; // currentTask
@@ -172,6 +187,7 @@ impl Server for Padman {
                     self.ports[port_index] = Some(Port {
                         area: word(call.data, 4),
                         mode: DIGITAL,
+                        lock: 0,
                         frame: 0,
                     });
                 }
@@ -190,6 +206,7 @@ impl Server for Padman {
                     } else {
                         DIGITAL
                     };
+                    p.lock = word(call.data, 4) as u8;
                 }
                 set(5, 1);
             }
@@ -242,5 +259,46 @@ impl Server for Padman {
                 mem.write32(at + 4 + 4 * k as u32, u32::from(p.is_some()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(pad: &mut Padman, mem: &mut Memory, words: &[u32]) -> Vec<u8> {
+        let data: Vec<u8> = words
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .chain([0; 128])
+            .take(128)
+            .collect();
+        pad.call(
+            &Call {
+                sid: PADMAN[0],
+                function: 1,
+                data: &data,
+                reply_size: 128,
+            },
+            mem,
+        )
+    }
+
+    #[test]
+    fn a_dualshock_2_offers_its_modes_and_takes_analog() {
+        let mut mem = Memory::new(Box::new(ps2_core::NoMmio));
+        let mut pad = Padman::new(Rc::default());
+        call(&mut pad, &mut mem, &[cmd::OPEN, 0, 0, 0, 0x1000]);
+        let port = pad.ports[0].unwrap_or_else(|| panic!("port 0 opened"));
+        let r = pad.record(&port);
+        // modeConfig 2: libpad then reports the actuators and the modes,
+        // which Sly 1 needs to take the pad for a DualShock.
+        assert_eq!((r[100], r[104], r[106]), (2, 2, 2));
+        assert_eq!(r[1], DIGITAL);
+        // SET_MAIN_MODE analog, locked.
+        call(&mut pad, &mut mem, &[cmd::SET_MAIN_MODE, 0, 0, 1, 3]);
+        let port = pad.ports[0].unwrap_or_else(|| panic!("port 0 open"));
+        let r = pad.record(&port);
+        assert_eq!((r[1], r[101], r[109], r[110]), (ANALOG, ANALOG, 1, 3));
     }
 }

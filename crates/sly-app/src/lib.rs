@@ -230,6 +230,17 @@ enum Command {
         /// Use the interpreter only.
         #[arg(long)]
         interpret: bool,
+        /// Write what the display shows every --every fields into this
+        /// directory, `fieldNNNNNN.png` (pictures of the game: keep them
+        /// out of the repository).
+        #[arg(long)]
+        frames: Option<PathBuf>,
+        /// Fields between pictures.
+        #[arg(long, default_value_t = 60)]
+        every: u64,
+        /// Fields to run past the replay's end, the pad left alone.
+        #[arg(long, default_value_t = 0)]
+        beyond: u64,
     },
     /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
     /// as PCSX2 keeps them), or check an existing one with --check.
@@ -268,6 +279,7 @@ enum Command {
 /// Runs the command line; `recompiled` is the generated code this binary
 /// carries, if any.
 #[must_use]
+#[allow(clippy::too_many_lines, reason = "one arm per command")]
 pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -317,7 +329,19 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             path,
             record,
             interpret,
-        } => replay::run(&path, record, recompiled.filter(|_| !interpret)),
+            frames,
+            every,
+            beyond,
+        } => replay::run(
+            &path,
+            record,
+            &replay::Frames {
+                dir: frames.as_deref(),
+                every,
+                beyond,
+            },
+            recompiled.filter(|_| !interpret),
+        ),
         Command::VuBench { path, repeat } => {
             vu_bench::bench(&path, repeat, recompiled.map_or(&[], |r| r.vu))
         }

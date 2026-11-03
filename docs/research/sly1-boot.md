@@ -3,7 +3,7 @@ type: Finding
 title: How Sly 1 boots in the interpreter
 description: The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver on the emulated IOP, DMA and GS events, the pad, the memory card check, the title and a new game - up to its first level.
 tags: [finding, boot, sly1, kernel, sif, rpc, iop, sound, phase-3, phase-5]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T03:14:22Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:33Z }
 sources:
   - id: run
     resource: sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02
@@ -21,7 +21,7 @@ sources:
     resource: games/sly1/symbols.tsv
     title: Sly 1 function names (TheOnlyZac/sly1, CC0)
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T03:29:05Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:41Z }
 ---
 
 # How Sly 1 boots in the interpreter
@@ -97,7 +97,13 @@ instructions per second, about 0.6 times real time.
     kicking VIF0, VIF1, GIF and scratchpad DMA.
 13. **Pad**: `libpad` asks for padman's version (it needs major 4), sends
     `INIT` and `OPEN`; with a pad reported stable the joypad state reaches
-    Ready.
+    Ready. The pad record must say its modes and actuators can be
+    configured (`modeConfig` 2, as the disc's padman reports a DualShock 2
+    in a PCSX2 savestate): with 1, libpad reports no actuators, Sly 1 takes
+    the pad for a digital one (`g_joy.joyk` Digital), never asks for analog
+    mode, and ignores the left stick in play until a button is pressed.
+    With 2 it sends `SET_MAIN_MODE` (analog, locked) and `SET_ACT_ALIGN`,
+    and the pad is a Shock.
 14. **Memory card check**: the splash screen waits for the save system
     (`g_save`, `0x264A40`). `sceMcInit` needs mcserv ≥ 0x20A and mcman ≥
     0x20E, or every later call fails with -100. With no card in the slot

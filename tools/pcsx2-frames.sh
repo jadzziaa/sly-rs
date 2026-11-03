@@ -25,8 +25,10 @@
 # STEP=N saves every Nth frame of the range only (FIRST, FIRST+N, ...
 # below FIRST+COUNT).
 #
-# PRESS=BUTTON@FRAME,... presses pad 1's buttons (cross, circle, square,
-# triangle, start, select, up, down, left, right; gsdump saves a GS dump
+# PRESS=BUTTON@FRAME[+HOLD],... presses pad 1's buttons (cross, circle,
+# square, triangle, start, select, up, down, left, right; lup, ldown,
+# lleft and lright tilt the left stick; +HOLD holds for that many frames;
+# gsdump saves a GS dump
 # of the next frame, as PCSX2's hotkey does, and state a savestate, both
 # into OUT) once PCSX2 has saved that
 # frame or a later one (tools/pcsx2-press.py; it needs python-xlib), so
@@ -91,6 +93,10 @@ Up = Keyboard/Up
 Down = Keyboard/Down
 Left = Keyboard/Left
 Right = Keyboard/Right
+LUp = Keyboard/I
+LDown = Keyboard/K
+LLeft = Keyboard/J
+LRight = Keyboard/L
 [Hotkeys]
 GSDumpSingleFrame = Keyboard/F8
 SaveStateToSlot = Keyboard/F1
