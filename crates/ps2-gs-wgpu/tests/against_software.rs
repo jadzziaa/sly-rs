@@ -5,7 +5,8 @@
 //! function, wrap mode, alpha and destination alpha test, depth test,
 //! blend, fog, scan mask, FBMSK, PABE, COLCLAMP and FBA, UV and STQ (Q of
 //! either sign), with CLUTs loaded from memory and transfers into the
-//! blocks drawn among the primitives.
+//! blocks drawn among the primitives; and the display read-out of what
+//! they drew.
 //!
 //! Skipped on a machine with no GPU that has 64-bit integers in shaders.
 
@@ -75,14 +76,44 @@ fn transfer(gs: &mut Gs, r: &mut Random, frame_psm: u64, zpsm: u64, tex_psm: u64
     gs.gif(2, data);
 }
 
+/// The display read-out of the frame drawn, as each reads it: circuit 1
+/// alone, or over circuit 2 reading the texture, with or without ALP.
+fn pictures(
+    gs: &Gs,
+    gpu: &Shared,
+    r: &mut Random,
+    frame_psm: u64,
+    tex_psm: u64,
+) -> [ps2_gs::Frame; 2] {
+    let regs = ps2_gs::Privileged {
+        pmode: 1 | r.below(2) << 1 | r.below(2) << 5 | r.below(2) << 7 | r.below(256) << 8,
+        smode2: r.below(4),
+        dispfb: [
+            1 << 9 | frame_psm << 15,
+            4 | 2 << 9 | (tex_psm & 0x0F) << 15 | r.below(8) << 32,
+        ],
+        display: [
+            63 << 32 | 63 << 44,
+            63 << 32 | 31 << 44 | r.below(16) | r.below(16) << 12,
+        ],
+        bgcolor: r.next() & 0xFF_FFFF,
+    };
+    let on_gpu = gpu
+        .0
+        .lock()
+        .map(|mut g| ps2_gs::export::Tap::display(&mut *g, &regs))
+        .unwrap_or_default();
+    [gs.display(&regs), on_gpu]
+}
+
 /// One case: registers, then primitives, through a GS drawing on two
 /// threads with the GPU as its tap, with transfers among them.
-fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize) {
+fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize, [ps2_gs::Frame; 2]) {
     let mut gs = Gs::default();
     let random: Vec<u8> = (0..ps2_gs::mem::SIZE).map(|_| r.next() as u8).collect();
     gs.mem.load_bytes(&random);
     gs.set_threads(2);
-    gs.set_tap(Some(Box::new(gpu.clone())));
+    gs.set_tap(Some(Box::new(gpu.clone())), true);
     let frame_psm = r.pick(&[0x00u64, 0x01, 0x02, 0x0A]);
     let zpsm = r.pick(&[0u64, 1, 2, 0xA]);
     let tex_psm = r.pick(&[0x00u64, 0x01, 0x02, 0x0A, 0x13, 0x14, 0x1B, 0x24, 0x2C]);
@@ -168,6 +199,7 @@ fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize) {
         }
     }
     gs.flush();
+    let picture = pictures(&gs, gpu, r, frame_psm, tex_psm);
     let cpu = gs.mem.to_words();
     let changed = cpu
         .iter()
@@ -178,7 +210,7 @@ fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize) {
     let case = format!(
         "prim {attrs:#x} frame {frame_psm:#x} fbmsk {fbmsk:#x} zbuf {zpsm:#x} test {test:#x} tex {tex_psm:#x} clamp {clamp:#x}"
     );
-    (cpu, words, case, changed)
+    (cpu, words, case, changed, picture)
 }
 
 #[test]
@@ -190,9 +222,13 @@ fn the_gpu_draws_what_the_software_gs_draws() {
     let mut r = Random(0x2545_F491_4F6C_DD1D);
     let (mut drew, mut words) = (0, 0);
     for case in 0..160 {
-        let (cpu, gpu_words, what, changed) = draw(&gpu, &mut r);
+        let (cpu, gpu_words, what, changed, [cpu_picture, gpu_picture]) = draw(&gpu, &mut r);
         let differ = (0..cpu.len()).filter(|&i| cpu[i] != gpu_words[i]).count();
         assert_eq!(differ, 0, "case {case} ({what}): {differ} words differ");
+        assert!(
+            cpu_picture == gpu_picture,
+            "case {case} ({what}): the pictures differ"
+        );
         drew += usize::from(changed > 0);
         words += changed;
     }

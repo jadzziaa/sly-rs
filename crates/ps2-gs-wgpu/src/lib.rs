@@ -16,7 +16,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use ps2_gs::export::{self, FRAG_WORDS, PRIM_WORDS, Write, flag, word};
+use ps2_gs::export::{self, CLUT_SLOTS, Clut, FRAG_WORDS, PRIM_WORDS, Write, flag, word};
+use ps2_gs::{Frame, Privileged};
 
 /// Local memory, in words.
 const WORDS: u64 = 1 << 20;
@@ -146,8 +147,13 @@ pub struct GpuGs {
     tables: wgpu::Buffer,
     draw: wgpu::ComputePipeline,
     write: wgpu::ComputePipeline,
+    clut: wgpu::ComputePipeline,
+    display: wgpu::ComputePipeline,
+    /// The CLUT's versions, [`CLUT_SLOTS`] of them.
+    cluts: wgpu::Buffer,
     prims: Grown,
-    cluts: Grown,
+    loads: Grown,
+    params: Grown,
     tiles: Grown,
     order: Grown,
     frags: Grown,
@@ -225,6 +231,12 @@ impl GpuGs {
         };
         let draw = pipeline(header() + include_str!("draw.wgsl"), "draw");
         let write = pipeline(include_str!("write.wgsl").to_owned(), "write");
+        let clut = pipeline(
+            format!("const SLOTS: u32 = {CLUT_SLOTS}u;\n") + include_str!("clut.wgsl"),
+            "load",
+        );
+        let display = pipeline(include_str!("display.wgsl").to_owned(), "display");
+        let cluts = storage("cluts", u64::from(CLUT_SLOTS) * 256 * 4);
         Ok(Self {
             device,
             queue,
@@ -233,8 +245,12 @@ impl GpuGs {
             tables,
             draw,
             write,
+            clut,
+            display,
+            cluts,
             prims: Grown::new("primitives"),
-            cluts: Grown::new("cluts"),
+            loads: Grown::new("clut loads"),
+            params: Grown::new("display"),
             tiles: Grown::new("tiles"),
             order: Grown::new("order"),
             frags: Grown::new("fragments"),
@@ -252,16 +268,22 @@ impl GpuGs {
     /// If the GPU cannot be read.
     #[must_use]
     pub fn read_memory(&self) -> Vec<u32> {
+        self.read_back(&self.mem, WORDS * 4)
+    }
+
+    /// The first `size` bytes of `buffer`, once everything submitted is
+    /// done.
+    fn read_back(&self, buffer: &wgpu::Buffer, size: u64) -> Vec<u32> {
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("read back"),
-            size: WORDS * 4,
+            size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        encoder.copy_buffer_to_buffer(&self.mem, 0, &staging, 0, WORDS * 4);
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
         self.queue.submit([encoder.finish()]);
         let (sent, received) = std::sync::mpsc::channel();
         staging.map_async(wgpu::MapMode::Read, .., move |r| {
@@ -270,7 +292,7 @@ impl GpuGs {
         let polled = self.device.poll(wgpu::PollType::wait_indefinitely());
         assert!(
             polled.is_ok() && matches!(received.recv(), Ok(Ok(()))),
-            "reading the GPU's local memory back"
+            "reading back from the GPU"
         );
         let view = staging.get_mapped_range(..);
         let words = match &view {
@@ -287,11 +309,28 @@ impl GpuGs {
         words
     }
 
+    /// CLUT loads (a count, then 16 words each), in one dispatch.
+    fn load_cluts(&mut self, loads: &[u32]) {
+        if loads.first().is_none_or(|&n| n == 0) {
+            return;
+        }
+        let buffer = self.loads.fill(&self.device, &self.queue, loads).clone();
+        self.dispatch(
+            &self.clut,
+            &[&self.mem, &self.cluts, &self.tables, &buffer],
+            [1, 1],
+            false,
+        );
+    }
+
+    /// Runs `pipeline` with `buffers` bound in order: `groups` workgroups
+    /// (along x, or x and y when the second is more than 1; a large x is
+    /// spread over y), after copying local memory to the snapshot.
     fn dispatch(
         &self,
         pipeline: &wgpu::ComputePipeline,
         buffers: &[&wgpu::Buffer],
-        groups: u32,
+        groups: [u32; 2],
         snapshot: bool,
     ) {
         let layout = pipeline.get_bind_group_layout(0);
@@ -318,7 +357,15 @@ impl GpuGs {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(groups.min(GROUPS_MAX), groups.div_ceil(GROUPS_MAX), 1);
+            if groups[1] > 1 {
+                pass.dispatch_workgroups(groups[0], groups[1], 1);
+            } else {
+                pass.dispatch_workgroups(
+                    groups[0].min(GROUPS_MAX),
+                    groups[0].div_ceil(GROUPS_MAX),
+                    1,
+                );
+            }
         }
         self.queue.submit([encoder.finish()]);
     }
@@ -338,7 +385,67 @@ impl export::Tap for GpuGs {
             .collect();
         let buffer = self.writes.fill(&self.device, &self.queue, &flat).clone();
         let groups = (writes.len() as u32).div_ceil(64);
-        self.dispatch(&self.write, &[&self.mem, &buffer], groups, false);
+        self.dispatch(&self.write, &[&self.mem, &buffer], [groups, 1], false);
+    }
+
+    fn cluts(&mut self, cluts: &[Clut]) {
+        let mut loads = vec![0];
+        for change in cluts {
+            match change {
+                Clut::Load(words) => {
+                    loads.extend_from_slice(words);
+                    loads[0] += 1;
+                }
+                Clut::Set { version, halves } => {
+                    self.load_cluts(&loads);
+                    loads.truncate(1);
+                    loads[0] = 0;
+                    let words: Vec<u32> = (0..256)
+                        .map(|i| u32::from(halves[i]) | u32::from(halves[256 + i]) << 16)
+                        .collect();
+                    let at = u64::from(version % CLUT_SLOTS) * 256 * 4;
+                    self.queue.write_buffer(&self.cluts, at, &bytes(&words));
+                }
+            }
+        }
+        self.load_cluts(&loads);
+    }
+
+    fn display(&mut self, regs: &Privileged) -> Frame {
+        let Some(params) = ps2_gs::display::gpu_display(regs) else {
+            return Frame::default();
+        };
+        let (width, height) = (params[0], params[1]);
+        if width == 0 || height == 0 {
+            return Frame::default();
+        }
+        let size = u64::from(width * height) * 4;
+        let picture = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("picture"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let params = self.params.fill(&self.device, &self.queue, &params).clone();
+        self.dispatch(
+            &self.display,
+            &[&self.mem, &self.tables, &params, &picture],
+            [width.div_ceil(8), height.div_ceil(8)],
+            false,
+        );
+        let words = self.read_back(&picture, size);
+        Frame {
+            width,
+            height,
+            rgb: words
+                .iter()
+                .flat_map(|w| [*w as u8, (w >> 8) as u8, (w >> 16) as u8])
+                .collect(),
+        }
+    }
+
+    fn read(&mut self) -> Vec<u32> {
+        self.read_memory()
     }
 
     fn batch(&mut self, batch: &export::Batch) {
@@ -418,7 +525,7 @@ impl export::Tap for GpuGs {
         }
         let (device, queue) = (&self.device, &self.queue);
         let prims = self.prims.fill(device, queue, &batch.prims).clone();
-        let cluts = self.cluts.fill(device, queue, &batch.cluts).clone();
+        let cluts = self.cluts.clone();
         let tile_buffer = self.tiles.fill(device, queue, &tiles).clone();
         let order_buffer = self.order.fill(device, queue, &order).clone();
         let frag_buffer = self.frags.fill(device, queue, &binned).clone();
@@ -434,7 +541,7 @@ impl export::Tap for GpuGs {
                 &order_buffer,
                 &frag_buffer,
             ],
-            used.len() as u32,
+            [used.len() as u32, 1],
             snapshot,
         );
     }
@@ -461,5 +568,25 @@ impl export::Tap for Shared {
         if let Ok(mut gpu) = self.0.lock() {
             gpu.batch(batch);
         }
+    }
+
+    fn cluts(&mut self, cluts: &[Clut]) {
+        if let Ok(mut gpu) = self.0.lock() {
+            gpu.cluts(cluts);
+        }
+    }
+
+    fn display(&mut self, regs: &Privileged) -> Frame {
+        self.0
+            .lock()
+            .map(|mut gpu| export::Tap::display(&mut *gpu, regs))
+            .unwrap_or_default()
+    }
+
+    fn read(&mut self) -> Vec<u32> {
+        self.0
+            .lock()
+            .map(|gpu| gpu.read_memory())
+            .unwrap_or_default()
     }
 }

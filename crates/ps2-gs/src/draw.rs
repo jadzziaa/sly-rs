@@ -65,6 +65,8 @@ pub(crate) struct Pipe {
     pabe: bool,
     scanmsk: u32,
     clut: Arc<[u16; 512]>,
+    /// The CLUT's version (see [`crate::export::Clut`]).
+    pub(crate) clut_version: u32,
     /// The state most of Sly's pixels are drawn in (see [`Pipe::is_hot`]):
     /// its triangles take the pipeline specialised to it.
     hot: bool,
@@ -403,6 +405,7 @@ impl Gs {
             pabe: bits(self.pabe, 0, 1) != 0,
             scanmsk: bits(self.scanmsk, 0, 2),
             clut: Arc::clone(self.clut_shared.get_or_insert_with(|| Arc::new(self.clut))),
+            clut_version: self.clut_version,
             hot: false,
         }
     }

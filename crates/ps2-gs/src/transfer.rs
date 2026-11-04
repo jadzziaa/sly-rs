@@ -51,6 +51,15 @@ impl Upload {
         }
     }
 
+    /// The pixels as writes to words of local memory, each word once.
+    pub(crate) fn word_writes(&self) -> Vec<crate::export::Write> {
+        crate::batch::word_writes(
+            self.runs
+                .iter()
+                .map(|(psm, bp, bw, run)| (*psm, *bp, *bw, run.as_slice())),
+        )
+    }
+
     /// Writes the pixels into local memory.
     pub(crate) fn apply(&self, mem: &crate::Memory) {
         for (psm, bp, bw, run) in &self.runs {
@@ -108,15 +117,14 @@ impl Gs {
             }
             1 => {
                 self.flush();
+                self.sync_memory();
                 self.read_back(w, h);
             }
             2 => {
                 self.flush();
+                self.sync_memory();
                 self.copy(w, h);
-                if let Some(tap) = &mut self.tap {
-                    tap.memory(&self.mem.to_words());
-                    self.tap_resyncs += 1;
-                }
+                self.resync_tap();
             }
             _ => {}
         }

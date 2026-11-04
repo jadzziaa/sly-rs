@@ -304,52 +304,109 @@ pub(crate) struct Batch {
     pub(crate) times: [std::time::Duration; 3],
     /// Time the GS waited for the drawer (for reports).
     pub(crate) waited: std::time::Duration,
+    /// A tap is set (it lives on the drawer's thread).
+    tapped: bool,
+    /// Only the tap draws (not the CPU).
+    gpu_only: bool,
+    /// CLUT changes for the tap, handed over before the next item.
+    cluts: Vec<export::Clut>,
+    /// The CLUT version of the batch's first primitive.
+    first_clut: Option<u32>,
 }
 
-/// What the drawer does, in order: draw a batch (on the pool or not), or
-/// write a transfer's pixels.
+/// What the drawer does, in order: draw a batch (on the pool or not),
+/// write a transfer's pixels, or for a tap, hand it local memory, read
+/// out the display or read local memory back.
 enum Item {
     Batch(Work, bool),
     Upload(Upload, Arc<Memory>),
+    Memory(Vec<u32>),
+    Display(crate::Privileged, Box<dyn FnOnce(crate::Frame) + Send>),
+    Read(mpsc::Sender<Vec<u32>>),
 }
 
 /// The thread that draws batches in order.
+/// The tap, as it lives on the drawer's thread.
+type Tap = Option<Box<dyn export::Tap>>;
+
 struct Drawer {
-    batches: mpsc::SyncSender<Item>,
+    /// Items, each after the CLUT changes before it.
+    batches: mpsc::SyncSender<(Vec<export::Clut>, Item)>,
     /// Each item's end, with a batch's buffers for the next, what kind of
     /// item it was (see [`Batch::times`]) and how long it took.
     done: mpsc::Receiver<(Option<Work>, usize, std::time::Duration)>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    /// The thread, which gives the tap back when it ends.
+    thread: Option<std::thread::JoinHandle<Tap>>,
 }
 
 impl Drawer {
-    fn start(pool: Arc<rayon::ThreadPool>) -> Option<Self> {
-        let (batches, todo) = mpsc::sync_channel::<Item>(DEPTH);
+    /// The drawer: drawing on the CPU (on `pool` when a batch is worth it)
+    /// if `software`, and handing everything to `tap` if there is one.
+    fn start(pool: Option<Arc<rayon::ThreadPool>>, mut tap: Tap, software: bool) -> Option<Self> {
+        let (batches, todo) = mpsc::sync_channel::<(Vec<export::Clut>, Item)>(DEPTH);
         let (finished, done) = mpsc::sync_channel(DEPTH);
         let thread = std::thread::Builder::new()
             .name("gs-drawer".to_owned())
             .spawn(move || {
-                for item in todo {
+                for (cluts, item) in todo {
                     let started = std::time::Instant::now();
+                    if let Some(tap) = &mut tap
+                        && !cluts.is_empty()
+                    {
+                        tap.cluts(&cluts);
+                    }
                     let (back, kind) = match item {
                         Item::Batch(mut work, parallel) => {
                             let mem = work.memory.take().unwrap_or_default();
-                            if parallel {
-                                pool.install(|| draw(&mem, &mut work, true));
-                            } else {
-                                draw(&mem, &mut work, false);
+                            if software {
+                                match &pool {
+                                    Some(pool) if parallel => {
+                                        pool.install(|| draw(&mem, &mut work, true));
+                                    }
+                                    _ => draw(&mem, &mut work, false),
+                                }
+                            }
+                            if let Some(tap) = &mut tap {
+                                tap.batch(&crate::draw::encode::batch(
+                                    &work.prims,
+                                    work.snapshot.is_some(),
+                                ));
                             }
                             (Some(work), usize::from(!parallel))
                         }
                         Item::Upload(upload, mem) => {
-                            upload.apply(&mem);
+                            if software {
+                                upload.apply(&mem);
+                            }
+                            if let Some(tap) = &mut tap {
+                                tap.writes(&upload.word_writes());
+                            }
+                            (None, 2)
+                        }
+                        Item::Memory(words) => {
+                            if let Some(tap) = &mut tap {
+                                tap.memory(&words);
+                            }
+                            (None, 2)
+                        }
+                        Item::Display(regs, then) => {
+                            if let Some(tap) = &mut tap {
+                                then(tap.display(&regs));
+                            }
+                            (None, 2)
+                        }
+                        Item::Read(back) => {
+                            if let Some(tap) = &mut tap {
+                                let _ = back.send(tap.read());
+                            }
                             (None, 2)
                         }
                     };
                     if finished.send((back, kind, started.elapsed())).is_err() {
-                        return;
+                        break;
                     }
                 }
+                tap
             })
             .ok()?;
         Some(Self {
@@ -398,7 +455,8 @@ impl Batch {
         }
     }
 
-    /// Gives the drawer `item`, which uses `uses`.
+    /// Gives the drawer `item`, which uses `uses`, after the CLUT changes
+    /// so far.
     fn hand_over(&mut self, item: Item, uses: Uses) {
         if self.drawing.len() >= DEPTH {
             self.wait_for(self.submitted + 1 - DEPTH as u64);
@@ -406,8 +464,9 @@ impl Batch {
         let Some(drawer) = &self.drawer else {
             return;
         };
+        let cluts = std::mem::take(&mut self.cluts);
         assert!(
-            drawer.batches.send(item).is_ok(),
+            drawer.batches.send((cluts, item)).is_ok(),
             "the GS's drawer has stopped"
         );
         self.submitted += 1;
@@ -426,23 +485,26 @@ impl Batch {
         }
     }
 
-    /// Waits for everything handed over, then stops the drawer.
-    fn stop(&mut self) {
+    /// Waits for everything handed over, then stops the drawer, giving
+    /// back its tap.
+    fn stop(&mut self) -> Tap {
         self.wait();
-        if let Some(mut drawer) = self.drawer.take() {
-            let thread = drawer.thread.take();
-            // Closing the queue ends the drawer.
-            drop(drawer);
-            if let Some(thread) = thread {
-                let _ = thread.join();
-            }
-        }
+        let mut drawer = self.drawer.take()?;
+        let thread = drawer.thread.take();
+        // Closing the queue ends the drawer.
+        drop(drawer);
+        thread.and_then(|t| t.join().ok()).flatten()
+    }
+
+    /// A batch for an item that is not one: spare uses.
+    fn no_uses(&mut self) -> Uses {
+        self.spare_uses.pop().unwrap_or_default()
     }
 }
 
 impl Drop for Batch {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 
@@ -578,34 +640,150 @@ fn draw(mem: &Memory, work: &mut Work, parallel: bool) {
     }
 }
 
-/// A transfer's pixels as writes to words of local memory, each word once
-/// (the last write to a pixel wins, as in memory).
-fn word_writes(psm: Psm, bp: u32, bw: u32, writes: &[(u32, u32, u32)]) -> Vec<export::Write> {
-    let layout = crate::Layout::new(psm, bp, bw);
-    let mut words: std::collections::HashMap<u32, (u32, u32)> =
-        std::collections::HashMap::with_capacity(writes.len());
-    for &(x, y, value) in writes {
-        let at = layout.locate(x, y);
-        let (bits, new) = at.bits(value);
-        let entry = words.entry(at.word() as u32).or_default();
-        entry.0 |= bits;
-        entry.1 = (entry.1 & !bits) | new;
+/// Transfers' pixels (runs into `psm` buffers at `bp`, `bw` wide) as writes
+/// to words of local memory, each word once (the last write to a pixel
+/// wins, as in memory).
+pub(crate) fn word_writes<'a>(
+    runs: impl IntoIterator<Item = (Psm, u32, u32, &'a [(u32, u32, u32)])>,
+) -> Vec<export::Write> {
+    thread_local! {
+        /// Each word's place in the writes plus one, 0 for none; only the
+        /// words written are set, and cleared again.
+        static PLACE: std::cell::RefCell<Vec<u32>> = std::cell::RefCell::new(vec![0; 1 << 20]);
     }
-    words
-        .into_iter()
-        .map(|(word, (bits, value))| [word, bits, value])
-        .collect()
+    PLACE.with_borrow_mut(|place| {
+        let mut out: Vec<export::Write> = Vec::new();
+        for (psm, bp, bw, writes) in runs {
+            let layout = crate::Layout::new(psm, bp, bw);
+            for &(x, y, value) in writes {
+                let at = layout.locate(x, y);
+                let (bits, new) = at.bits(value);
+                let word = at.word();
+                match place[word] {
+                    0 => {
+                        out.push([word as u32, bits, new]);
+                        place[word] = out.len() as u32;
+                    }
+                    i => {
+                        let w = &mut out[i as usize - 1];
+                        w[1] |= bits;
+                        w[2] = (w[2] & !bits) | new;
+                    }
+                }
+            }
+        }
+        for w in &out {
+            place[w[0] as usize] = 0;
+        }
+        out
+    })
 }
 
 impl Gs {
     /// Hands the GS's work to `tap` from now on (or to nothing), starting
-    /// with local memory as it is. Only work done when drawing on several
-    /// threads is handed on.
-    pub fn set_tap(&mut self, tap: Option<Box<dyn export::Tap>>) {
+    /// with local memory and the CLUT as they are. With `software` false
+    /// the CPU no longer draws (or writes transfers' pixels): local memory
+    /// here goes stale, and pictures, dumps and transfers that read it ask
+    /// the tap ([`Gs::picture`], [`Gs::sync_memory`]).
+    pub fn set_tap(&mut self, tap: Option<Box<dyn export::Tap>>, software: bool) {
+        self.sync_memory();
         self.flush();
-        self.tap = tap;
-        if let Some(tap) = &mut self.tap {
-            tap.memory(&self.mem.to_words());
+        let _ = self.batch.stop();
+        self.batch.tapped = tap.is_some();
+        self.batch.gpu_only = !software && tap.is_some();
+        self.start_drawer(tap);
+        if self.batch.tapped {
+            self.batch.cluts.push(export::Clut::Set {
+                version: self.clut_version,
+                halves: Box::new(self.clut),
+            });
+            let uses = self.batch.no_uses();
+            self.batch
+                .hand_over(Item::Memory(self.mem.to_words()), uses);
+        }
+    }
+
+    /// Starts the drawer, if there is a pool or a tap.
+    fn start_drawer(&mut self, tap: Tap) {
+        if self.batch.pool.is_some() || tap.is_some() {
+            self.batch.drawer = Drawer::start(self.batch.pool.clone(), tap, !self.batch.gpu_only);
+            assert!(
+                self.batch.drawer.is_some(),
+                "starting the GS's drawer thread"
+            );
+        }
+    }
+
+    pub(crate) const fn tapped(&self) -> bool {
+        self.batch.tapped
+    }
+
+    /// A CLUT load, for the tap: handed over before the next item. A batch
+    /// whose CLUTs the loads since its first primitive could overwrite is
+    /// drawn first.
+    pub(crate) fn clut_loaded(&mut self, load: export::Clut) {
+        if self
+            .batch
+            .first_clut
+            .is_some_and(|v| self.clut_version.wrapping_sub(v) >= export::CLUT_SLOTS - 1)
+        {
+            self.submit();
+        }
+        self.batch.cluts.push(load);
+    }
+
+    /// Hands `then` the display's picture: at once from local memory when
+    /// the CPU draws, else once the tap has drawn everything before it.
+    pub fn show(
+        &mut self,
+        regs: &crate::Privileged,
+        then: impl FnOnce(crate::Frame) + Send + 'static,
+    ) {
+        if !self.batch.gpu_only {
+            self.flush();
+            then(self.display(regs));
+            return;
+        }
+        self.submit();
+        let uses = self.batch.no_uses();
+        self.batch
+            .hand_over(Item::Display(*regs, Box::new(then)), uses);
+    }
+
+    /// The display's picture, waiting for it (see [`Gs::show`]).
+    pub fn picture(&mut self, regs: &crate::Privileged) -> crate::Frame {
+        let (sent, received) = mpsc::channel();
+        self.show(regs, move |frame| {
+            let _ = sent.send(frame);
+        });
+        self.flush();
+        received.recv().unwrap_or_default()
+    }
+
+    /// When only the tap draws: brings local memory here up to date from
+    /// it (for whatever reads local memory here).
+    pub fn sync_memory(&mut self) {
+        if !self.batch.gpu_only {
+            return;
+        }
+        self.submit();
+        let (sent, received) = mpsc::channel();
+        let uses = self.batch.no_uses();
+        self.batch.hand_over(Item::Read(sent), uses);
+        self.flush();
+        if let Ok(words) = received.recv() {
+            self.mem.load_words(&words);
+        }
+    }
+
+    /// After local memory here changed otherwise than by drawing or
+    /// transfers (a local-to-local copy): hands it to the tap again.
+    pub(crate) fn resync_tap(&mut self) {
+        if self.batch.tapped {
+            self.tap_resyncs += 1;
+            let uses = self.batch.no_uses();
+            self.batch
+                .hand_over(Item::Memory(self.mem.to_words()), uses);
         }
     }
 
@@ -617,7 +795,7 @@ impl Gs {
     /// If the threads cannot be started.
     pub fn set_threads(&mut self, threads: usize) {
         self.flush();
-        self.batch.stop();
+        let tap = self.batch.stop();
         self.batch.pool = (threads > 1).then(|| {
             match rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
@@ -628,13 +806,7 @@ impl Gs {
                 Err(e) => panic!("starting the GS's drawing threads: {e}"),
             }
         });
-        if let Some(pool) = &self.batch.pool {
-            self.batch.drawer = Drawer::start(Arc::clone(pool));
-            assert!(
-                self.batch.drawer.is_some(),
-                "starting the GS's drawer thread"
-            );
-        }
+        self.start_drawer(tap);
     }
 
     /// The drawer's time on batches drawn on the pool, batches drawn one
@@ -651,7 +823,7 @@ impl Gs {
     }
 
     pub(crate) const fn batching(&self) -> bool {
-        self.batch.pool.is_some()
+        self.batch.drawer.is_some()
     }
 
     /// Queues a primitive, handing the batch to the drawing threads first
@@ -676,6 +848,7 @@ impl Gs {
         }
         let b = &mut self.batch;
         b.target = Some(target);
+        b.first_clut.get_or_insert(prim.pipe.clut_version);
         if b.marked != Some(f) {
             b.uses.mark(&f);
             b.marked = Some(f);
@@ -710,15 +883,10 @@ impl Gs {
         if b.drawer.is_none() {
             return;
         }
-        let parallel = !b.work.serial && b.work.pixels >= PARALLEL_MIN;
+        let parallel = b.pool.is_some() && !b.work.serial && b.work.pixels >= PARALLEL_MIN;
         let mut work = std::mem::replace(&mut b.work, b.spare_work.pop().unwrap_or_default());
-        if let Some(tap) = &mut self.tap {
-            tap.batch(&crate::draw::encode::batch(
-                &work.prims,
-                work.snapshot.is_some(),
-            ));
-        }
         work.memory = Some(Arc::clone(&self.mem));
+        b.first_clut = None;
         let uses = std::mem::replace(&mut b.uses, b.spare_uses.pop().unwrap_or_default());
         b.marked = None;
         b.target = None;
@@ -746,12 +914,6 @@ impl Gs {
         if self.batch.uses.uploads_conflict(region) {
             // After the primitives queued, which use those blocks.
             self.submit();
-        }
-        // The tap gets the pixels in the drawer's order: after the batches
-        // handed over, before the primitives queued (which do not use those
-        // blocks).
-        if let Some(tap) = &mut self.tap {
-            tap.writes(&word_writes(psm, bp, bw, writes));
         }
         let b = &mut self.batch;
         let (upload, uses) = b

@@ -35,6 +35,23 @@ pub struct Recompiled {
     pub vu: &'static [ps2_vu::micro::Translation],
 }
 
+/// Has `machine`'s GS draw on the GPU alone from now on; returns the GPU's
+/// name.
+///
+/// # Errors
+///
+/// If there is no GPU it can draw on.
+pub(crate) fn use_gpu(machine: &ps2_ee::Machine) -> anyhow::Result<String> {
+    let gpu = ps2_gs_wgpu::GpuGs::new().map_err(|e| anyhow::anyhow!("the GPU GS: {e}"))?;
+    let name = gpu.name.clone();
+    machine
+        .hw
+        .borrow_mut()
+        .gs
+        .post(move |gs| gs.set_tap(Some(Box::new(gpu)), false));
+    Ok(name)
+}
+
 /// Boots `game`, running `recompiled` code where it has some.
 ///
 /// # Errors
@@ -209,6 +226,9 @@ enum Command {
         /// Use the interpreter only.
         #[arg(long)]
         interpret: bool,
+        /// Draw on the GPU (as `gpu = true` under `[play]`).
+        #[arg(long)]
+        gpu: bool,
     },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
@@ -237,8 +257,11 @@ enum Command {
         states: bool,
         /// Draw on the GPU as well and compare its local memory with the
         /// software GS's after every field (the GPU GS's check).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "gpu_only")]
         gpu: bool,
+        /// Draw on the GPU alone.
+        #[arg(long)]
+        gpu_only: bool,
     },
     /// Run a replay (scripted presses) and check its checkpoints: the game's
     /// world and level, and the machine's state hash.
@@ -274,6 +297,9 @@ enum Command {
         /// fields a second) and the game's clock.
         #[arg(long)]
         timing: bool,
+        /// Draw on the GPU.
+        #[arg(long)]
+        gpu: bool,
     },
     /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
     /// as PCSX2 keeps them), or check an existing one with --check.
@@ -368,6 +394,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             gs_dump,
             gs_dump_fields,
             timing,
+            gpu,
         } => replay::run(
             &path,
             record,
@@ -377,6 +404,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 beyond,
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
                 timing,
+                gpu,
             },
             recompiled.filter(|_| !interpret),
         ),
@@ -412,17 +440,20 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             record,
             replay,
             interpret,
+            gpu,
         } => sly_common::Game::from_key(&game)
             .ok_or_else(|| anyhow::anyhow!("unknown game {game:?}"))
             .and_then(|game| {
+                let mut settings = sly_common::config::Config::load()
+                    .map(|c| c.play().clone())
+                    .unwrap_or_default();
+                settings.gpu |= gpu;
                 play::run(
                     play::Options {
                         game,
                         record,
                         replay,
-                        settings: sly_common::config::Config::load()
-                            .map(|c| c.play().clone())
-                            .unwrap_or_default(),
+                        settings,
                     },
                     recompiled.filter(|_| !interpret),
                 )
@@ -436,6 +467,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             frames,
             states,
             gpu,
+            gpu_only,
         } => gs_replay::run(
             &path,
             repeat,
@@ -443,7 +475,11 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             screenshot.as_deref(),
             frames.as_deref(),
             states,
-            gpu,
+            if gpu {
+                Some(gs_replay::Gpu::Check)
+            } else {
+                gpu_only.then_some(gs_replay::Gpu::Only)
+            },
         ),
     };
     match result {

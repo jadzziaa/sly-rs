@@ -4,7 +4,7 @@ title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T07:14:19Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T07:49:52Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -157,13 +157,54 @@ integrated Radeon. The random test adds points, lines, AA1 and STQ
 sprites, and transfers among the primitives into the blocks they draw;
 handing transfers over in the old order fails it.
 
-CLUT loads stay on the CPU. With the GPU drawing alone (M4), the CPU's
-memory will have only transfers in it: in all thirteen dumps every CLUT
-load reads the same values from such a memory as from the whole one.
-Checked word by word against what primitives may have written, two loads
-a field in play (CBP 5120 and 5121, pages the depth buffer shares) read
-words a primitive's footprint covered; M4 must notice such a load and
-then read the CLUT from the GPU.
+Checked before M4: with the GPU drawing alone, a CPU memory with only
+transfers in it would give every CLUT load in the thirteen dumps the
+same values; but checked word by word against what primitives may have
+written, two loads a field in play (CBP 5120 and 5121, pages the depth
+buffer shares) read words a primitive's footprint covered. M4 therefore
+loads CLUTs on the GPU.
+
+**M4, checked** (2026-11-04):
+
+- **The drawer thread feeds the GPU.** The tap now lives on the GS's
+  drawer thread and is handed the drawer's items in its order (batches,
+  transfers' pixels, local memory, display read-outs, read-backs), each
+  after the CLUT loads before it. With `set_tap(tap, false)` the CPU no
+  longer draws: encoding (in parallel for large batches), binning and
+  submission happen off the GS thread. Local memory on the CPU goes
+  stale; local-to-host and local-to-local transfers and dumps read it
+  back from the GPU first.
+- **CLUTs on the GPU.** Every CLUT load makes a new version of the CLUT,
+  kept in one of 1,024 slots on the GPU (`clut.wgsl`: one workgroup,
+  each invocation owning one word of every slot, the loads in order);
+  primitives name their version's slot; a batch is drawn before loads
+  could overwrite a slot it reads.
+- **The display on the GPU** (`display.wgsl`, the read-out line for line,
+  read back once a field). `gs-replay --gpu` compares it with the
+  software read-out after every field: the same in all thirteen dumps
+  (258 fields), and in the random test's cases.
+- **Exact divisions without dividing.** GPUs emulate 64-bit division
+  slowly: each quotient (depth, colour, fog, UV) is now estimated in
+  floats from the barycentric weights and settled exactly from its
+  integer remainder (`settle`), STQ's reciprocal likewise; depth and fog
+  are skipped when unused. GPU time on 60 fields of play fell from
+  0.38 s to 0.13 s on the RX 9070 XT, from 12.8 s to 3.0 s on the
+  integrated Radeon; the results are unchanged.
+- **The prologue** (the user's recording, 21,981 fields) replays with
+  `--gpu` to its state hash; it took 224 s headless (305 s in software);
+  the machine waited for the GS 0.8 s in all (34 s in software); every
+  five-second stretch is at or above 108% of NTSC (in software 13 of 73
+  were below, the slowest 88%).
+- **Play** (`play --gpu`, or `gpu = true` under `[play]`): a session that
+  went live after a recording wrote a recording that replays to its
+  checkpoint.
+- **The integrated Radeon** (2 compute units): the new-game replay
+  reaches all three checkpoints with their hashes, at 39-61% of NTSC in
+  3D, the GPU the bottleneck. The draw shader does an invocation's whole
+  interpolation whenever any pixel of its wave is inside a small
+  triangle; most of the remaining GPU time is that. Compacting covered
+  pixels before shading (as paraLLEl-GS does) is the next step for weak
+  GPUs.
 
 ## Facts checked
 
@@ -201,7 +242,7 @@ then read the CLUT from the GPU.
 | M1 | the shared integer arithmetic in the software GS (**done**, 2026-11-03: only triangles' texture coordinates changed) | PCSX2 parity re-run; twelve dumps re-baselined |
 | M2 | compute rasteriser for triangles and sprites, the full `fragment` pipeline (not just the hot state: mixing CPU and GPU drawing would need constant syncs) (**done**, 2026-11-04) | GPU memory hash equals the software's on the dumps that use only those, twice in a row |
 | M3 | hazards as dispatch boundaries, uploads, CLUT loads, AA1, lines, points (**done**, 2026-11-04) | all twelve dumps |
-| M4 | play on the GPU, the display read on the GPU | the prologue replays with its state hashes; `replay --timing` shows the GS off the critical path; runs on the integrated GPU |
+| M4 | play on the GPU, the display read on the GPU (**done**, 2026-11-04) | the prologue replays with its state hashes; `replay --timing` shows the GS off the critical path; runs on the integrated GPU |
 | M5 | super-sampling, behind an option | options off leave the hashes as they are |
 
 ## Risks

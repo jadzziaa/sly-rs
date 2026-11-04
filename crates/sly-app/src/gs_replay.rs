@@ -16,7 +16,7 @@ pub(crate) fn run(
     screenshot: Option<&Path>,
     frames: Option<&Path>,
     states: bool,
-    gpu: bool,
+    gpu: Option<Gpu>,
 ) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if let Some(dir) = frames {
@@ -27,23 +27,23 @@ pub(crate) fn run(
     for _ in 0..repeat.max(1) {
         let (mut gs, mut privileged, packets) =
             dump::read(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))?;
-        // The GS hands its work on only when drawing on several threads.
-        gs.set_threads(if gpu { threads.max(2) } else { threads });
+        gs.set_threads(threads);
         if states {
             gs.states = Some(std::collections::HashMap::new());
         }
-        let mut check = if gpu {
+        let mut check = None;
+        if let Some(gpu) = gpu {
             let shared = ps2_gs_wgpu::Shared(std::sync::Arc::new(std::sync::Mutex::new(
                 ps2_gs_wgpu::GpuGs::new().map_err(|e| anyhow!(e))?,
             )));
-            gs.set_tap(Some(Box::new(shared.clone())));
-            Some(GpuCheck {
+            gs.set_tap(Some(Box::new(shared.clone())), gpu == Gpu::Check);
+            check = Some(GpuCheck {
                 shared,
                 first: None,
-            })
-        } else {
-            None
-        };
+                compare: gpu == Gpu::Check,
+                pictures: (0, None),
+            });
+        }
         let started = Instant::now();
         let mut fields = 0;
         for packet in packets {
@@ -53,12 +53,11 @@ pub(crate) fn run(
                 Packet::VSync(_) => {
                     fields += 1;
                     if let Some(check) = &mut check {
-                        check.field(&mut gs, fields);
+                        check.field(&mut gs, fields, &Privileged::from_block(&privileged[..]));
                     }
                     if let Some(dir) = frames {
                         // Numbered as PCSX2 numbers a dump's frames.
-                        gs.flush();
-                        let frame = gs.display(&Privileged::from_block(&privileged[..]));
+                        let frame = gs.picture(&Privileged::from_block(&privileged[..]));
                         let png = dir.join(format!("frame{:05}.png", fields - 1));
                         std::fs::write(&png, frame.png())
                             .with_context(|| format!("writing {}", png.display()))?;
@@ -68,6 +67,7 @@ pub(crate) fn run(
         }
         gs.flush();
         let elapsed = started.elapsed();
+        gs.sync_memory();
         best = best.min(elapsed);
         writeln!(
             out,
@@ -107,7 +107,7 @@ pub(crate) fn run(
             check.report(&mut out, &mut gs)?;
         }
         if let Some(png) = screenshot {
-            let frame = gs.display(&Privileged::from_block(&privileged[..]));
+            let frame = gs.picture(&Privileged::from_block(&privileged[..]));
             std::fs::write(png, frame.png())
                 .with_context(|| format!("writing {}", png.display()))?;
         }
@@ -118,12 +118,23 @@ pub(crate) fn run(
     Ok(())
 }
 
-/// `--gpu`: the GPU drawing alongside, compared after every field.
+/// Drawing on the GPU too: alongside the CPU, the two compared after every
+/// field (`--gpu`), or alone (`--gpu-only`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gpu {
+    Check,
+    Only,
+}
+
 struct GpuCheck {
     shared: ps2_gs_wgpu::Shared,
     /// The first field after which the two memories differed, and in how
     /// many words.
     first: Option<(u32, usize)>,
+    /// Whether the CPU draws too, to compare.
+    compare: bool,
+    /// Fields whose pictures were compared, and the first that differed.
+    pictures: (u32, Option<u32>),
 }
 
 impl GpuCheck {
@@ -143,12 +154,27 @@ impl GpuCheck {
         (differ.len(), differ.first().copied(), gpu)
     }
 
-    fn field(&mut self, gs: &mut ps2_gs::Gs, field: u32) {
+    fn field(&mut self, gs: &mut ps2_gs::Gs, field: u32, regs: &Privileged) {
+        if !self.compare {
+            return;
+        }
         if self.first.is_none() {
             let (n, _, _) = self.compare(gs);
             if n > 0 {
                 self.first = Some((field, n));
             }
+        }
+        // The display as each reads it out, from its own memory.
+        let cpu = gs.display(regs);
+        let gpu = self
+            .shared
+            .0
+            .lock()
+            .map(|mut g| ps2_gs::export::Tap::display(&mut *g, regs))
+            .unwrap_or_default();
+        self.pictures.0 += 1;
+        if cpu != gpu && self.pictures.1.is_none() {
+            self.pictures.1 = Some(field);
         }
     }
 
@@ -172,7 +198,17 @@ impl GpuCheck {
             gs.tap_resyncs
         )?;
         match (self.first, first) {
-            (None, None) => writeln!(out, "  the same as the software GS's after every field")?,
+            _ if !self.compare => {}
+            (None, None) => writeln!(
+                out,
+                "  the same as the software GS's after every field; pictures: {} compared, {}",
+                self.pictures.0,
+                self.pictures
+                    .1
+                    .map_or("all the same".to_owned(), |f| format!(
+                        "first differing after field {f}"
+                    ))
+            )?,
             (first_field, word) => writeln!(
                 out,
                 "  differs from the software GS's: first after field {:?} ({:?} words), at the end {n} words, the first word {:?} (block {:?})",

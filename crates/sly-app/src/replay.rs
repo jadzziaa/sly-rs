@@ -25,6 +25,8 @@ pub(crate) struct Frames<'a> {
     pub(crate) gs_dump: Option<(&'a Path, u64)>,
     /// Print how fast every `every` fields ran, and the game's clock.
     pub(crate) timing: bool,
+    /// Draw on the GPU.
+    pub(crate) gpu: bool,
 }
 
 /// Runs `fields` fields of `script`, saving pictures on the way.
@@ -97,7 +99,7 @@ fn advance(
         {
             let mut hw = machine.hw.borrow_mut();
             let regs = hw.gs_display();
-            let frame = hw.gs.with(move |gs| gs.display(&regs));
+            let frame = hw.gs.with(move |gs| gs.picture(&regs));
             let png = dir.join(format!("field{field:06}.png"));
             std::fs::write(&png, frame.png())
                 .with_context(|| format!("writing {}", png.display()))?;
@@ -117,6 +119,10 @@ pub(crate) fn run(
         Game::from_key(&replay.game).with_context(|| format!("unknown game {:?}", replay.game))?;
     let script = replay::Script::of(&replay)?;
     let (mut machine, _) = crate::boot(game, recompiled)?;
+    if frames.gpu {
+        let name = crate::use_gpu(&machine)?;
+        println!("drawing on the GPU: {name}");
+    }
     if let Some(dir) = frames.dir {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }

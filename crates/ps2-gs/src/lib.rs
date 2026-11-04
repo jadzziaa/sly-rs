@@ -140,11 +140,11 @@ pub struct Gs {
     pub parallel_batches: u64,
     /// Primitives waiting to be drawn, when drawing on several threads.
     batch: batch::Batch,
-    /// What is handed the GS's work for a GPU, if anything.
-    tap: Option<Box<dyn export::Tap>>,
     /// Times the tap was handed all of local memory again (after a
     /// local-to-local copy).
     pub tap_resyncs: u64,
+    /// The CLUT's version: CLUT loads so far (see [`export::Clut`]).
+    clut_version: u32,
 }
 
 impl Default for Gs {
@@ -191,8 +191,8 @@ impl Default for Gs {
             batches: 0,
             parallel_batches: 0,
             batch: batch::Batch::default(),
-            tap: None,
             tap_resyncs: 0,
+            clut_version: 0,
         }
     }
 }
@@ -396,6 +396,7 @@ impl Gs {
         // Primitives waiting to be drawn may write what the CLUT is read
         // from.
         self.before_clut_load(t);
+        self.clut_version = self.clut_version.wrapping_add(1);
         self.clut_shared = None;
         self.pipe_cache = None;
         let cpsm = match t.cpsm {
@@ -431,6 +432,27 @@ impl Gs {
                     .read(if t.csm { Psm::Ct16 } else { cpsm }, t.cbp, bw, x, y);
                 self.clut[((t.csa * 16 + i) & 0x1FF) as usize] = c as u16;
             }
+        }
+        if self.tapped() {
+            let (wide, bw) = (cpsm == Psm::Ct32 && !t.csm, bits(self.texclut, 0, 6));
+            let layout = if wide {
+                Layout::new(Psm::Ct32, t.cbp, 1)
+            } else if t.csm {
+                Layout::new(Psm::Ct16, t.cbp, bw)
+            } else {
+                Layout::new(cpsm, t.cbp, 1)
+            };
+            let mut words = [0u32; 16];
+            words[..6].copy_from_slice(&[
+                self.clut_version,
+                entries,
+                t.csa,
+                u32::from(wide) | u32::from(t.csm) << 1,
+                bits(self.texclut, 6, 6),
+                bits(self.texclut, 12, 10),
+            ]);
+            words[8..15].copy_from_slice(&layout.gpu());
+            self.clut_loaded(export::Clut::Load(words));
         }
     }
 }

@@ -11,6 +11,9 @@ sly3 = "oracle/Sly 3 - Honor Among Thieves (USA)/Sly 3 - Honor Among Thieves (US
 [play]
 pause_on_focus_loss = true
 window = [1280, 896]
+# Draw on the GPU instead of the CPU (needs 64-bit integers in shaders:
+# Vulkan, DirectX 12 or Metal). WGPU_POWER_PREF=low picks an integrated GPU.
+gpu = false
 
 # Key bindings replace the defaults one by one: a DualShock button (as in a
 # replay's presses) or a stick direction (left-up, right-down, ...) = a key

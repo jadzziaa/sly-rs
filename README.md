@@ -62,7 +62,11 @@ Commands so far:
   knows your gamepad, and if it does not, its face buttons may need
   `[play.gamepad]`. The window draws with wgpu (Vulkan, Metal, DirectX 12
   or OpenGL) on the high-performance GPU; `WGPU_POWER_PREF=low` picks the
-  integrated one and `WGPU_BACKEND=gl` forces OpenGL. The
+  integrated one and `WGPU_BACKEND=gl` forces OpenGL. `--gpu` (or `gpu =
+  true` under `[play]`) has the GPU draw the game too, the same pixels as
+  the CPU, faster (it needs 64-bit integers in shaders: Vulkan, DirectX 12
+  or Metal); `replay --gpu` and `gs-replay --gpu-only` do the same, and
+  `gs-replay --gpu` draws on both and compares them after every field. The
   recompiled binary below plays faster in busy scenes.
 - `sly-rs format-card card.ps2` writes a freshly formatted 8 MB memory
   card image as PCSX2 keeps them (`--check` reads one and reports on it).

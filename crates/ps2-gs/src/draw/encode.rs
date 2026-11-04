@@ -1,29 +1,43 @@
 //! Primitives encoded for a GPU ([`crate::export`]).
 
-use std::sync::Arc;
-
 use super::{
     Frag, Pipe, Prim, Vertex, aa_edge_frags, aa_line_frags, attrs, line_frags, point, sprite_frags,
 };
 use crate::export::{self, FRAG_WORDS, PRIM_WORDS, flag, word};
 use crate::fixed;
 use crate::regs::bits;
+use rayon::prelude::*;
 
 /// `prims` as a batch for a GPU; their textures read from a snapshot when
 /// `snapshot` (a primitive drawn alone that textures from its own writes).
+/// A large batch is encoded in parts on several threads.
 pub(crate) fn batch(prims: &[Prim], snapshot: bool) -> export::Batch {
-    let mut out = export::Batch::default();
-    let mut cluts: Vec<*const [u16; 512]> = Vec::new();
-    for prim in prims {
-        let p = &prim.pipe;
-        let at = Arc::as_ptr(&p.clut);
-        let clut = cluts.iter().position(|&c| c == at).unwrap_or_else(|| {
-            cluts.push(at);
-            out.cluts
-                .extend((0..256).map(|i| u32::from(p.clut[i]) | u32::from(p.clut[256 + i]) << 16));
-            cluts.len() - 1
-        });
-        encode(prim, clut as u32, snapshot, &mut out.prims, &mut out.frags);
+    /// Primitives a part takes.
+    const PART: usize = 1024;
+    let part = |prims: &[Prim]| {
+        let mut out = export::Batch::default();
+        for prim in prims {
+            let clut = prim.pipe.clut_version % export::CLUT_SLOTS;
+            encode(prim, clut, snapshot, &mut out.prims, &mut out.frags);
+        }
+        out
+    };
+    if prims.len() <= PART {
+        return part(prims);
+    }
+    let parts: Vec<export::Batch> = prims.par_chunks(PART).map(part).collect();
+    let mut out = export::Batch {
+        prims: Vec::with_capacity(parts.iter().map(|p| p.prims.len()).sum()),
+        frags: Vec::with_capacity(parts.iter().map(|p| p.frags.len()).sum()),
+    };
+    for mut p in parts {
+        // Its fragments now start further on.
+        let before = (out.frags.len() / FRAG_WORDS) as u32;
+        for prim in p.prims.as_chunks_mut::<PRIM_WORDS>().0 {
+            prim[word::FRAGS] += before;
+        }
+        out.prims.append(&mut p.prims);
+        out.frags.append(&mut p.frags);
     }
     out
 }

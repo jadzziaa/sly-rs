@@ -48,6 +48,7 @@ impl Gs {
     pub fn start_dump(&mut self, privileged: &[u8; PRIV_SIZE]) {
         // The dump starts from local memory with everything queued drawn.
         self.flush();
+        self.sync_memory();
         let state = self.freeze();
         let mut d = Dump::default();
         // A new-style header: CRC 0xFFFFFFFF, the header's size, the header

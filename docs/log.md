@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: M4 of the [GPU GS](research/gpu-gs.md): play and replay draw on the GPU alone (`--gpu`, `gpu = true` under `[play]`), CLUTs and the display on the GPU; the prologue replays to its hash with the GS off the critical path (every stretch at or above 108% of NTSC); the integrated Radeon runs it, not in real time.
 * **Update**: M3 of the [GPU GS](research/gpu-gs.md): points, lines, antialiased edges and STQ sprites walked on the CPU and shaded on the GPU; all thirteen dumps the same as the software GS after every field on both GPUs. CLUT loads checked for GPU-only play.
 * **Update**: M2 of the [GPU GS](research/gpu-gs.md): `ps2-gs-wgpu` draws triangles and sprites in compute shaders, fed through the software GS's new tap; `gs-replay --gpu` finds its memory the same as the software GS's after every field on the five dumps without lines, points or antialiasing, on both GPUs.
 * **Update**: [GPU GS](research/gpu-gs.md): a primitive that textures from blocks it writes reads them as they were before it (both renderers); PCSX2 parity on the title's 3D improves to 100% within 8, largest difference 3.

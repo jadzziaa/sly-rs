@@ -71,7 +71,7 @@ pub(crate) fn run(
     if let Some(path) = pictures.screenshot {
         let mut hw = machine.hw.borrow_mut();
         let regs = hw.gs_display();
-        let frame = hw.gs.with(move |gs| gs.display(&regs));
+        let frame = hw.gs.with(move |gs| gs.picture(&regs));
         std::fs::write(path, frame.png()).with_context(|| format!("writing {}", path.display()))?;
     }
     let mut out = io::stdout().lock();

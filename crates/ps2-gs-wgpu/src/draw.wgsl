@@ -424,8 +424,8 @@ fn reciprocal(d: i64) -> Reciprocal {
     let zeros = clz64(ad);
     let top = (ad << zeros) >> 32u;
     let one = 1lu << 62u;
-    let down = one / top;
-    let rest = one % top;
+    let down = u64(floor_div(i64(one), i64(top)));
+    let rest = one - down * top;
     return Reciprocal(d < 0li, zeros, down, down + select(0lu, 1lu, rest != 0lu));
 }
 
@@ -459,10 +459,46 @@ fn weighted(pb: u32, at: u32, w: vec3<i64>) -> i64 {
     return w.x * i64(sword(pb, at)) + w.y * i64(sword(pb, at + 1u)) + w.z * i64(sword(pb, at + 2u));
 }
 
+// `q` stepped until `n - q·d` lies in [0, d): `floor(n / d)` exactly,
+// from an estimate off by a step or two.
+fn settle(n: i64, d: i64, estimate: i64) -> i64 {
+    var q = estimate;
+    var r = n - q * d;
+    loop {
+        if r < 0li {
+            q -= 1li;
+            r += d;
+        } else if r >= d {
+            q += 1li;
+            r -= d;
+        } else {
+            break;
+        }
+    }
+    return q;
+}
+
+// `floor(n / d)` for `d > 0` and a quotient within 2^40, exactly, without
+// 64-bit division (which GPUs emulate slowly): a float estimate, refined
+// once from its remainder, then stepped until the remainder is in
+// [0, d). The steps make it exact whatever the estimates; they are good
+// enough that there are at most one or two.
 fn floor_div(n: i64, d: i64) -> i64 {
-    let q = n / d;
-    if (n % d != 0li) && ((n < 0li) != (d < 0li)) {
-        return q - 1li;
+    let fd = f32(d);
+    var q = i64(floor(f32(n) / fd));
+    var r = n - q * d;
+    q += i64(floor(f32(r) / fd));
+    r = n - q * d;
+    loop {
+        if r < 0li {
+            q -= 1li;
+            r += d;
+        } else if r >= d {
+            q += 1li;
+            r -= d;
+        } else {
+            break;
+        }
     }
     return q;
 }
@@ -473,9 +509,12 @@ fn edge(ax: i32, ay: i32, bx: i32, by: i32, x: i64, y: i64) -> i64 {
     return i64(bx - ax) * (y - i64(ay)) - i64(by - ay) * (x - i64(ax));
 }
 
-// The exact quotient `Σ wₖ·aₖ / area` of non-negative values.
-fn exact(w: vec3<i64>, a: vec3<i64>, area: i64) -> i64 {
-    return (w.x * a.x + w.y * a.y + w.z * a.z) / area;
+// The exact quotient `floor(Σ wₖ·aₖ / area)`, estimated from the
+// barycentric weights `b` (`wₖ / area` in floats; the values `aₖ` are
+// within 2^24) and settled exactly.
+fn exact(w: vec3<i64>, b: vec3<f32>, a: vec3<i64>, area: i64) -> i64 {
+    let n = w.x * a.x + w.y * a.y + w.z * a.z;
+    return settle(n, area, i64(floor(dot(b, vec3<f32>(a)))));
 }
 
 fn rgba_at(pb: u32, k: u32) -> vec4<i64> {
@@ -504,15 +543,18 @@ fn triangle(pb: u32, x: u32, y: u32) {
         }
     }
     let area = edge(x0, y0, x1, y1, i64(x2), i64(y2));
+    // Floats only estimate; every value is settled exactly.
+    let inv = 1.0 / f32(area);
+    let b = vec3<f32>(f32(w.x), f32(w.y), f32(w.z)) * inv;
     var z = word(pb, W_Z);
-    if !has(pb, F_FLAT_Z) {
+    if has(pb, F_ZBUF) && !has(pb, F_FLAT_Z) {
         // Depth's sum can pass 64 bits: in high and low halves.
         let zs = vec3<u32>(word(pb, W_Z), word(pb, W_Z + 1u), word(pb, W_Z + 2u));
+        let q = exact(w, b, vec3<i64>(i64(zs.x >> 16u), i64(zs.y >> 16u), i64(zs.z >> 16u)), area);
         let hi = w.x * i64(zs.x >> 16u) + w.y * i64(zs.y >> 16u) + w.z * i64(zs.z >> 16u);
         let lo = w.x * i64(zs.x & 0xFFFFu) + w.y * i64(zs.y & 0xFFFFu) + w.z * i64(zs.z & 0xFFFFu);
-        let q = hi / area;
-        let r = hi - q * area;
-        z = u32(q * 65536li + (r * 65536li + lo) / area);
+        let n = (hi - q * area) * 65536li + lo;
+        z = u32(q * 65536li + settle(n, area, i64(floor(f32(n) * inv))));
     }
     var rgba: vec4<i32>;
     if has(pb, F_IIP) {
@@ -520,12 +562,15 @@ fn triangle(pb: u32, x: u32, y: u32) {
         let c1 = rgba_at(pb, 1u);
         let c2 = rgba_at(pb, 2u);
         for (var k = 0u; k < 4u; k++) {
-            rgba[k] = i32(exact(w, vec3<i64>(c0[k], c1[k], c2[k]), area));
+            rgba[k] = i32(exact(w, b, vec3<i64>(c0[k], c1[k], c2[k]), area));
         }
     } else {
         rgba = channels(word(pb, W_FLAT_RGBA));
     }
-    let fog = i32(exact(w, vec3<i64>(i64(word(pb, W_FOG)), i64(word(pb, W_FOG + 1u)), i64(word(pb, W_FOG + 2u))), area));
+    var fog = 0;
+    if has(pb, F_FGE) {
+        fog = i32(exact(w, b, vec3<i64>(i64(word(pb, W_FOG)), i64(word(pb, W_FOG + 1u)), i64(word(pb, W_FOG + 2u))), area));
+    }
     var tex = vec2<i32>(0);
     if has(pb, F_TME) {
         if has(pb, F_STQ) {
@@ -535,10 +580,9 @@ fn triangle(pb: u32, x: u32, y: u32) {
                 ratio(q, weighted(pb, W_V, w), sword(pb, W_SHIFT_V)),
             );
         } else {
-            tex = vec2<i32>(
-                i32(floor_div(weighted(pb, W_U, w), area)),
-                i32(floor_div(weighted(pb, W_V, w), area)),
-            );
+            let u = vec3<i64>(i64(sword(pb, W_U)), i64(sword(pb, W_U + 1u)), i64(sword(pb, W_U + 2u)));
+            let v = vec3<i64>(i64(sword(pb, W_V)), i64(sword(pb, W_V + 1u)), i64(sword(pb, W_V + 2u)));
+            tex = vec2<i32>(i32(exact(w, b, u, area)), i32(exact(w, b, v, area)));
         }
     }
     fragment(pb, x, y, z, rgba, tex, fog, NO_COVERAGE);
@@ -547,7 +591,9 @@ fn triangle(pb: u32, x: u32, y: u32) {
 // A sprite's texture coordinate at sample `s` between corners at `s0`
 // and `s1` with coordinates `c0` and `c1` (1/16 texel).
 fn sprite_coord(c0: i32, c1: i32, s0: i32, s1: i32, s: i32) -> i32 {
-    return i32(i64(c0) + floor_div(i64(c1 - c0) * i64(s - s0), i64(s1 - s0)));
+    let n = i64(c1 - c0) * i64(s - s0);
+    let d = i64(s1 - s0);
+    return i32(i64(c0) + settle(n, d, i64(floor(f32(n) / f32(d)))));
 }
 
 fn sprite(pb: u32, x: u32, y: u32) {

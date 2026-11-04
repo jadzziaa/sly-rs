@@ -81,6 +81,8 @@ pub struct Play {
     /// `right`), to the DualShock button it gives (`cross`, `square`, ...
     /// as in a replay's presses).
     pub gamepad: BTreeMap<String, String>,
+    /// Draw on the GPU (the GPU GS) instead of the CPU.
+    pub gpu: bool,
 }
 
 impl Default for Play {
@@ -90,6 +92,7 @@ impl Default for Play {
             window: [1280, 896],
             keys: BTreeMap::new(),
             gamepad: BTreeMap::new(),
+            gpu: false,
         }
     }
 }

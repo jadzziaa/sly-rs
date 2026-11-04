@@ -120,6 +120,10 @@ fn emulate(
     proxy: &EventLoopProxy<Event>,
 ) -> Result<()> {
     let (mut machine, _) = crate::boot(options.game, recompiled)?;
+    if options.settings.gpu {
+        let name = crate::use_gpu(&machine)?;
+        tracing::info!("drawing on the GPU: {name}");
+    }
     let (script, ahead) = match &options.replay {
         Some(path) => {
             let replay = Replay::load(path)?;
@@ -167,8 +171,9 @@ fn emulate(
             let odd = hw.gs_csr >> 13 & 1 == 1;
             let proxy = proxy.clone();
             hw.gs.post(move |gs| {
-                let frame = gs.display(&regs);
-                let _ = proxy.send_event(Event::Frame(Field { frame, odd }));
+                gs.show(&regs, move |frame| {
+                    let _ = proxy.send_event(Event::Frame(Field { frame, odd }));
+                });
             });
         }
         if live {

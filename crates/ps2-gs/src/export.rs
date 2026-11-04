@@ -1,12 +1,14 @@
 //! What the GS draws, handed on for a GPU to draw the same (the GPU GS,
 //! `docs/research/gpu-gs.md`).
 //!
-//! When drawing on several threads, the GS hands its drawer batches of
-//! primitives and the pixels of transfers, in order. A [`Tap`] set with
-//! [`crate::Gs::set_tap`] is handed the same, in the same order: each batch
-//! as primitives encoded in [`PRIM_WORDS`] words (the [`word`] and [`flag`]
-//! constants) with the CLUTs they read, and each transfer's pixels as
-//! writes to words of local memory. A batch's primitives may be drawn at
+//! The GS hands its drawer thread batches of primitives and the pixels of
+//! transfers, in order. A [`Tap`] set with [`crate::Gs::set_tap`] lives on
+//! that thread and is handed the same, in the same order: each batch as
+//! primitives encoded in [`PRIM_WORDS`] words (the [`word`] and [`flag`]
+//! constants), each transfer's pixels as writes to words of local memory,
+//! and the CLUT loads before them ([`Clut`]); with the CPU no longer
+//! drawing, it is also asked for the display's picture and for local
+//! memory. A batch's primitives may be drawn at
 //! once, each pixel's in order: no primitive in it reads what another
 //! writes elsewhere. A primitive drawn alone that textures from blocks it
 //! writes reads its texture as local memory was before it
@@ -58,7 +60,8 @@ pub mod word {
     pub const WRAP_V: usize = 14;
     /// The texture's width and height in texels (`w | h << 16`).
     pub const TEX_SIZE: usize = 15;
-    /// The CLUT it reads, an index into [`super::Batch::cluts`].
+    /// The CLUT it reads: a slot of [`super::CLUT_SLOTS`] (its version
+    /// modulo their number, see [`super::Clut`]).
     pub const CLUT: usize = 16;
     /// SCANMSK.
     pub const SCANMSK: usize = 17;
@@ -153,9 +156,6 @@ pub mod flag {
 pub struct Batch {
     /// The primitives, [`PRIM_WORDS`] words each.
     pub prims: Vec<u32>,
-    /// The CLUTs they read, 256 words each (halfwords `i` and `256 + i` as
-    /// word `i`'s low and high halves).
-    pub cluts: Vec<u32>,
     /// Fragments walked on the CPU, [`FRAG_WORDS`] words each, each
     /// primitive's in order.
     pub frags: Vec<u32>,
@@ -164,13 +164,49 @@ pub struct Batch {
 /// A write to local memory: the word, the bits written, their new value.
 pub type Write = [u32; 3];
 
-/// What is handed the GS's work for a GPU.
+/// CLUTs the GPU keeps, each 256 words (halfwords `i` and `256 + i` of the
+/// CLUT buffer as word `i`'s low and high halves). The CLUT has a version,
+/// counted up by every load; version `v` lives in slot `v % CLUT_SLOTS`.
+/// The GS draws a batch before more loads than that could overwrite the
+/// CLUTs its primitives read.
+pub const CLUT_SLOTS: u32 = 1024;
+
+/// The CLUT changing, in order with the rest.
+#[derive(Clone, Debug)]
+pub enum Clut {
+    /// The whole CLUT buffer, as version `version` (when the tap is set).
+    Set {
+        /// Its version.
+        version: u32,
+        /// The 512 halfwords.
+        halves: Box<[u16; 512]>,
+    },
+    /// A load from local memory making version `version` from the one
+    /// before: version, entries (16 or 256), CSA, flags (bit 0: 32-bit
+    /// entries; bit 1: CSM2), COU and COV for CSM2, two words unused, the
+    /// layout read ([`crate::Layout::gpu`]: CT32, CT16 or CT16S at CBP,
+    /// TEXCLUT's width for CSM2 else 1), a word unused. Entry `j` is read
+    /// at (COU·16 + j, COV) for CSM2; for CSM1 with 256 entries at (k % 16,
+    /// k / 16) with `k` = `j` with bits 3 and 4 swapped; with 16 at (j % 8,
+    /// j / 8). It lands at CLUT halfword `(CSA·16 + j) & 0x1FF`, or for
+    /// 32-bit entries its halves at `(CSA·16 + j) & 0xFF` and 256 more.
+    Load([u32; 16]),
+}
+
+/// What is handed the GS's work for a GPU, on the GS's drawer thread.
 pub trait Tap: Send {
     /// Local memory as it is now: when the tap is set, and after a change
     /// the GS makes otherwise (a local-to-local copy).
     fn memory(&mut self, words: &[u32]);
     /// A transfer's pixels, as writes (each word at most once).
     fn writes(&mut self, writes: &[Write]);
+    /// CLUT changes, in order.
+    fn cluts(&mut self, cluts: &[Clut]);
     /// A batch of primitives.
     fn batch(&mut self, batch: &Batch);
+    /// The display's picture ([`crate::display::gpu_display`] gives its
+    /// size and parameters).
+    fn display(&mut self, regs: &crate::Privileged) -> crate::Frame;
+    /// Local memory as it is after everything handed over.
+    fn read(&mut self) -> Vec<u32>;
 }

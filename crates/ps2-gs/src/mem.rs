@@ -449,6 +449,13 @@ impl Memory {
         }
     }
 
+    /// Replaces the memory with `words`.
+    pub fn load_words(&self, words: &[u32]) {
+        for (w, &v) in self.words.iter().zip(words) {
+            w.store(v, Ordering::Relaxed);
+        }
+    }
+
     /// The memory as words.
     #[must_use]
     pub fn to_words(&self) -> Vec<u32> {

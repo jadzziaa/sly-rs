@@ -86,30 +86,64 @@ impl Circuit {
     }
 }
 
+/// The circuits switched on (by number) and the picture's origin and size.
+type Placement = (Vec<(usize, Circuit)>, u32, u32, u32, u32);
+
+fn place(regs: &Privileged) -> Option<Placement> {
+    let pmode = regs.pmode;
+    let field_mode = bits(regs.smode2, 0, 2) == 3;
+    let circuits: Vec<(usize, Circuit)> = (0..2)
+        .filter(|&i| bits(pmode, i as u32, 1) != 0)
+        .map(|i| (i, Circuit::new(regs.dispfb[i], regs.display[i], field_mode)))
+        .collect();
+    let x0 = circuits.iter().map(|(_, c)| c.x).min()?;
+    let y0 = circuits.iter().map(|(_, c)| c.y).min().unwrap_or(0);
+    let width = circuits
+        .iter()
+        .map(|(_, c)| c.x - x0 + c.w)
+        .max()
+        .unwrap_or(0);
+    let height = circuits
+        .iter()
+        .map(|(_, c)| c.y - y0 + c.h)
+        .max()
+        .unwrap_or(0);
+    Some((circuits, x0, y0, width, height))
+}
+
+/// Words a GPU needs to read out the display as [`Gs::display`] does: the
+/// picture's width and height, BGCOLOR (RGB), PMODE's MMOD (bit 0), SLBG
+/// (bit 1) and ALP (bits 8..16); then for each circuit (16 words from word
+/// 4 and from word 20): switched on, its format (PSM code), its layout
+/// ([`crate::Layout::gpu`]), DBX, DBY, its offset in the picture (x, y),
+/// its width and height, a word unused. `None` when no circuit is on.
+#[must_use]
+pub fn gpu_display(regs: &Privileged) -> Option<[u32; 36]> {
+    let (circuits, x0, y0, width, height) = place(regs)?;
+    let mut w = [0u32; 36];
+    w[0] = width;
+    w[1] = height;
+    w[2] = bits(regs.bgcolor, 0, 24);
+    w[3] = bits(regs.pmode, 5, 1) | bits(regs.pmode, 7, 1) << 1 | bits(regs.pmode, 8, 8) << 8;
+    for (i, c) in &circuits {
+        let at = 4 + 16 * i;
+        w[at] = 1;
+        w[at + 1] = c.psm.code();
+        w[at + 2..at + 9].copy_from_slice(&crate::Layout::new(c.psm, c.fbp, c.fbw).gpu());
+        w[at + 9..at + 15].copy_from_slice(&[c.dbx, c.dby, c.x - x0, c.y - y0, c.w, c.h]);
+    }
+    Some(w)
+}
+
 impl Gs {
-    /// The picture the display circuits show.
+    /// The picture the display circuits show, from local memory here (see
+    /// [`Gs::picture`] when the GPU draws).
     #[must_use]
     pub fn display(&self, regs: &Privileged) -> Frame {
         let pmode = regs.pmode;
-        let field_mode = bits(regs.smode2, 0, 2) == 3;
-        let circuits: Vec<(usize, Circuit)> = (0..2)
-            .filter(|&i| bits(pmode, i as u32, 1) != 0)
-            .map(|i| (i, Circuit::new(regs.dispfb[i], regs.display[i], field_mode)))
-            .collect();
-        let Some(x0) = circuits.iter().map(|(_, c)| c.x).min() else {
+        let Some((circuits, x0, y0, width, height)) = place(regs) else {
             return Frame::default();
         };
-        let y0 = circuits.iter().map(|(_, c)| c.y).min().unwrap_or(0);
-        let width = circuits
-            .iter()
-            .map(|(_, c)| c.x - x0 + c.w)
-            .max()
-            .unwrap_or(0);
-        let height = circuits
-            .iter()
-            .map(|(_, c)| c.y - y0 + c.h)
-            .max()
-            .unwrap_or(0);
         let bg = [
             bits(regs.bgcolor, 0, 8),
             bits(regs.bgcolor, 8, 8),
