@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T00:26:24Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T00:43:54Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -335,6 +335,37 @@ instructions).
   are. What costs is the rest of `fragment` and `texel`: pipelines
   specialised to a primitive's state, as PCSX2's renderer generates,
   are the step that remains.
+- **Pixels by pipeline state** (`gs-replay --states`, hidden: primitives
+  and the pixels of their bounding boxes, half of it for triangles). On
+  the play dump 21 states draw everything, and 90% of the pixels are
+  textured triangle strips and fans with one shape: a 4- or 8-bit CLUT
+  texture, bilinear, modulated with its alpha (TFX 0, TCC); depth test
+  GEQUAL or GREATER; an alpha test that either always fails and keeps
+  RGB only or passes GEQUAL and keeps the frame; blending, fog and
+  Gouraud colour on; a 32-bit frame. The first of them alone is 44%.
+  About 1,050 instructions run per fragment, at 4 to 5 a cycle: the work
+  is instruction-bound, so gains follow the instructions removed.
+- **Addresses from one table entry.** Locating a pixel (frame, depth and
+  up to four texels a fragment) took about a quarter of the GS's
+  instructions. The page tables now hold each position's word within its
+  page and its shift (11 and 5 bits of the same 16-bit entry; pages start
+  on 256-byte boundaries, so neither depends on the page), and a layout
+  its format's mask, replacing a branch for 4-bit formats, a match on
+  the format and byte arithmetic per pixel. The play dump from 4.26 to
+  about 4.0 s on one thread, 1.12 to 1.10 s on sixteen; twelve GS dumps
+  (ours and PCSX2's, the dialog, title, level, play and the format
+  probes) leave local memory the same, and the page tables' test checks
+  every format against the block and column tables.
+- **Tried, no gain:** forcing `fragment`, `sample` and `texel` inline
+  into the span loops (1%, within noise), and decoding TEST and ALPHA
+  once per primitive instead of per pixel (none). The branches on a
+  primitive's state are predictable; what costs is the work itself.
+  Specialising the pipeline for the few states above (const generics,
+  one instantiation each, the general pipeline for the rest) is the next
+  step, with perhaps 1.5 to 2 times to gain at most without SIMD (no
+  `unsafe`, no stable portable SIMD); and on sixteen threads the GS
+  thread's own work, about 0.43 s of the dump's 1.1 s in setting up and
+  queueing primitives (2.66 million), needs the same attention.
 - **Up to 16 drawing threads** (was 8): the first 8,000 fields of the
   prologue recording from 135.4 to 127.0 s (two runs each, within a
   second), faster than real time (133.5 s); the GS thread busy 94.5% of

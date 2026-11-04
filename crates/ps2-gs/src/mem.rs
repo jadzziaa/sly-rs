@@ -196,9 +196,10 @@ struct PageTables {
 fn page_tables() -> &'static PageTables {
     static TABLES: std::sync::OnceLock<PageTables> = std::sync::OnceLock::new();
     TABLES.get_or_init(|| {
-        // A page at block 0 with one page per row: the offset is the
-        // address itself.
-        let table = |psm: Psm, w: u32, h: u32, nibbles: bool| -> Vec<u16> {
+        // A page at block 0 with one page per row: its word and shift are
+        // the pixel's within any page, since pages start on 256-byte
+        // boundaries. Each entry is the word (11 bits) and the shift (5).
+        let table = |psm: Psm, w: u32, h: u32| -> Vec<u16> {
             let bw = if matches!(psm, Psm::T8 | Psm::T4) {
                 2
             } else {
@@ -208,25 +209,19 @@ fn page_tables() -> &'static PageTables {
                 .flat_map(|y| (0..w).map(move |x| (x, y)))
                 .map(|(x, y)| {
                     let p = place_slow(psm, 0, bw, x, y);
-                    let byte = p.word * 4 + (p.shift / 8) as usize;
-                    let at = if nibbles {
-                        byte * 2 + ((p.shift / 4) & 1) as usize
-                    } else {
-                        byte
-                    };
-                    at as u16
+                    ((p.word << 5) as u32 | p.shift) as u16
                 })
                 .collect()
         };
         PageTables {
-            ct32: table(Psm::Ct32, 64, 32, false),
-            z32: table(Psm::Z32, 64, 32, false),
-            ct16: table(Psm::Ct16, 64, 64, false),
-            ct16s: table(Psm::Ct16s, 64, 64, false),
-            z16: table(Psm::Z16, 64, 64, false),
-            z16s: table(Psm::Z16s, 64, 64, false),
-            t8: table(Psm::T8, 128, 64, false),
-            t4: table(Psm::T4, 128, 128, true),
+            ct32: table(Psm::Ct32, 64, 32),
+            z32: table(Psm::Z32, 64, 32),
+            ct16: table(Psm::Ct16, 64, 64),
+            ct16s: table(Psm::Ct16s, 64, 64),
+            z16: table(Psm::Z16, 64, 64),
+            z16s: table(Psm::Z16s, 64, 64),
+            t8: table(Psm::T8, 128, 64),
+            t4: table(Psm::T4, 128, 128),
         }
     })
 }
@@ -236,7 +231,10 @@ fn page_tables() -> &'static PageTables {
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     table: &'static [u16],
-    psm: Psm,
+    /// The format's bits in a word, and where they start beyond the
+    /// table's shift (the formats in a word's top byte).
+    mask: u32,
+    shift: u32,
     w_shift: u32,
     h_shift: u32,
     pages_per_row: u32,
@@ -258,9 +256,20 @@ impl Layout {
             Psm::T8 => (&t.t8, 7, 6, bw >> 1),
             Psm::T4 => (&t.t4, 7, 7, bw >> 1),
         };
+        let (mask, shift) = match psm {
+            Psm::Ct32 | Psm::Z32 => (u32::MAX, 0),
+            Psm::Ct24 | Psm::Z24 => (0x00FF_FFFF, 0),
+            Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (0xFFFF, 0),
+            Psm::T8 => (0xFF, 0),
+            Psm::T4 => (0xF, 0),
+            Psm::T8h => (0xFF, 24),
+            Psm::T4hl => (0xF, 24),
+            Psm::T4hh => (0xF, 28),
+        };
         Self {
             table,
-            psm,
+            mask,
+            shift,
             w_shift,
             h_shift,
             pages_per_row,
@@ -276,28 +285,13 @@ impl Layout {
         let (w_shift, h_shift) = (self.w_shift, self.h_shift);
         let page = (y >> h_shift) * self.pages_per_row + (x >> w_shift);
         let (px, py) = (x & ((1 << w_shift) - 1), y & ((1 << h_shift) - 1));
-        let offset = u32::from(self.table[((py << w_shift) | px) as usize]);
-        let base = (self.bp + page * 32) * 256;
-        let (byte, nibble) = if self.psm == Psm::T4 {
-            (offset >> 1, offset & 1)
-        } else {
-            (offset, 0)
-        };
-        let byte = ((base + byte) & 0x3F_FFFF) as usize;
-        let (shift, mask) = match self.psm {
-            Psm::Ct32 | Psm::Z32 => (0, u32::MAX),
-            Psm::Ct24 | Psm::Z24 => (0, 0x00FF_FFFF),
-            Psm::Ct16 | Psm::Ct16s | Psm::Z16 | Psm::Z16s => (8 * (byte as u32 & 2), 0xFFFF),
-            Psm::T8 => (8 * (byte as u32 & 3), 0xFF),
-            Psm::T4 => (8 * (byte as u32 & 3) + 4 * nibble, 0xF),
-            Psm::T8h => (24, 0xFF),
-            Psm::T4hl => (24, 0xF),
-            Psm::T4hh => (28, 0xF),
-        };
+        let entry = u32::from(self.table[((py << w_shift) | px) as usize]);
+        // Local memory is 4 MB (2^20 words) and wraps.
+        let word = ((self.bp + page * 32) * 64 + (entry >> 5)) & 0xF_FFFF;
         Pixel {
-            word: byte / 4,
-            shift,
-            mask,
+            word: word as usize,
+            shift: (entry & 31) + self.shift,
+            mask: self.mask,
         }
     }
 }

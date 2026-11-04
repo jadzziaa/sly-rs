@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: GS: page tables give a pixel's word and shift directly (the play dump about 6% faster on one thread, local memory the same on twelve dumps); gs-replay --states counts pixels by pipeline state (90% of play is one shape of textured triangle) ([graphics](research/sly1-graphics.md)).
 * **Update**: GS draws on up to 16 threads (was 8): the prologue's first 8,000 fields from 135.4 to 127.0 s, faster than real time ([graphics](research/sly1-graphics.md)).
 * **Update**: GS: depth interpolated in 64 bits when it fits (the play dump 4.58 → 4.26 s on one thread, 1.26 → 1.20 s on eight, pixels the same); exact per-row stepping without divisions tried and dropped as slower ([graphics](research/sly1-graphics.md)).
 * **Update**: Gameplay is now GS-bound: the drawer's pixel work is the critical path (60 fields of play take 1.30 s on 8 drawing threads, 1.18 on 16, against 1.0 s real time); replay reports host time and writes GS dumps, gs-replay reports the drawer's time ([graphics](research/sly1-graphics.md)).

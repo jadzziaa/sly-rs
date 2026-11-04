@@ -230,6 +230,10 @@ enum Command {
         /// repository).
         #[arg(long)]
         frames: Option<PathBuf>,
+        /// List the primitives and pixels by pipeline state, most pixels
+        /// first.
+        #[arg(long, hide = true)]
+        states: bool,
     },
     /// Run a replay (scripted presses) and check its checkpoints: the game's
     /// world and level, and the machine's state hash.
@@ -419,12 +423,14 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             threads,
             screenshot,
             frames,
+            states,
         } => gs_replay::run(
             &path,
             repeat,
             threads,
             screenshot.as_deref(),
             frames.as_deref(),
+            states,
         ),
     };
     match result {

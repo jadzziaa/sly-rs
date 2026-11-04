@@ -110,6 +110,9 @@ pub struct Gs {
     dump: Option<dump::Dump>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
+    /// When set, primitives and their pixels (the bounding box, half of it
+    /// for triangles) by pipeline state, for `gs-replay --states`.
+    pub states: Option<std::collections::HashMap<String, (u64, u64)>>,
     /// Host time spent drawing, or queueing primitives when drawing on
     /// several threads (for reports).
     pub draw_time: std::time::Duration,
@@ -161,6 +164,7 @@ impl Default for Gs {
             events: Events::default(),
             dump: None,
             drawn: 0,
+            states: None,
             draw_time: std::time::Duration::ZERO,
             busy: std::time::Duration::ZERO,
             alone: 0,

@@ -8,12 +8,14 @@ use anyhow::{Context as _, Result, anyhow};
 use ps2_gs::Privileged;
 use ps2_gs::dump::{self, Packet};
 
+#[allow(clippy::cast_precision_loss, reason = "a report")]
 pub(crate) fn run(
     path: &Path,
     repeat: u32,
     threads: usize,
     screenshot: Option<&Path>,
     frames: Option<&Path>,
+    states: bool,
 ) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if let Some(dir) = frames {
@@ -25,6 +27,9 @@ pub(crate) fn run(
         let (mut gs, mut privileged, packets) =
             dump::read(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))?;
         gs.set_threads(threads);
+        if states {
+            gs.states = Some(std::collections::HashMap::new());
+        }
         let started = Instant::now();
         let mut fields = 0;
         for packet in packets {
@@ -53,6 +58,22 @@ pub(crate) fn run(
             gs.drawn,
             elapsed.as_secs_f64()
         )?;
+        if let Some(states) = gs.states.take() {
+            let total: u64 = states.values().map(|s| s.1).sum();
+            let mut states: Vec<_> = states.into_iter().collect();
+            states.sort_by_key(|(_, (_, pixels))| std::cmp::Reverse(*pixels));
+            let mut running = 0;
+            for (state, (prims, pixels)) in states.iter().take(30) {
+                running += pixels;
+                writeln!(
+                    out,
+                    "  {:5.1}% ({:5.1}% so far) {prims:8} prims  {state}",
+                    *pixels as f64 * 100.0 / total.max(1) as f64,
+                    running as f64 * 100.0 / total.max(1) as f64,
+                )?;
+            }
+            writeln!(out, "  {} states, {total} pixels", states.len())?;
+        }
         let [pool, serial, uploads] = gs.drawer_times();
         writeln!(
             out,

@@ -64,6 +64,46 @@ pub(crate) struct Pipe {
 }
 
 impl Pipe {
+    /// The state bits that decide which parts of the pipeline run, for
+    /// reports.
+    pub(crate) fn state(&self, kind: u64) -> String {
+        let kinds = [
+            "point", "line", "strip", "tri", "tristrip", "fan", "sprite", "?",
+        ];
+        let ztst = if self.zbuf.is_some() {
+            bits(self.test, 17, 2)
+        } else {
+            9
+        };
+        let ate = if bits(self.test, 0, 1) != 0 {
+            format!("{}/{}", bits(self.test, 1, 3), bits(self.test, 12, 2))
+        } else {
+            "-".to_owned()
+        };
+        format!(
+            "{} tex {} {} tfx{}{} z{}{} ate{} date{} abe{} fge{} aa{} iip{} fb {:?}{}",
+            kinds[kind as usize & 7],
+            if self.tme {
+                format!("{:?}", self.tex_psm)
+            } else {
+                "-".to_owned()
+            },
+            if self.tme && self.linear { "lin" } else { "" },
+            self.tex.tfx,
+            if self.tex.tcc { "a" } else { "" },
+            ztst,
+            if self.zmsk { "m" } else { "" },
+            ate,
+            bits(self.test, 14, 1),
+            u8::from(self.abe),
+            u8::from(self.fge),
+            u8::from(self.aa1),
+            u8::from(self.iip),
+            self.frame.0,
+            if self.fbmsk == 0 { "" } else { " masked" },
+        )
+    }
+
     /// Whether the primitive reads its texture.
     pub(crate) const fn textured(&self) -> bool {
         self.tme
@@ -292,6 +332,7 @@ impl Gs {
             zmsk: bits(c.zbuf, 32, 1) != 0,
             test: c.test,
             alpha: c.alpha,
+
             fba: bits(c.fba, 0, 1) != 0,
             tex,
             tex_psm: Psm::from_bits(u64::from(tex.psm)),
@@ -321,6 +362,17 @@ impl Gs {
         let mut vertices = [Vertex::default(); 3];
         vertices[..v.len()].copy_from_slice(v);
         if let Some(bbox) = bounds(&pipe, kind, &vertices) {
+            if let Some(states) = &mut self.states {
+                let [x0, x1, y0, y1] = bbox;
+                let area = (x1 - x0 + 1) as u64 * (y1 - y0 + 1) as u64;
+                let e = states.entry(pipe.state(kind)).or_default();
+                e.0 += 1;
+                e.1 += if (3..=5).contains(&kind) {
+                    area / 2
+                } else {
+                    area
+                };
+            }
             let prim = Prim {
                 pipe,
                 kind,
