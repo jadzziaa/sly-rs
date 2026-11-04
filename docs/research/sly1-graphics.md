@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T00:43:54Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T01:26:53Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -366,6 +366,44 @@ instructions).
   `unsafe`, no stable portable SIMD); and on sixteen threads the GS
   thread's own work, about 0.43 s of the dump's 1.1 s in setting up and
   queueing primitives (2.66 million), needs the same attention.
+- **The pipeline specialised to the hot state.** `fragment`, `sample`,
+  `texel` and `triangle` take a `const HOT: bool`; with it, everything
+  the hot state decides is a constant (a CLUT texture, bilinear,
+  modulated with its alpha; blending, fog, Gouraud colour; a 32-bit
+  frame written whole; no destination alpha test, antialiasing or scan
+  mask), and the rest (depth, the alpha test, the blend's inputs, the
+  CLUT's format, wrapping, UV or STQ) stays as for any state. One source
+  of semantics, a triangle dispatched once on `Pipe::is_hot`. A test
+  draws random triangles in that state both ways over random memory and
+  CLUTs (every CLUT texture and CLUT format, depth formats and tests,
+  alpha tests, blend inputs, PABE, COLCLAMP, FBA, wrap modes, UV and STQ)
+  and compares memory; it fails when the specialised path is made wrong.
+  The play dump on one thread from 4.0 to 3.5 s.
+- **The GS thread's own work.** On sixteen threads the GS thread became
+  the critical path: profiled on its own (callgrind, one thread a file),
+  22% of its instructions went to batching bookkeeping, 15% to decoding
+  each primitive's state, 7% to copying it into the batch. Now:
+  - the decoded state (`Pipe`) is kept and shared (`Arc`) by the
+    primitives after it until a register it reads is written (any but a
+    vertex's), or a CLUT load; when the filter depends on RGBAQ's Q (LOD
+    from Q, no LCM, STQ coordinates) it is kept for that Q only;
+  - a primitive whose footprint (frame, depth and texture blocks) is the
+    one marked last in the batch is neither checked nor marked again:
+    every primitive marked since passed the same check against it (each
+    rule is symmetric, and a primitive overlapping itself is drawn
+    alone), and marking is idempotent. The batches come out the same
+    (1,376, 554 on the pool);
+  - `bounds` no longer allocates.
+
+  The play dump on sixteen threads from 1.10 s to 0.92 s, under its 1.0 s
+  of real time; on one thread 3.4 s. Every GS dump leaves local memory
+  the same. In the game, the first 8,000 fields of the prologue
+  recording from 127.0 to 119.1 s (two runs, within 0.3 s): 112% of
+  console speed. The machine now waits for the GS 3.2% of the run; VIF1
+  with VU1 (64% without the waits) and the EE (32%) set the pace again.
+- **CLAMP's region mode with MIN above MAX** panics (`i32::clamp`); the
+  test above keeps its bounds in order. What the GS does then is not yet
+  known; games are not seen to do it.
 - **Up to 16 drawing threads** (was 8): the first 8,000 fields of the
   prologue recording from 135.4 to 127.0 s (two runs each, within a
   second), faster than real time (133.5 s); the GS thread busy 94.5% of

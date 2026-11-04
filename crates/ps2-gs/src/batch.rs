@@ -281,6 +281,11 @@ pub(crate) struct Batch {
     /// They come before the primitives queued: those that read them were
     /// queued after them, and the others do not touch them.
     upload: Option<(Upload, Uses)>,
+    /// The footprint marked last in `uses`. A primitive with the same one
+    /// needs no check and no marking: every primitive marked since passed
+    /// the check against it (the check is symmetric), and marking again
+    /// changes nothing.
+    marked: Option<Footprint>,
     /// Buffers of drawn batches, for the next.
     spare_work: Vec<Work>,
     spare_uses: Vec<Uses>,
@@ -432,6 +437,7 @@ impl Drop for Batch {
 
 /// The blocks a primitive reads (its texture, the depth it tests) and
 /// writes (frame, depth).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Footprint {
     frame: Region,
     /// The depth buffer, if the primitive uses it at all.
@@ -567,16 +573,20 @@ impl Gs {
             });
         let target = (p.frame, p.zbuf);
         let b = &self.batch;
+        let again = b.marked == Some(f);
         if alone
             || b.target.is_some_and(|t| t != target)
-            || b.uses.conflict(&f)
+            || (!again && b.uses.conflict(&f))
             || b.work.prims.len() >= MAX_PRIMS
         {
             self.submit();
         }
         let b = &mut self.batch;
         b.target = Some(target);
-        b.uses.mark(&f);
+        if b.marked != Some(f) {
+            b.uses.mark(&f);
+            b.marked = Some(f);
+        }
         let [x0, x1, y0, y1] = prim.bbox;
         b.work.pixels += ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
         b.work.prims.push(prim);
@@ -610,6 +620,7 @@ impl Gs {
         let mut work = std::mem::replace(&mut b.work, b.spare_work.pop().unwrap_or_default());
         work.memory = Some(Arc::clone(&self.mem));
         let uses = std::mem::replace(&mut b.uses, b.spare_uses.pop().unwrap_or_default());
+        b.marked = None;
         b.target = None;
         b.hand_over(Item::Batch(work, parallel), uses);
         self.batches += 1;

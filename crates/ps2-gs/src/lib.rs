@@ -96,6 +96,10 @@ pub struct Gs {
     clut: [u16; 512],
     /// A copy of it the primitives drawn since it last changed share.
     clut_shared: Option<std::sync::Arc<[u16; 512]>>,
+    /// The last primitive's decoded state, shared by the primitives after
+    /// it until a register it reads changes; with RGBAQ's Q when the
+    /// filter depends on it.
+    pipe_cache: Option<(std::sync::Arc<draw::Pipe>, Option<u32>)>,
     /// CBP0 and CBP1, for CLD 4 and 5.
     cbp: [u32; 2],
     /// The host-to-local transfer under way.
@@ -110,6 +114,9 @@ pub struct Gs {
     dump: Option<dump::Dump>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
+    /// Whether primitives in the specialised state take its pipeline
+    /// (tests turn it off to compare).
+    pub(crate) specialise: bool,
     /// When set, primitives and their pixels (the bounding box, half of it
     /// for triangles) by pipeline state, for `gs-replay --states`.
     pub states: Option<std::collections::HashMap<String, (u64, u64)>>,
@@ -157,6 +164,7 @@ impl Default for Gs {
             queued: 0,
             clut: [0; 512],
             clut_shared: None,
+            pipe_cache: None,
             cbp: [0; 2],
             transfer: None,
             readback: std::collections::VecDeque::new(),
@@ -164,6 +172,7 @@ impl Default for Gs {
             events: Events::default(),
             dump: None,
             drawn: 0,
+            specialise: true,
             states: None,
             draw_time: std::time::Duration::ZERO,
             busy: std::time::Duration::ZERO,
@@ -178,6 +187,20 @@ impl Default for Gs {
 impl Gs {
     /// Writes general-purpose register `address` (as A+D does).
     pub fn write(&mut self, address: u8, value: u64) {
+        // Every register but a vertex's may change how primitives draw.
+        if !matches!(
+            address,
+            addr::RGBAQ
+                | addr::ST
+                | addr::UV
+                | addr::FOG
+                | addr::XYZF2
+                | addr::XYZF3
+                | addr::XYZ2
+                | addr::XYZ3
+        ) {
+            self.pipe_cache = None;
+        }
         match address {
             addr::PRIM => {
                 self.prim = value & 0x7FF;
@@ -361,6 +384,7 @@ impl Gs {
         // from.
         self.before_clut_load(t);
         self.clut_shared = None;
+        self.pipe_cache = None;
         let cpsm = match t.cpsm {
             0 | 1 => Psm::Ct32,
             0xA => Psm::Ct16s,

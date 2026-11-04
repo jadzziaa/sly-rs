@@ -61,9 +61,37 @@ pub(crate) struct Pipe {
     pabe: bool,
     scanmsk: u32,
     clut: Arc<[u16; 512]>,
+    /// The state most of Sly's pixels are drawn in (see [`Pipe::is_hot`]):
+    /// its triangles take the pipeline specialised to it.
+    hot: bool,
 }
 
 impl Pipe {
+    /// Whether this is the state the specialised pipeline (`HOT`) is for:
+    /// a CLUT texture, bilinear, modulated with its alpha; blending, fog
+    /// and Gouraud colour; a 32-bit frame written whole; no destination
+    /// alpha test, antialiasing or scan mask. Depth, the alpha test, the
+    /// blend's inputs and the CLUT's format stay as they are.
+    fn is_hot(&self) -> bool {
+        self.tme
+            && self.linear
+            && self.tex.tfx == 0
+            && self.tex.tcc
+            && matches!(
+                self.tex_psm,
+                Some(Psm::T8 | Psm::T4 | Psm::T8h | Psm::T4hl | Psm::T4hh)
+            )
+            && self.tex_layout.is_some()
+            && bits(self.test, 14, 1) == 0
+            && self.abe
+            && self.fge
+            && !self.aa1
+            && self.iip
+            && self.frame.0 == Psm::Ct32
+            && self.fbmsk == 0
+            && self.scanmsk == 0
+    }
+
     /// The state bits that decide which parts of the pipeline run, for
     /// reports.
     pub(crate) fn state(&self, kind: u64) -> String {
@@ -155,7 +183,7 @@ impl Wrap {
 /// inclusive; inside the scissor).
 #[derive(Clone)]
 pub(crate) struct Prim {
-    pub(crate) pipe: Pipe,
+    pub(crate) pipe: Arc<Pipe>,
     kind: u64,
     v: [Vertex; 3],
     pub(crate) bbox: [i32; 4],
@@ -276,6 +304,18 @@ struct Frag {
 }
 
 impl Gs {
+    /// Whether the texture filter depends on RGBAQ's Q (LOD from Q, not
+    /// LCM, with STQ coordinates): see [`Gs::pipe`].
+    fn filter_uses_q(&self) -> bool {
+        let attrs = if self.prmodecont & 1 != 0 {
+            self.prim
+        } else {
+            self.prmode
+        };
+        let c = &self.ctx[bits(attrs, 9, 1) as usize];
+        bits(c.tex1, 0, 1) == 0 && bits(attrs, 8, 1) == 0
+    }
+
     fn pipe(&mut self) -> Pipe {
         let attrs = if self.prmodecont & 1 != 0 {
             self.prim
@@ -348,6 +388,7 @@ impl Gs {
             pabe: bits(self.pabe, 0, 1) != 0,
             scanmsk: bits(self.scanmsk, 0, 2),
             clut: Arc::clone(self.clut_shared.get_or_insert_with(|| Arc::new(self.clut))),
+            hot: false,
         }
     }
 
@@ -356,9 +397,20 @@ impl Gs {
     pub(crate) fn draw(&mut self, v: &[Vertex]) {
         self.drawn += 1;
         let started = std::time::Instant::now();
-        let mut pipe = self.pipe();
         let kind = self.prim & 7;
-        pipe.aa1 &= matches!(kind, 1..=5);
+        let q = (self.rgbaq >> 32) as u32;
+        let pipe = match &self.pipe_cache {
+            Some((pipe, uses)) if uses.is_none_or(|used| used == q) => Arc::clone(pipe),
+            _ => {
+                let mut pipe = self.pipe();
+                pipe.aa1 &= matches!(kind, 1..=5);
+                pipe.hot = self.specialise && pipe.is_hot();
+                let pipe = Arc::new(pipe);
+                let uses = self.filter_uses_q().then_some(q);
+                self.pipe_cache = Some((Arc::clone(&pipe), uses));
+                pipe
+            }
+        };
         let mut vertices = [Vertex::default(); 3];
         vertices[..v.len()].copy_from_slice(v);
         if let Some(bbox) = bounds(&pipe, kind, &vertices) {
@@ -404,10 +456,11 @@ fn point(pos: (i32, i32)) -> (i32, i32) {
 /// its scissor; `None` if there are none.
 fn bounds(p: &Pipe, kind: u64, v: &[Vertex; 3]) -> Option<[i32; 4]> {
     let at = |v: &Vertex| (v.x as i32 - p.offset.0, v.y as i32 - p.offset.1);
-    let pos: Vec<(i32, i32)> = match kind {
-        0 => vec![at(&v[0])],
-        1 | 2 | 6 => vec![at(&v[0]), at(&v[1])],
-        _ => vec![at(&v[0]), at(&v[1]), at(&v[2])],
+    let all = [at(&v[0]), at(&v[1]), at(&v[2])];
+    let pos = match kind {
+        0 => &all[..1],
+        1 | 2 | 6 => &all[..2],
+        _ => &all[..],
     };
     let (min_x, max_x) = (
         pos.iter().map(|q| q.0).min()?,
@@ -470,12 +523,19 @@ impl Raster<'_> {
             0 => {
                 let (x, y) = point(at(&v[0]));
                 if (clip[0]..=clip[1]).contains(&x) && (clip[2]..=clip[3]).contains(&y) {
-                    self.fragment(p, x, y, attrs(p, &v[0]));
+                    self.fragment::<false>(p, x, y, attrs(p, &v[0]));
                 }
             }
             1 | 2 if p.aa1 => self.aa_line(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
             1 | 2 => self.line(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
-            3..=5 => self.triangle(p, clip, [at(&v[0]), at(&v[1]), at(&v[2])], v),
+            3..=5 => {
+                let pos = [at(&v[0]), at(&v[1]), at(&v[2])];
+                if p.hot {
+                    self.triangle::<true>(p, clip, pos, v);
+                } else {
+                    self.triangle::<false>(p, clip, pos, v);
+                }
+            }
             _ => self.sprite(p, clip, at(&v[0]), at(&v[1]), &v[0], &v[1]),
         }
     }
@@ -525,12 +585,19 @@ impl Raster<'_> {
         for y in py0..py1 {
             let v = at(v0, v1, y0, y1, y * 16);
             for (x, &u) in (px0..px1).zip(&us) {
-                self.fragment(p, x, y, Frag { uv: (u, v), ..fb });
+                self.fragment::<false>(p, x, y, Frag { uv: (u, v), ..fb });
             }
         }
     }
 
-    fn triangle(&self, p: &Pipe, clip: [i32; 4], pos: [(i32, i32); 3], v: &[Vertex; 3]) {
+    /// A triangle; `HOT` when `p` is in the specialised state.
+    fn triangle<const HOT: bool>(
+        &self,
+        p: &Pipe,
+        clip: [i32; 4],
+        pos: [(i32, i32); 3],
+        v: &[Vertex; 3],
+    ) {
         // The last vertex gives flat colour; keep it before reordering.
         let f = [attrs(p, &v[0]), attrs(p, &v[1]), attrs(p, &v[2])];
         let last = f[2];
@@ -597,7 +664,7 @@ impl Raster<'_> {
                 } else {
                     weighted_depth(w, f.map(|v| v.z), area)
                 };
-                let rgba = if p.iip {
+                let rgba = if HOT || p.iip {
                     std::array::from_fn(|k| {
                         exact(
                             f[0].rgba[k].into(),
@@ -609,12 +676,12 @@ impl Raster<'_> {
                     last.rgba
                 };
                 let fog = exact(f[0].f.into(), f[1].f.into(), f[2].f.into()) as i32;
-                let uv = if p.tme {
+                let uv = if HOT || p.tme {
                     tex_coords(p, &f, w.map(|e| e as f64 * inv), (tw, th))
                 } else {
                     (0.0, 0.0)
                 };
-                self.fragment(
+                self.fragment::<HOT>(
                     p,
                     x,
                     y,
@@ -628,7 +695,7 @@ impl Raster<'_> {
                 );
             }
         }
-        if p.aa1 {
+        if !HOT && p.aa1 {
             self.aa_edges(p, clip, given_pos, &given, &last);
         }
     }
@@ -646,7 +713,7 @@ impl Raster<'_> {
         crate::aa::triangle(pos, p.scissor, &mut |e| {
             if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
                 let frag = edge_frag(p, &given[e.from], &given[e.to], e.t, last);
-                self.fragment(
+                self.fragment::<false>(
                     p,
                     e.x,
                     e.y,
@@ -674,7 +741,7 @@ impl Raster<'_> {
         crate::aa::line(a, b, p.scissor, &mut |e| {
             if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
                 let frag = edge_frag(p, &fa, &fb, e.t, &fb);
-                self.fragment(
+                self.fragment::<false>(
                     p,
                     e.x,
                     e.y,
@@ -719,7 +786,7 @@ impl Raster<'_> {
                 fa.uv.0 + (fb.uv.0 - fa.uv.0) * t,
                 fa.uv.1 + (fb.uv.1 - fa.uv.1) * t,
             );
-            self.fragment(
+            self.fragment::<false>(
                 p,
                 px,
                 py,
@@ -735,13 +802,17 @@ impl Raster<'_> {
     }
 
     /// The texel at (`u`, `v`), already wrapped, as RGBA8888.
-    fn texel(&self, p: &Pipe, u: i32, v: i32) -> u32 {
+    fn texel<const HOT: bool>(&self, p: &Pipe, u: i32, v: i32) -> u32 {
         let (Some(psm), Some(layout)) = (p.tex_psm, &p.tex_layout) else {
             return 0;
         };
         let raw = self
             .mem
             .get(layout.locate((u & 0x7FF) as u32, (v & 0x7FF) as u32));
+        if HOT {
+            // A CLUT format.
+            return clut_color(&p.clut, p.texa, &p.tex, raw);
+        }
         match psm {
             Psm::Ct32 | Psm::Z32 => raw,
             Psm::Ct24 | Psm::Z24 => expand24(p.texa, raw),
@@ -750,13 +821,13 @@ impl Raster<'_> {
         }
     }
 
-    fn sample(&self, p: &Pipe, (u, v): (f32, f32)) -> [i32; 4] {
+    fn sample<const HOT: bool>(&self, p: &Pipe, (u, v): (f32, f32)) -> [i32; 4] {
         let channels =
             |c: u32| [c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, c >> 24].map(|x| x as i32);
         let [wu, wv] = &p.wrap;
-        if !p.linear {
+        if !HOT && !p.linear {
             let (u, v) = (wu.apply(u.floor() as i32), wv.apply(v.floor() as i32));
-            return channels(self.texel(p, u, v));
+            return channels(self.texel::<HOT>(p, u, v));
         }
         // Bilinear, with 4-bit weights: across, then down, each step
         // truncated (as PCSX2's software renderer does).
@@ -771,20 +842,20 @@ impl Raster<'_> {
         );
         // A zero weight takes nothing from the texel it weighs (`lerp(a, b,
         // 0)` is `a`), so that texel is not fetched.
-        let t00 = channels(self.texel(p, u0, v0));
+        let t00 = channels(self.texel::<HOT>(p, u0, v0));
         let t10 = if fu == 0 {
             t00
         } else {
-            channels(self.texel(p, u1, v0))
+            channels(self.texel::<HOT>(p, u1, v0))
         };
         let (t01, t11) = if fv == 0 {
             (t00, t10)
         } else {
-            let t01 = channels(self.texel(p, u0, v1));
+            let t01 = channels(self.texel::<HOT>(p, u0, v1));
             let t11 = if fu == 0 {
                 t01
             } else {
-                channels(self.texel(p, u1, v1))
+                channels(self.texel::<HOT>(p, u1, v1))
             };
             (t01, t11)
         };
@@ -815,24 +886,29 @@ impl Raster<'_> {
 
     /// One fragment through the pixel pipeline.
     #[allow(clippy::too_many_lines, reason = "the pipeline in hardware order")]
-    fn fragment(&self, p: &Pipe, x: i32, y: i32, frag: Frag) {
+    ///
+    /// `HOT` when `p` is in the specialised state ([`Pipe::is_hot`]): what
+    /// that state decides is a constant, the rest as for any state.
+    fn fragment<const HOT: bool>(&self, p: &Pipe, x: i32, y: i32, frag: Frag) {
         if x < 0 || y < 0 {
             return;
         }
-        match p.scanmsk {
-            2 if y & 1 == 0 => return,
-            3 if y & 1 == 1 => return,
-            _ => {}
+        if !HOT {
+            match p.scanmsk {
+                2 if y & 1 == 0 => return,
+                3 if y & 1 == 1 => return,
+                _ => {}
+            }
         }
         let (x, y) = (x as u32, y as u32);
         // The tests that need no texture first, so a fragment they reject
         // costs no sampling; the result is the same in either order.
         let t = p.test;
-        let (fpsm, _, _) = p.frame;
+        let fpsm = if HOT { Psm::Ct32 } else { p.frame.0 };
         let at = p.frame_layout.locate(x, y);
         let dst = self.mem.get(at);
         // Destination alpha test.
-        if bits(t, 14, 1) != 0 {
+        if !HOT && bits(t, 14, 1) != 0 {
             let bit = match fpsm {
                 Psm::Ct32 => dst >> 31,
                 Psm::Ct16 | Psm::Ct16s => (dst >> 15) & 1,
@@ -865,11 +941,11 @@ impl Raster<'_> {
             depth = Some((z_at, z));
         }
         let mut c = frag.rgba;
-        if p.tme {
-            let t = self.sample(p, frag.uv);
-            let (tcc, va) = (p.tex.tcc, c[3]);
+        if HOT || p.tme {
+            let t = self.sample::<HOT>(p, frag.uv);
+            let (tcc, va) = (HOT || p.tex.tcc, c[3]);
             let modulate = |t: i32, v: i32| ((t * v) >> 7).min(255);
-            match p.tex.tfx {
+            match if HOT { 0 } else { p.tex.tfx } {
                 0 => {
                     for k in 0..3 {
                         c[k] = modulate(t[k], c[k]);
@@ -894,7 +970,7 @@ impl Raster<'_> {
                 }
             }
         }
-        if p.aa1 {
+        if !HOT && p.aa1 {
             // Coverage alpha (as PCSX2's software renderer): an edge's
             // share of the pixel, else 0x80; it replaces alpha, or with
             // blending on only an alpha of 0x80.
@@ -903,7 +979,7 @@ impl Raster<'_> {
                 c[3] = a;
             }
         }
-        if p.fge {
+        if HOT || p.fge {
             let fc = [
                 bits(p.fogcol, 0, 8),
                 bits(p.fogcol, 8, 8),
@@ -957,7 +1033,7 @@ impl Raster<'_> {
         };
         let dc = [d & 0xFF, (d >> 8) & 0xFF, (d >> 16) & 0xFF, d >> 24].map(|v| v as i32);
         // AA1 blends (with ALPHA) even without ABE, as PCSX2 does.
-        if (p.abe || p.aa1) && (!p.pabe || c[3] & 0x80 != 0) {
+        if (HOT || p.abe || p.aa1) && (!p.pabe || c[3] & 0x80 != 0) {
             let a = p.alpha;
             let cs = c;
             let pick = |sel: u32, k: usize| match sel {
@@ -990,10 +1066,11 @@ impl Raster<'_> {
             a |= 0x80;
         }
         let rgba = c[0] as u32 | (c[1] as u32) << 8 | (c[2] as u32) << 16 | a << 24;
+        let fbmsk = if HOT { 0 } else { p.fbmsk };
         let (new, mask) = match fpsm {
-            Psm::Ct16 | Psm::Ct16s => (pack16(rgba), pack16(p.fbmsk)),
-            Psm::Ct24 => (rgba & 0x00FF_FFFF, p.fbmsk | 0xFF00_0000),
-            _ => (rgba, p.fbmsk),
+            Psm::Ct16 | Psm::Ct16s => (pack16(rgba), pack16(fbmsk)),
+            Psm::Ct24 => (rgba & 0x00FF_FFFF, fbmsk | 0xFF00_0000),
+            _ => (rgba, fbmsk),
         };
         self.mem.set(at, (new & !mask) | (dst & mask));
     }
@@ -1236,7 +1313,7 @@ mod tests {
                         Raster {
                             mem: &reference.mem,
                         }
-                        .fragment(&p, x as i32, y as i32, frag);
+                        .fragment::<false>(&p, x as i32, y as i32, frag);
                     }
                     assert!(
                         gs.mem.to_bytes() == reference.mem.to_bytes(),
@@ -1245,6 +1322,113 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Triangles in the specialised state ([`super::Pipe::is_hot`]) draw
+    /// what the general pipeline draws, over random memory and CLUTs: every
+    /// CLUT texture format and CLUT format, wrap modes, UV and STQ, depth
+    /// formats and tests, alpha tests, blend inputs, PABE, COLCLAMP, FBA.
+    #[test]
+    fn the_specialised_pipeline_draws_what_the_general_one_draws() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut changed = 0;
+        for case in 0..48u64 {
+            let random: Vec<u8> = (0..crate::mem::SIZE).map(|_| next() as u8).collect();
+            let clut: Vec<u16> = (0..512).map(|_| next() as u16).collect();
+            let tex_psm = [0x13u64, 0x14, 0x1B, 0x24, 0x2C][(case % 5) as usize];
+            let cpsm = if case % 3 == 0 { 2u64 } else { 0 };
+            let zpsm = [0u64, 1, 2, 0xA][(case % 4) as usize];
+            let ztst = 1 + next() % 3;
+            let ate = match case % 4 {
+                0 => 0,
+                1 => 1 | 3 << 12,
+                2 => 1 | 5 << 1 | 0x40 << 4 | 1 << 12,
+                _ => 1 | (next() % 8) << 1 | (next() % 256) << 4 | (next() % 4) << 12,
+            };
+            let regs = [
+                (addr::FRAME_1, 1 << 16),
+                (addr::SCISSOR_1, 63 << 16 | 63 << 48),
+                (addr::ZBUF_1, 0x40 | zpsm << 24 | (next() % 2) << 32),
+                (addr::TEST_1, ate | 1 << 16 | ztst << 17),
+                (addr::ALPHA_1, next() & 0xFF | (next() % 256) << 32),
+                (
+                    addr::TEX0_1,
+                    0x80 | 2 << 14
+                        | tex_psm << 20
+                        | 5 << 26
+                        | 5 << 30
+                        | 1 << 34
+                        | 0x100 << 37
+                        | cpsm << 51
+                        | (next() % 32) << 56,
+                ),
+                (addr::TEX1_1, 1 | 1 << 5),
+                // Region bounds in order (min above max is another matter).
+                (addr::CLAMP_1, {
+                    let (u0, v0) = (next() % 16, next() % 16);
+                    next() & 0xF
+                        | u0 << 4
+                        | (u0 + next() % 16) << 14
+                        | v0 << 24
+                        | (v0 + next() % 16) << 34
+                }),
+                (
+                    addr::TEXA,
+                    next() & 0xFF | (next() % 2) << 15 | (next() % 256) << 32,
+                ),
+                (addr::FOGCOL, next() & 0xFF_FFFF),
+                (addr::PABE, next() % 2),
+                (addr::COLCLAMP, next() % 2),
+                (addr::FBA_1, next() % 2),
+            ];
+            let fst = next() % 2;
+            let prim = 3 | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 | fst << 8;
+            let vertices: Vec<[u64; 5]> = (0..3 * 8)
+                .map(|_| {
+                    let q = 0.5 + (next() % 100) as f32 / 50.0;
+                    [
+                        next() & 0xFFFF_FFFF | u64::from(q.to_bits()) << 32,
+                        u64::from(((next() % 64) as f32 * q / 32.0).to_bits())
+                            | u64::from(((next() % 64) as f32 * q / 32.0).to_bits()) << 32,
+                        (next() % (40 * 16)) | (next() % (40 * 16)) << 16,
+                        (next() % 256) << 56,
+                        (next() % (64 * 16))
+                            | (next() % (64 * 16)) << 16
+                            | (next() & 0xFFFF_FFFF) << 32,
+                    ]
+                })
+                .collect();
+            let draw = |specialise: bool| {
+                let mut gs = Gs::default();
+                gs.mem.load_bytes(&random);
+                gs.clut.copy_from_slice(&clut);
+                gs.specialise = specialise;
+                for &(reg, value) in &regs {
+                    gs.write(reg, value);
+                }
+                gs.write(addr::PRIM, prim);
+                assert!(!specialise || gs.pipe().is_hot(), "case {case}");
+                for v in &vertices {
+                    gs.write(addr::RGBAQ, v[0]);
+                    gs.write(addr::ST, v[1]);
+                    gs.write(addr::UV, v[2]);
+                    gs.write(addr::FOG, v[3]);
+                    gs.write(addr::XYZ2, v[4]);
+                }
+                gs.mem.to_bytes()
+            };
+            let drawn = draw(true);
+            assert!(drawn == draw(false), "case {case}");
+            changed += usize::from(drawn != random);
+        }
+        // Depth and alpha tests reject some cases whole, but not most.
+        assert!(changed >= 36, "{changed} of 48 cases drew anything");
     }
 
     /// A GS drawing to a 64-pixel-wide CT32 frame at block 0, scissor wide
