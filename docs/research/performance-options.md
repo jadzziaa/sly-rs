@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T08:40:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T09:50:27Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -60,6 +60,27 @@ Gains are estimates from the measurements above, to be checked by
 | 5 | **Present on the GPU**: one device for the GS and the window; deinterlacing and scaling in a shader; no per-field read-back | drawer and window threads | 5 MB read back and 10 MB uploaded a field at 3× go, with 3.8 ms of deinterlacing | medium; pictures only, nothing the game sees |
 | 6 | **Weak GPUs**: shade only covered pixels (compact them per tile first, as paraLLEl-GS does), and cheaper setup per triangle | the GPU | perhaps 3-5× on the integrated Radeon, making such GPUs usable | medium to large; checked by `gs-replay --gpu` on the thirteen dumps and the random test |
 | 7 | **One GPU submission a field** instead of about thirty | drawer thread | small | small |
+
+## Done
+
+**1, profile-guided optimisation** (2026-11-04): `cargo xtask recomp
+sly1 --pgo games/sly1/replays/new-game.toml` builds an instrumented
+binary, plays the new-game replay on it drawing on the CPU and on the
+GPU (two drawing threads: with sixteen, their updates of the same
+counters made the instrumented binary crawl), merges the counts with
+`llvm-profdata` and builds the release binary with them; about nine
+minutes. Measured on the user's prologue, which it was not trained on,
+with the same state hash at the end:
+
+| | Without | With PGO |
+| --- | --- | --- |
+| GPU drawing, whole prologue | 229.1 s, 223.3 s | 204.3 s |
+| GPU drawing, slowest stretches | 106-110% of NTSC (15.1-15.7 ms a field) | 120% (13.9 ms) |
+| Software drawing, whole prologue | 308.8 s | 298.6 s |
+| Software drawing, stretches below NTSC | 12 (slowest 87%) | 10 (slowest 89%) |
+
+With the GPU drawing, the slowest stretches now have the GS thread 93-95%
+busy: it is the limit next, as foreseen, so 2 comes next.
 
 ## Recommendation
 

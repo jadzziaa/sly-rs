@@ -15,6 +15,14 @@
 //! rebuilds only the crates that moved. `--build` then builds the binary in
 //! release mode and reports the time; `--check` also runs the phase 4 gate,
 //! the binary's `lockstep` against the interpreter for 300 fields.
+//!
+//! `--pgo REPLAY` (repeatable, implies `--build`) builds it with
+//! profile-guided optimisation: an instrumented build (in
+//! `target/pgo/build/`) plays each replay twice, drawing on the CPU and on
+//! the GPU, `llvm-profdata` (or `$LLVM_PROFDATA`, of the LLVM rustc uses)
+//! merges the counts into `target/pgo/game.profdata`, and the release
+//! binary is built with them. The code is the same, so the binary's
+//! results are too; only its speed changes.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -61,12 +69,27 @@ fn chunks(functions: &[Function]) -> Vec<Vec<&Function>> {
     chunks
 }
 
-pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
-    let usage = "usage: cargo xtask recomp <sly1|sly2|sly3> [--build | --check]";
+/// What `recomp` was asked for: the game, whether to check and to build,
+/// and the replays to train profile-guided optimisation on.
+fn options(args: &[String]) -> Result<(Game, bool, bool, Vec<&Path>)> {
+    let usage = "usage: cargo xtask recomp <sly1|sly2|sly3> [--build | --check] [--pgo REPLAY]...";
     let key = args.first().context(usage)?;
     let game = Game::from_key(key).with_context(|| format!("unknown game {key:?}; {usage}"))?;
     let check = args.iter().any(|a| a == "--check");
-    let build = check || args.iter().any(|a| a == "--build");
+    let pgo: Vec<&Path> = args
+        .windows(2)
+        .filter(|w| w[0] == "--pgo")
+        .map(|w| Path::new(&w[1]))
+        .collect();
+    if args.last().is_some_and(|a| a == "--pgo") {
+        bail!("--pgo takes a replay; {usage}");
+    }
+    let build = check || !pgo.is_empty() || args.iter().any(|a| a == "--build");
+    Ok((game, check, build, pgo))
+}
+
+pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
+    let (game, check, build, pgo) = options(args)?;
 
     let started = Instant::now();
     let (image, _) = sly_common::machine::executable(game)?;
@@ -165,9 +188,87 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     );
 
     if build {
-        build_and_check(&dir, game, check)?;
+        let profile = if pgo.is_empty() {
+            None
+        } else {
+            Some(train(&dir, game, &pgo)?)
+        };
+        build_and_check(&dir, game, check, profile.as_deref())?;
     }
     Ok(())
+}
+
+/// The flags every build of the generated workspace takes (as
+/// `.cargo/config.toml` gives them, which `RUSTFLAGS` replaces).
+const NATIVE_FLAGS: &str = "-Ctarget-cpu=native";
+
+/// Profile-guided optimisation's first half: builds the binary instrumented,
+/// plays each of `replays` on it drawing on the CPU and on the GPU, and
+/// merges the counts. Returns the merged profile.
+fn train(dir: &Path, game: Game, replays: &[&Path]) -> Result<std::path::PathBuf> {
+    let pgo = dir.join("target/pgo");
+    let raw = pgo.join("raw");
+    if raw.exists() {
+        std::fs::remove_dir_all(&raw).context("clearing old profiles")?;
+    }
+    std::fs::create_dir_all(&raw).context("creating target/pgo/raw")?;
+    let started = Instant::now();
+    let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()))
+        .args(["build", "--release", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .current_dir(dir)
+        .env(
+            "RUSTFLAGS",
+            format!("{NATIVE_FLAGS} -Cprofile-generate={}", raw.display()),
+        )
+        .env("CARGO_TARGET_DIR", pgo.join("build"))
+        .status()
+        .context("running cargo build")?;
+    if !status.success() {
+        bail!("the instrumented build failed");
+    }
+    eprintln!(
+        "== built the instrumented binary in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    let binary = pgo.join("build/release").join(game.key());
+    for replay in replays {
+        for gpu in [false, true] {
+            eprintln!(
+                "== training: replay {}{}",
+                replay.display(),
+                if gpu { " --gpu" } else { "" }
+            );
+            // Two drawing threads: with many, the threads' updates of the
+            // same counters make the instrumented binary crawl.
+            let mut run = Command::new(&binary);
+            run.arg("replay").arg(replay).env("SLY_RS_GS_THREADS", "2");
+            if gpu {
+                run.arg("--gpu");
+            }
+            let status = run
+                .status()
+                .with_context(|| format!("running {}", binary.display()))?;
+            if !status.success() {
+                // Without a GPU the GPU's code goes untrained; the rest is.
+                eprintln!("== that run failed: its counts are left out");
+            }
+        }
+    }
+    let profile = pgo.join("game.profdata");
+    let tool = std::env::var("LLVM_PROFDATA").unwrap_or_else(|_| "llvm-profdata".to_owned());
+    let status = Command::new(&tool)
+        .args(["merge", "-o"])
+        .arg(&profile)
+        .arg(&raw)
+        .status()
+        .with_context(|| {
+            format!("running {tool} (set LLVM_PROFDATA to the one of rustc's LLVM)")
+        })?;
+    if !status.success() {
+        bail!("{tool} could not merge the profiles");
+    }
+    Ok(profile)
 }
 
 /// The generated workspace's Cargo configuration: this machine's CPU, for
@@ -253,17 +354,24 @@ pub(crate) fn replay(root: &Path, game: Game, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Builds the generated binary in release mode and, with `check`, runs it
-/// in lockstep with the interpreter for 300 fields.
-fn build_and_check(dir: &Path, game: Game, check: bool) -> Result<()> {
+/// Builds the generated binary in release mode (optimised with `profile`
+/// if given) and, with `check`, runs it in lockstep with the interpreter
+/// for 300 fields.
+fn build_and_check(dir: &Path, game: Game, check: bool, profile: Option<&Path>) -> Result<()> {
     let started = Instant::now();
     // From the workspace's directory, so Cargo reads its configuration.
-    let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()))
+    let mut cargo = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()));
+    cargo
         .args(["build", "--release", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))
-        .current_dir(dir)
-        .status()
-        .context("running cargo build")?;
+        .current_dir(dir);
+    if let Some(profile) = profile {
+        cargo.env(
+            "RUSTFLAGS",
+            format!("{NATIVE_FLAGS} -Cprofile-use={}", profile.display()),
+        );
+    }
+    let status = cargo.status().context("running cargo build")?;
     if !status.success() {
         bail!("building {} failed", dir.display());
     }

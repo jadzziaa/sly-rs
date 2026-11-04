@@ -76,7 +76,11 @@ Commands so far:
   `generated/sly1/target/release/sly1`: the same command line with the game's
   code compiled. Its `run` uses the generated code (`--interpret` for the
   interpreter alone), and `lockstep` runs both side by side and compares
-  them at every field.
+  them at every field. `cargo xtask recomp sly1 --pgo
+  games/sly1/replays/new-game.toml` builds it with profile-guided
+  optimisation instead, trained on that replay (about nine minutes; it
+  needs `llvm-profdata` of rustc's LLVM version): the same results, about
+  10% faster with the GPU drawing.
 
 ## Development
 
