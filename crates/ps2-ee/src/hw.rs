@@ -26,6 +26,10 @@ pub mod intc {
     pub const VBLANK_END: u32 = 3;
 }
 
+/// Words of a VIF1 transfer the shadow reads before handing them to VU1's
+/// thread.
+const VIF1_PIECE: usize = 4096;
+
 /// DMA channels by number, with their register bases.
 pub const DMA_CHANNELS: [(u32, &str); 10] = [
     (0x1000_8000, "VIF0"),
@@ -344,8 +348,10 @@ impl Hardware {
         let before = chain.cycles();
         let started = std::time::Instant::now();
         let mut words = Vec::with_capacity(4);
-        // Everything the shadow reads, for the real VIF1.
+        // Everything the shadow reads, for the real VIF1: handed over in
+        // pieces, so that VU1's thread starts on them at once.
         let mut sent = Vec::new();
+        let mut last = None;
         let interrupt = loop {
             match self.run_shadow() {
                 ps2_vu::vif::Stop::NeedData => {
@@ -363,6 +369,9 @@ impl Hardware {
                     }
                     self.vif1.push(&words);
                     sent.extend_from_slice(&words);
+                    if sent.len() >= VIF1_PIECE {
+                        last = Some(self.gs.vif(std::mem::take(&mut sent)));
+                    }
                     if ended {
                         break false;
                     }
@@ -371,7 +380,9 @@ impl Hardware {
                 ps2_vu::vif::Stop::Stalled => {
                     self.vif1_chain = Some(chain);
                     if !sent.is_empty() {
-                        let job = self.gs.vif(sent);
+                        last = Some(self.gs.vif(sent));
+                    }
+                    if let Some(job) = last {
                         self.vif1_jobs.push((job, self.clock.get()));
                     }
                     self.timing.vif1 += started.elapsed();

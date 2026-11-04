@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:51:34Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:03:37Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -166,6 +166,43 @@ In the slowest stretch (fields 9,600-9,900) the machine waits for VU1's
 thread 57% of the time while that thread is busy only 77%: the waits are
 not all for VU1's work, which is where to look next, with the shadow VIF1
 (13% of the machine thread).
+
+**The machine's waits for VU1's thread** (2026-11-04). `replay --timing`
+now splits them: at V-blank for PATH1's events, and to read VU1's
+memories. In fields 9,600-9,900 (without PGO) the machine waited 50% of
+the time, 30% at V-blank and 19% to read; the reads are Sly's
+`VU1_Interrupt` handler, which a VIF1 interrupt code starts in the middle
+of each frame's chain and which reads back what VU1's programs computed,
+a dependency the EE must keep. Both waits were longer than they needed to
+be: the shadow VIF1 handed VU1's thread a transfer only once it had read
+all of it (up to the interrupt or the end), so VU1 sat idle while the
+shadow read. It now hands the words over 4,096 at a time, and VU1 starts
+on them at once. VU1's thread itself got faster at VIF1's work: commands
+read their data where it lies in the FIFO instead of copying it out
+(2 ns a word before), the thread takes each piece without a copy, and
+unmasked UNPACKs in MODE 0 without filling (V3-32, V4-32, V4-16, V4-8:
+nearly all of Sly's) write memory directly instead of through the general
+loop (5.6 ns a vector before), checked against it by a test. Nothing the
+game sees changes: the prologue ends on the same hash, and lockstep, the
+new-game replay and the full tests are unchanged.
+
+| | Before | After |
+| --- | --- | --- |
+| Whole prologue, without PGO (the same machine, in turn) | 196.7 s | 150.4 s |
+| Fields 9,600-9,900, without PGO | 14.5 ms a field (115% of NTSC) | 11.1 ms (151%) |
+| Whole prologue, PGO | 148.6 s | 132.3 s |
+| The median stretch, PGO | 235% of NTSC | 274% |
+| The machine waiting for VU1's thread, PGO | 41.5% | 33.0% (at V-blanks 36.5 s, to read 7.2 s) |
+| VU1's thread and the GS thread busy, PGO | 81.7%, 74.1% | 92.4%, 90.5% |
+
+Another session's builds loaded the machine during these runs (load
+average 8 to 34), so single stretches moved by up to a quarter between
+runs; the comparisons above were made in turn on the same machine. VU1's
+thread and the GS thread are now the limits together: the stretches the
+GS thread holds at 97% busy run at 165-175% of NTSC. VU1's thread waited
+for the GS 7.2 s (0.2 s before), so the next gains are in the GS thread
+(see [performance-prior-art.md](performance-prior-art.md): triangle setup
+on the GPU) and in VU1's programs.
 
 ## Recommendation
 

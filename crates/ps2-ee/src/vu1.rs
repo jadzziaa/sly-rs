@@ -153,6 +153,9 @@ pub struct Remote {
     /// Host time the EE waited for the thread (room in its queue, or
     /// work before a look at VU1 or the GS).
     pub waited: Duration,
+    /// The same by what the EE waited for: room in the queue, PATH1's
+    /// events at V-blank, a look (reading VU1's memories, the GS).
+    pub waits: [Duration; 3],
     /// The thread's own figures.
     pub stats: Arc<Stats>,
 }
@@ -179,7 +182,7 @@ impl Default for Remote {
                     let (programs, gs_waited) = (vu1.vif.run_time, vu1.gs.waited);
                     match job {
                         Job::Vif(words) => {
-                            vu1.vif.push(&words);
+                            vu1.vif.push_vec(words);
                             vu1.run_vif();
                         }
                         Job::VifWrite(offset, value) => vu1.vif.write(offset, value),
@@ -213,6 +216,7 @@ impl Default for Remote {
             scanner: Scanner::default(),
             dumping: false,
             waited: Duration::ZERO,
+            waits: [Duration::ZERO; 3],
             stats,
         }
     }
@@ -229,24 +233,27 @@ impl Remote {
                 let started = Instant::now();
                 let _ = jobs.send(job);
                 self.waited += started.elapsed();
+                self.waits[0] += started.elapsed();
             }
         }
-        self.collect(false);
+        self.collect(None);
         self.sent
     }
 
-    /// Takes the thread's reports: those ready, or (with `block`) the next.
-    fn collect(&mut self, block: bool) {
+    /// Takes the thread's reports: those ready, or (with a `block`, the
+    /// kind of wait it counts as) the next.
+    fn collect(&mut self, block: Option<usize>) {
         let mut take = |(number, events): (u64, Events)| {
             self.finished = number;
             if events != Events::default() {
                 self.path1.push_back((number, events));
             }
         };
-        if block {
+        if let Some(why) = block {
             let started = Instant::now();
             let report = self.done.recv();
             self.waited += started.elapsed();
+            self.waits[why] += started.elapsed();
             match report {
                 Ok(report) => take(report),
                 Err(mpsc::RecvError) => panic!("VU1's thread has stopped"),
@@ -257,10 +264,10 @@ impl Remote {
         }
     }
 
-    /// Waits until job `number` is done.
-    fn wait_for(&mut self, number: u64) {
+    /// Waits until job `number` is done, the wait counted as `why`.
+    fn wait_for(&mut self, number: u64, why: usize) {
         while self.finished < number {
-            self.collect(true);
+            self.collect(Some(why));
         }
     }
 
@@ -290,7 +297,7 @@ impl Remote {
         let number = self.send(Job::Call(Box::new(move |vu1| {
             let _ = sent.send(f(vu1));
         })));
-        self.wait_for(number);
+        self.wait_for(number, 2);
         match result.recv() {
             Ok(value) => value,
             Err(mpsc::RecvError) => panic!("VU1's thread has stopped"),
@@ -299,7 +306,7 @@ impl Remote {
 
     /// The PATH1 events of jobs up to `number`, once they are done.
     pub fn path1_events(&mut self, number: u64) -> Events {
-        self.wait_for(number);
+        self.wait_for(number, 1);
         let mut all = Events::default();
         while self.path1.front().is_some_and(|(n, _)| *n <= number) {
             if let Some((_, e)) = self.path1.pop_front() {

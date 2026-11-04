@@ -3,7 +3,7 @@ type: Finding
 title: VIF1 and VU1 on a thread of their own
 description: How sly-rs runs VIF1, VU1 and the GS's feed on their own thread while keeping replays exact - a shadow VIF1 on the EE's side, every GS-bound packet through one ordered queue, the few points where the EE waits - with the rule it changes (PATH1's GS events raised at the next V-blank), the checks and the measured gain.
 tags: [finding, performance, threads, vif, vu1, gs, determinism, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:03:30Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:03:44Z }
 sources:
   - id: counts
     resource: counters on generated/sly1 replay of an 8,000-field cut of the user's prologue (gameplay from field 3,644), 2026-11-04
@@ -31,7 +31,8 @@ interrupts, but starts no VU program, loads no micro code and unpacks
 only what changes its own registers (ROW in modes 2 and 3). None of
 VIF1's registers, nor how far a transfer gets, depends on what VU1 does,
 so the EE knows them as before, at once. The words the shadow read go to
-the thread in order.
+the thread in order, 4,096 at a time, so that VU1 starts on a transfer
+while the shadow is still reading it.
 
 Everything bound for the GS goes through the thread's queue too (PATH3
 from the GIF's DMA and FIFO, pictures, dumps), so the GS gets what it got
@@ -44,7 +45,7 @@ before, in the same order.
 | VIF1's registers, a transfer's end, its interrupt | from the shadow, at once |
 | GS events (SIGNAL, FINISH, LABEL) in PATH2 (DIRECT) and PATH3 | looked for on the EE's side, raised when the transfer ends, as before |
 | GS events in PATH1 (packets VU1 builds and kicks) | the thread looks for them; the EE raises them at the **first V-blank start after the transfer ends**, waiting for the thread there if need be |
-| VU1's memories (EE loads and stores) | through MMIO: a load waits for the thread, a store is queued |
+| VU1's memories (EE loads and stores) | through MMIO: a load waits for the thread, a store is queued; in Sly 1, the `VU1_Interrupt` handler's reads of what VU1 computed, once or twice a frame |
 | VU1's registers and memories for a state hash or a lockstep comparison | copied back, after the thread has run everything sent before |
 | VU1 programs the EE starts (CMSAR1) | queued |
 

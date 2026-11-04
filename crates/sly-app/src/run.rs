@@ -336,8 +336,12 @@ pub(crate) fn host_time(
     let (vu1_busy, programs_time, vu1_gs_wait, programs, pairs) = hw.gs.thread_times();
     writeln!(
         out,
-        "  the machine waited for VU1's thread {:.2} s; it finished at {:.2} s, the GS {:.2} s later",
+        "  the machine waited for VU1's thread {:.2} s ({:.2} s at V-blanks, {:.2} s to read, {:.2} s for room in its queue); \
+         it finished at {:.2} s, the GS {:.2} s later",
         s(hw.gs.waited),
+        s(hw.gs.waits[1]),
+        s(hw.gs.waits[2]),
+        s(hw.gs.waits[0]),
         s(machine_time),
         s(elapsed.saturating_sub(machine_time))
     )?;

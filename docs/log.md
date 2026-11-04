@@ -1,6 +1,8 @@
 # Update log
 
 ## 2026-11-04
+* **Creation**: [Performance techniques in rac-rs and paraLLEl-GS](research/performance-prior-art.md): what the two use that sly-rs does not yet, ranked; triangle setup on the GPU first.
+* **Update**: The shadow VIF1 hands VU1's thread its words 4,096 at a time, and VIF1 on that thread reads commands' data in place and unpacks the common formats directly: the prologue 132.3 s instead of 148.6 s (PGO), the machine's waits for VU1's thread split by cause in `replay --timing` ([performance-options.md](research/performance-options.md), [vu1-thread.md](research/vu1-thread.md)).
 * **Update**: The VU translator leaves out MAC flags nothing reads and operand checks a block's own results make needless: VU1's programs 9% faster in the prologue, the whole 148.6 s instead of 157.1 s ([vu-translation.md](research/vu-translation.md), [performance-options.md](research/performance-options.md)).
 * **Update**: GS batching on a thread of its own when the GPU alone draws: the prologue 157.1 s instead of 171.8 s, VU1's thread now the limit ([performance-options.md](research/performance-options.md), [vu1-thread.md](research/vu1-thread.md)).
 * **Creation**: [VIF1 and VU1 on a thread of their own](research/vu1-thread.md): the shadow VIF1, the ordered queue to the GS, where the EE waits, the PATH1 events rule; the prologue 171.8 s instead of 203.1 s with the same hash.

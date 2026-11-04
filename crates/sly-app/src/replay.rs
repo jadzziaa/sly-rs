@@ -43,8 +43,9 @@ fn advance(
     let mut started = std::time::Instant::now();
     // Host time so far: the machine waiting for VU1's thread, the GS
     // thread busy, VU1's thread busy and in VU1 programs, VIF1's shadow, VU
-    // calls from the EE, the IOP, the GS's batching thread busy. Reading
-    // the GS waits for all three threads.
+    // calls from the EE, the IOP, the GS's batching thread busy, the
+    // machine waiting at V-blank and for reads. Reading the GS waits for
+    // all three threads.
     let times = |machine: &ps2_ee::Machine| {
         let mut hw = machine.hw.borrow_mut();
         let (busy, (batching, _)) = hw.gs.with(|gs| (gs.busy, gs.batching_times()));
@@ -59,6 +60,8 @@ fn advance(
             t.vu_calls,
             t.iop,
             batching,
+            hw.gs.waits[1],
+            hw.gs.waits[2],
         ]
     };
     let mut before = times(machine);
@@ -82,11 +85,12 @@ fn advance(
             before = now;
             let (waited, busy, vu1, programs, shadow, calls, iop, batching) =
                 (d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+            let (at_vblank, reads) = (d[8], d[9]);
             let ee = 100.0 - shadow - calls - iop - waited;
             let state = Sly1State::read(&mut machine.mem);
             let (real, at) = (every as f64 / 59.94, field as f64 / 59.94);
             println!(
-                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC; VU1 thread busy {vu1:.0}% (programs {programs:.0}%), GS thread busy {busy:.0}%, its batching thread {batching:.0}%; the machine: waiting for VU1's thread {waited:.0}%, VIF1's shadow {shadow:.0}%, VU calls {calls:.0}%, IOP {iop:.0}%, the EE and the rest {ee:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
+                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC; VU1 thread busy {vu1:.0}% (programs {programs:.0}%), GS thread busy {busy:.0}%, its batching thread {batching:.0}%; the machine: waiting for VU1's thread {waited:.0}% ({at_vblank:.0}% at V-blank, {reads:.0}% to read), VIF1's shadow {shadow:.0}%, VU calls {calls:.0}%, IOP {iop:.0}%, the EE and the rest {ee:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
                 field - every,
                 took * 1000.0 / every as f64,
                 real * 100.0 / took,

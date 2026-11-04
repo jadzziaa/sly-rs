@@ -12,8 +12,6 @@
 //! element, fill cycles write the next vector's data again, and MODE 3
 //! sets ROW without adding.
 
-use std::collections::VecDeque;
-
 use ps2_gs::thread::Sink;
 
 use crate::{Memories, Regs, micro};
@@ -73,9 +71,9 @@ pub struct Vif {
     tops: u32,
     /// MSKPATH3.
     pub mask_path3: bool,
-    fifo: VecDeque<u32>,
-    /// The running command's data, a buffer kept between commands.
-    data: Vec<u32>,
+    /// The FIFO: the words from `head` on.
+    fifo: Vec<u32>,
+    head: usize,
     /// Commands run, for reports.
     pub commands: u64,
     /// VU programs started, for reports.
@@ -123,8 +121,8 @@ impl Vif {
             top: 0,
             tops: 0,
             mask_path3: false,
-            fifo: VecDeque::new(),
-            data: Vec::new(),
+            fifo: Vec::new(),
+            head: 0,
             commands: 0,
             programs: 0,
             run_time: std::time::Duration::ZERO,
@@ -153,16 +151,36 @@ impl Vif {
 
     /// Queues words from DMA.
     pub fn push(&mut self, words: &[u32]) {
-        self.fifo.extend(words);
+        if self.head > 0 {
+            self.fifo.drain(..self.head);
+            self.head = 0;
+        }
+        self.fifo.extend_from_slice(words);
+    }
+
+    /// Queues words from DMA, taking them without a copy when the FIFO is
+    /// empty.
+    pub fn push_vec(&mut self, words: Vec<u32>) {
+        if self.queued() == 0 {
+            self.fifo = words;
+            self.head = 0;
+        } else {
+            self.push(&words);
+        }
+    }
+
+    /// Words in the FIFO.
+    fn queued(&self) -> usize {
+        self.fifo.len() - self.head
     }
 
     /// Words the next command still waits for: its code and data less
     /// what the FIFO holds (at least one).
     #[must_use]
     pub fn missing(&self) -> usize {
-        match self.fifo.front() {
+        match self.fifo.get(self.head) {
             Some(&code) => (1 + self.data_words(code))
-                .saturating_sub(self.fifo.len())
+                .saturating_sub(self.queued())
                 .max(1),
             None => 1,
         }
@@ -179,7 +197,7 @@ impl Vif {
     #[must_use]
     pub fn read(&self, offset: u32) -> u32 {
         match offset {
-            0x00 => self.stat | ((self.fifo.len().div_ceil(4).min(16) as u32) << 24),
+            0x00 => self.stat | ((self.queued().div_ceil(4).min(16) as u32) << 24),
             0x20 => self.err,
             0x30 => self.mark,
             0x40 => self.cl | (self.wl << 8),
@@ -210,6 +228,7 @@ impl Vif {
                     // their values: Sly 1 resets VIF0 and relies on the
                     // CYCLE the BIOS left.
                     self.fifo.clear();
+                    self.head = 0;
                     self.err = 0;
                     self.mask_path3 = false;
                     self.stat = if self.vif1 {
@@ -269,32 +288,39 @@ impl Vif {
     /// Runs commands until the FIFO runs dry or a stall. `regs` and `mem`
     /// are the VU this VIF feeds.
     pub fn run(&mut self, regs: &mut Regs, mem: &mut Memories<'_>, gs: &mut dyn Sink) -> Stop {
-        loop {
+        // The commands read their data where it lies in the FIFO.
+        let fifo = std::mem::take(&mut self.fifo);
+        let mut at = self.head;
+        let stop = loop {
             if self.stalled() {
-                return Stop::Stalled;
+                break Stop::Stalled;
             }
-            let Some(&code) = self.fifo.front() else {
-                return Stop::NeedData;
+            let Some(&code) = fifo.get(at) else {
+                break Stop::NeedData;
             };
             let n = self.data_words(code);
-            if self.fifo.len() < 1 + n {
-                return Stop::NeedData;
+            if fifo.len() - at < 1 + n {
+                break Stop::NeedData;
             }
-            self.fifo.pop_front();
-            let mut data = std::mem::take(&mut self.data);
-            data.clear();
-            data.extend(self.fifo.drain(..n));
+            let data = &fifo[at + 1..at + 1 + n];
+            at += 1 + n;
             self.code = code;
             self.commands += 1;
             tracing::trace!(target: "vif", "VIF{} code {code:#010x} ({n} data words)", u8::from(self.vif1));
-            self.execute(code, &data, regs, mem, gs);
-            self.data = data;
+            self.execute(code, data, regs, mem, gs);
             if code & 0x8000_0000 != 0 && self.err & 1 == 0 {
                 tracing::debug!(target: "vif", "VIF{} interrupt at code {code:#010x}", u8::from(self.vif1));
                 self.stat |= stat::VIS | stat::INT;
-                return Stop::Interrupt;
+                break Stop::Interrupt;
             }
+        };
+        self.fifo = fifo;
+        self.head = at;
+        if self.head == self.fifo.len() {
+            self.fifo.clear();
+            self.head = 0;
         }
+        stop
     }
 
     fn execute(
@@ -463,6 +489,34 @@ impl Vif {
         let wl = if self.wl == 0 { 256 } else { self.wl };
         let fill = self.cl < wl;
         let skip = if fill { 0 } else { (self.cl - wl) * 16 };
+        // Most unpacks are plain: unmasked, MODE 0, no filling. Their
+        // vectors go straight to memory, in the formats Sly uses most.
+        if !masked && self.mode == 0 && !fill {
+            let plain = Plain {
+                num,
+                at,
+                mem_mask,
+                size,
+                wl,
+                skip,
+            };
+            let done = match (vn, vl, usn) {
+                (2 | 3, 0, _) => plain.run(mem, |o| {
+                    std::array::from_fn(|k| source::<4>(data, o + 4 * k, false))
+                }),
+                (3, 1, u) => plain.run(mem, |o| {
+                    std::array::from_fn(|k| source::<2>(data, o + 2 * k, u))
+                }),
+                (3, 2, u) => plain.run(mem, |o| {
+                    std::array::from_fn(|k| source::<1>(data, o + k, u))
+                }),
+                _ => false,
+            };
+            if done {
+                self.num = 0;
+                return;
+            }
+        }
         let mut cl = 0u32;
         let mut offset = 0usize;
         for _ in 0..num {
@@ -539,6 +593,62 @@ impl Vif {
             }
         }
         self.num = 0;
+    }
+}
+
+/// The `width`-byte element of UNPACK data at byte `at`, extended (with
+/// `usn`, zero-extended), 0 past the data.
+#[inline]
+fn source<const WIDTH: usize>(data: &[u32], at: usize, usn: bool) -> u32 {
+    if at + WIDTH > 4 * data.len() {
+        return 0;
+    }
+    let raw = data[at / 4] >> (8 * (at % 4));
+    match (WIDTH, usn) {
+        (4, _) => raw,
+        (2, true) => raw & 0xFFFF,
+        (2, false) => i32::from(raw as u16 as i16) as u32,
+        (_, true) => raw & 0xFF,
+        (_, false) => i32::from(raw as u8 as i8) as u32,
+    }
+}
+
+/// A plain UNPACK: unmasked, MODE 0, writing WL vectors then skipping
+/// CL - WL (`skip` bytes).
+struct Plain {
+    num: u32,
+    at: u32,
+    mem_mask: u32,
+    size: usize,
+    wl: u32,
+    skip: u32,
+}
+
+impl Plain {
+    /// Writes the vectors `vector` makes of the data at each byte offset;
+    /// false (writing nothing) if the memory is too small to take them so.
+    #[inline]
+    fn run(&self, mem: &mut Memories<'_>, vector: impl Fn(usize) -> [u32; 4]) -> bool {
+        let len = mem.data.len();
+        if !len.is_power_of_two() || len < 16 {
+            return false;
+        }
+        let (mut at, mut cl, mut offset) = (self.at, 0, 0);
+        for _ in 0..self.num {
+            let base = (at & self.mem_mask) as usize & (len - 1);
+            let fields = vector(offset);
+            for (k, value) in fields.iter().enumerate() {
+                mem.data[base + 4 * k..base + 4 * k + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            at += 16;
+            cl += 1;
+            offset += self.size;
+            if cl >= self.wl {
+                at += self.skip;
+                cl = 0;
+            }
+        }
+        true
     }
 }
 
@@ -641,6 +751,37 @@ mod tests {
         ]);
         rig.run(&[0x7C01_0002, 1, 2, 3, 4]);
         assert_eq!([0, 4, 8, 12].map(|k| rig.word(32 + k)), [10, 20, 0, 4]);
+    }
+
+    #[test]
+    fn plain_unpacks_write_what_masked_ones_do() {
+        // Unmasked unpacks in MODE 0 take a direct path; masked ones with
+        // MASK 0 the general one, which must write the same.
+        let data: Vec<u32> = (0..64u32)
+            .map(|k| k.wrapping_mul(0x9E37_79B9) ^ 0x80F0_7F01)
+            .collect();
+        for format in [0x08, 0x0C, 0x0D, 0x0E] {
+            for unsigned in [false, true] {
+                for (cl, wl) in [(1, 1), (4, 4), (2, 1), (4, 3)] {
+                    let memory = |masked: bool| {
+                        let mut rig = Rig::new();
+                        let num = 5u32;
+                        let cmd = 0x60 | format | if masked { 0x10 } else { 0 };
+                        let bytes = vector_bytes(cmd) * rig.vif.vectors_read(num);
+                        let words = bytes.div_ceil(4) as usize;
+                        let code = cmd << 24 | num << 16 | u32::from(unsigned) << 14 | 3;
+                        let mut stream = vec![0x2000_0000, 0, 0x0100_0000 | wl << 8 | cl, code];
+                        stream.extend_from_slice(&data[..words]);
+                        assert_eq!(rig.run(&stream), Stop::NeedData);
+                        rig.data
+                    };
+                    assert!(
+                        memory(false) == memory(true),
+                        "format {format:#x}, unsigned {unsigned}, CL {cl} WL {wl}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
