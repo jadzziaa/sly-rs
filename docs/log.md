@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: The VU translator leaves out MAC flags nothing reads and operand checks a block's own results make needless: VU1's programs 9% faster in the prologue, the whole 148.6 s instead of 157.1 s ([vu-translation.md](research/vu-translation.md), [performance-options.md](research/performance-options.md)).
 * **Update**: GS batching on a thread of its own when the GPU alone draws: the prologue 157.1 s instead of 171.8 s, VU1's thread now the limit ([performance-options.md](research/performance-options.md), [vu1-thread.md](research/vu1-thread.md)).
 * **Creation**: [VIF1 and VU1 on a thread of their own](research/vu1-thread.md): the shadow VIF1, the ordered queue to the GS, where the EE waits, the PATH1 events rule; the prologue 171.8 s instead of 203.1 s with the same hash.
 * **Update**: [Performance after the GPU GS](research/performance-options.md): with the GPU alone drawing, CLUT loads no longer read local memory on the CPU; the GS thread drops to 81-83% busy in the prologue's slowest stretches, and the machine thread is the limit, so the full GS thread split waits.

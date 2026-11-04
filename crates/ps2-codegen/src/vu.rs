@@ -24,6 +24,16 @@
 //!   last one; every pair shifts them by one. Within a block the shift is
 //!   a renaming of locals; between blocks it costs a few moves.
 //!
+//! Two facts about a block's pairs, found when it is generated, make its
+//! code cheaper without changing what it computes (`known`):
+//!
+//! - a pair's MAC flags are made only if something may read them: an
+//!   FMAND, FMOR or FMEQ while they are visible, or whatever runs after
+//!   the block (its status bits, sticky ones included, always are);
+//! - an operand lane the block's own arithmetic wrote holds no exponent
+//!   255 (rounding toward zero, a result too large becomes `MAX`), so the
+//!   arithmetic reads it as it is, not as ±`MAX`.
+//!
 //! A pair that waits (WAITQ, WAITP, or DIV or an EFU instruction while
 //! the unit is busy) moves the cycle and the flags on by the cycles waited.
 //! The generator leaves to the interpreter what it does not handle: FSSET
@@ -244,6 +254,125 @@ fn blocks(p: &Piece<'_>) -> Blocks {
     Blocks { ops, blocks }
 }
 
+/// What the generator knows of a pair from the rest of its block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Known {
+    /// Something may read the MAC flags its upper half sets.
+    mac: bool,
+    /// Its upper half's operands hold no exponent 255 in the lanes it
+    /// reads: the first (fs), the second (ft, or one of its lanes), ACC.
+    clean: [bool; 3],
+}
+
+/// Whether an operation sets the MAC flags.
+fn sets_mac(o: Op) -> bool {
+    match o.class {
+        Upper::Arith(arith, ..) => !matches!(arith, Arith::Max | Arith::Min),
+        Upper::Opmula | Upper::Opmsub => true,
+        _ => false,
+    }
+}
+
+/// Lanes of a register as `dest` names them: x in bit 3.
+const fn lane(i: u32) -> u32 {
+    8 >> i
+}
+
+/// What a block's pairs (indices into `ops`, in the order they run) can be
+/// known to need, from the block alone: nothing is known of the registers
+/// when it starts but `vf0`, and the flags are read after it.
+fn known(ops: &[Op], pairs: &[usize]) -> Vec<Known> {
+    use LowerOp as L;
+    let n = pairs.len();
+    let op = |k: usize| ops[pairs[k]];
+    let reads_mac = |k: usize| matches!(op(k).lower_op(), Some(L::Fmeq | L::Fmand | L::Fmor));
+    // Lanes known clean, by register: vf0-vf31, then ACC.
+    let mut clean = [0u32; 33];
+    clean[0] = 0xF;
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let o = op(k);
+        // A pair's flags are visible from three pairs on, until three pairs
+        // after the next pair that sets them (each pair moves them by at
+        // least one cycle).
+        let mac = sets_mac(o) && {
+            let next = (k + 1..n).find(|&j| sets_mac(op(j)));
+            next.is_none_or(|j| j + 3 >= n || (k + 1..=j + 3).any(reads_mac))
+        };
+        let w = o.pair.upper();
+        let (dest, ft, fs, fd, bc) = (
+            (w >> 21) & 0xF,
+            ((w >> 16) & 31) as usize,
+            ((w >> 11) & 31) as usize,
+            ((w >> 6) & 31) as usize,
+            w & 3,
+        );
+        let has = |reg: usize, lanes: u32| clean[reg] & lanes == lanes;
+        let mut known = Known {
+            mac,
+            clean: [false; 3],
+        };
+        // Upper results: (register, lanes, clean).
+        let mut upper_write = None;
+        match o.class {
+            Upper::Arith(arith, operand, to_acc) => {
+                let b = match operand {
+                    Operand::Ft => has(ft, dest),
+                    Operand::Bc => has(ft, lane(bc)),
+                    Operand::Q | Operand::I => false,
+                };
+                known.clean = [has(fs, dest), b, has(32, dest)];
+                let result = !matches!(arith, Arith::Max | Arith::Min) || (known.clean[0] && b);
+                upper_write = Some((if to_acc { 32 } else { fd }, dest, result));
+            }
+            Upper::Opmula | Upper::Opmsub => {
+                known.clean = [has(fs, 0xE), has(ft, 0xE), has(32, dest & 0xE)];
+                let target = if o.class == Upper::Opmula { 32 } else { fd };
+                upper_write = Some((target, dest & 0xE, true));
+            }
+            Upper::Itof(_) => upper_write = Some((ft, dest, true)),
+            Upper::Ftoi(_) => upper_write = Some((ft, dest, false)),
+            Upper::Abs => upper_write = Some((ft, dest, has(fs, dest))),
+            Upper::Clip | Upper::Nop => {}
+        }
+        // Lower results, from the registers before the pair as well.
+        let l = o.pair.lower();
+        let (lft, lfs, ldest) = (
+            ((l >> 16) & 31) as usize,
+            ((l >> 11) & 31) as usize,
+            (l >> 21) & 0xF,
+        );
+        let lower_write = match o.lower_op() {
+            Some(L::Move) => Some((lft, ldest, clean[lfs] & ldest)),
+            Some(L::Mr32) => {
+                // Lane i takes lane i + 1.
+                let from = clean[lfs];
+                let rotated = (0..4)
+                    .filter(|&i| from & lane((i + 1) % 4) != 0)
+                    .fold(0, |m, i| m | lane(i));
+                Some((lft, ldest, rotated & ldest))
+            }
+            Some(L::Lq | L::Lqi | L::Lqd | L::Mfir | L::Mfp | L::Rget | L::Rnext) => {
+                Some((lft, ldest, 0))
+            }
+            _ => None,
+        };
+        // The lower half's writes land first, then the upper's.
+        if let Some((reg, lanes, value)) = lower_write
+            && reg != 0
+        {
+            clean[reg] = (clean[reg] & !lanes) | value;
+        }
+        if let Some((reg, lanes, value)) = upper_write
+            && reg != 0
+        {
+            clean[reg] = (clean[reg] & !lanes) | if value { lanes } else { 0 };
+        }
+        out.push(known);
+    }
+    out
+}
+
 /// A vector register as an expression (`vf0` reads as a constant: pieces
 /// check that it holds it).
 fn vf(n: u32) -> String {
@@ -308,7 +437,7 @@ const LAND_P: &str = "        if let Some(x) = p\n            && x.ready <= cycl
     clippy::many_single_char_names,
     reason = "one arm per operation, with the manual's field names"
 )]
-fn upper(o: Op, c: &mut PairCode) {
+fn upper(o: Op, known: Known, c: &mut PairCode) {
     let w = o.pair.upper();
     let (dest, ft, fs, fd, bc) = (
         (w >> 21) & 0xF,
@@ -326,7 +455,37 @@ fn upper(o: Op, c: &mut PairCode) {
             format!("        r.vf[{reg}] = merge(r.vf[{reg}], u, 0x{dest:x});\n")
         }
     };
-    let set_flags = "        next = next.with_mac(umac, ucur);\n";
+    // The flags: all of them, or the status bits alone when nothing reads
+    // the MAC flags.
+    let flags = |c: &mut PairCode, dest: u32| {
+        if known.mac {
+            let _ = writeln!(
+                c.compute,
+                "        let (umac, ucur) = flags(u, 0x{dest:x});"
+            );
+            c.flags
+                .push_str("        next = next.with_mac(umac, ucur);\n");
+        } else {
+            let _ = writeln!(c.compute, "        let ucur = status_flags(u, 0x{dest:x});");
+            c.flags.push_str("        next = next.with_status(ucur);\n");
+        }
+    };
+    // An operation, with what is known of its operands (see [`known`]).
+    let [ka, kb, kc] = known.clean;
+    let k2 = |f: &str| {
+        if ka || kb {
+            format!("{f}_k::<{ka}, {kb}>")
+        } else {
+            f.to_owned()
+        }
+    };
+    let k3 = |f: &str| {
+        if ka || kb || kc {
+            format!("{f}_k::<{kc}, {ka}, {kb}>")
+        } else {
+            f.to_owned()
+        }
+    };
     match o.class {
         Upper::Arith(arith, operand, to_acc) => {
             let (a, t) = (vf(fs), vf(ft));
@@ -341,11 +500,11 @@ fn upper(o: Op, c: &mut PairCode) {
             };
             let old = if to_acc { "r.acc".to_owned() } else { vf(fd) };
             let result = match arith {
-                Arith::Add => format!("lanes::add({a}, {b})"),
-                Arith::Sub => format!("lanes::sub({a}, {b})"),
-                Arith::Mul => format!("lanes::mul({a}, {b})"),
-                Arith::Madd => format!("lanes::madd(r.acc, {a}, {b})"),
-                Arith::Msub => format!("lanes::msub(r.acc, {a}, {b})"),
+                Arith::Add => format!("lanes::{}({a}, {b})", k2("add")),
+                Arith::Sub => format!("lanes::{}({a}, {b})", k2("sub")),
+                Arith::Mul => format!("lanes::{}({a}, {b})", k2("mul")),
+                Arith::Madd => format!("lanes::{}(r.acc, {a}, {b})", k3("madd")),
+                Arith::Msub => format!("lanes::{}(r.acc, {a}, {b})", k3("msub")),
                 Arith::Max => format!("float::x4::max({a}, {b})"),
                 Arith::Min => format!("float::x4::min({a}, {b})"),
             };
@@ -354,11 +513,7 @@ fn upper(o: Op, c: &mut PairCode) {
                 "        let u = merge({old}, {result}, 0x{dest:x});"
             );
             if !matches!(arith, Arith::Max | Arith::Min) {
-                let _ = writeln!(
-                    c.compute,
-                    "        let (umac, ucur) = flags(u, 0x{dest:x});"
-                );
-                c.flags.push_str(set_flags);
+                flags(c, dest);
             }
             c.writes
                 .push_str(&write(if to_acc { "acc" } else { "vf" }, fd));
@@ -371,18 +526,17 @@ fn upper(o: Op, c: &mut PairCode) {
                 "        let (x, y) = ({{ let a = {a}; [a[1], a[2], a[0], 0] }}, {{ let b = {b}; [b[2], b[0], b[1], 0] }});"
             );
             let terms = if mula {
-                "lanes::mul(x, y)"
+                format!("lanes::{}(x, y)", k2("mul"))
             } else {
-                "lanes::msub(r.acc, x, y)"
+                format!("lanes::{}(r.acc, x, y)", k3("msub"))
             };
             let old = if mula { "r.acc".to_owned() } else { vf(fd) };
             let _ = writeln!(
                 c.compute,
-                "        let u = merge({old}, {terms}, 0x{:x});\n        \
-                 let (umac, ucur) = flags(u, 0x{dest:x});",
+                "        let u = merge({old}, {terms}, 0x{:x});",
                 dest & 0xE
             );
-            c.flags.push_str(set_flags);
+            flags(c, dest);
             c.writes
                 .push_str(&write(if mula { "acc" } else { "vf" }, fd));
         }
@@ -713,9 +867,9 @@ fn lower(o: Op, c: &mut PairCode) {
     }
 }
 
-fn pair_code(o: Op) -> String {
+fn pair_code(o: Op, known: Known) -> String {
     let mut c = PairCode::default();
-    upper(o, &mut c);
+    upper(o, known, &mut c);
     let mut lower_code = PairCode::default();
     lower(o, &mut lower_code);
     // Upper results first, then the lower half's (both from the registers
@@ -800,9 +954,9 @@ fn piece(out: &mut String, k: usize, p: &Piece<'_>) -> Option<(u32, Vec<u32>)> {
     for (leader, pairs, end) in &blocks {
         let _ = writeln!(out, "            0x{:04x} => {{", ops[*leader].pc);
         let mut body = String::new();
-        for &i in pairs {
+        for (&i, known) in pairs.iter().zip(known(&ops, pairs)) {
             body.push_str("{\n");
-            body.push_str(&pair_code(ops[i]));
+            body.push_str(&pair_code(ops[i], known));
             body.push_str("}\n");
         }
         match *end {
@@ -941,7 +1095,7 @@ pub fn module(overlays: &[Overlay]) -> String {
         "// Generated by ps2-codegen: do not edit.\n\
          use ps2_vu::micro::{{\n    \
          DIVIDER_STATUS, LowerOp, Pipe, State, Translation, Unit, clip, divide, efu_at, flags,\n    \
-         float, land_q, lanes, limit, load_q, merge, rnext, step, store_q, xgkick,\n}};\n\n\
+         float, land_q, lanes, limit, load_q, merge, rnext, status_flags, step, store_q, xgkick,\n}};\n\n\
          /// `vf0`.\nconst VF0: [u32; 4] = [0, 0, 0, 0x3F80_0000];\n\
          /// How a piece ends: it left its code, or the program ended.\n\
          const LEAVE: u8 = 0;\nconst END: u8 = 2;\n\n\
@@ -1017,6 +1171,57 @@ mod tests {
             "{source}"
         );
         assert!(source.contains("break 'run END;"));
+    }
+
+    #[test]
+    fn what_a_block_knows_makes_its_code_cheaper() {
+        // mul.xyzw vf1, vf2, vf3; add.xyzw vf4, vf1, vf1; then four
+        // add.xyzw vf5, vf4, vf4 (each replacing the flags before it);
+        // lq.xyzw vf1, 0(vi0); add.xyzw vf6, vf1, vf4; nop[e]; nop.
+        let (nop, lnop) = (0x0000_02FF, 0x8000_0330);
+        let arith = |op: u32, fd: u32, fs: u32, ft: u32| {
+            (0xF << 21) | (ft << 16) | (fs << 11) | (fd << 6) | op
+        };
+        let (mul, add) = (0x2A, 0x28);
+        let lq = (0xF << 21) | (1 << 16);
+        let mut pairs = vec![(arith(mul, 1, 2, 3), lnop), (arith(add, 4, 1, 1), lnop)];
+        pairs.extend([(arith(add, 5, 4, 4), lnop); 4]);
+        pairs.extend([
+            (nop, lq),
+            (arith(add, 6, 1, 4), lnop),
+            (nop | FLAG_E, lnop),
+            (nop, lnop),
+        ]);
+        let source = module(&[code(".DVP.overlay..0x0.1.2.0", &pairs)]);
+        let body: Vec<&str> = source
+            .lines()
+            .filter(|l| l.contains("let u =") || l.contains("flags(u"))
+            .map(str::trim)
+            .collect();
+        // Nothing is known of vf2 and vf3; vf1 and vf4 are the block's own
+        // results, until vf1 is loaded. Only the last two results' MAC
+        // flags are still visible when the block ends, where they may be
+        // read.
+        assert_eq!(
+            body,
+            [
+                "let u = merge(r.vf[1], lanes::mul(r.vf[2], r.vf[3]), 0xf);",
+                "let ucur = status_flags(u, 0xf);",
+                "let u = merge(r.vf[4], lanes::add_k::<true, true>(r.vf[1], r.vf[1]), 0xf);",
+                "let ucur = status_flags(u, 0xf);",
+                "let u = merge(r.vf[5], lanes::add_k::<true, true>(r.vf[4], r.vf[4]), 0xf);",
+                "let ucur = status_flags(u, 0xf);",
+                "let u = merge(r.vf[5], lanes::add_k::<true, true>(r.vf[4], r.vf[4]), 0xf);",
+                "let ucur = status_flags(u, 0xf);",
+                "let u = merge(r.vf[5], lanes::add_k::<true, true>(r.vf[4], r.vf[4]), 0xf);",
+                "let ucur = status_flags(u, 0xf);",
+                "let u = merge(r.vf[5], lanes::add_k::<true, true>(r.vf[4], r.vf[4]), 0xf);",
+                "let (umac, ucur) = flags(u, 0xf);",
+                "let u = merge(r.vf[6], lanes::add_k::<false, true>(r.vf[1], r.vf[4]), 0xf);",
+                "let (umac, ucur) = flags(u, 0xf);",
+            ],
+            "{source}"
+        );
     }
 
     #[test]

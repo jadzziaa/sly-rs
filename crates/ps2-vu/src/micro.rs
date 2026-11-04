@@ -362,6 +362,18 @@ pub fn flags(out: [u32; 4], dest: u32) -> (u32, u32) {
     (mac, current)
 }
 
+/// The status's Z and S bits alone for results in `dest` ([`flags`]
+/// without the MAC flags): for a pair whose MAC flags nothing can read.
+#[allow(clippy::inline_always, reason = "translations specialise it by `dest`")]
+#[inline(always)]
+#[must_use]
+pub fn status_flags(out: [u32; 4], dest: u32) -> u32 {
+    let lane = |i: usize| dest >> (3 - i) & 1 != 0;
+    let zero = (0..4).any(|i| lane(i) && out[i] << 1 == 0);
+    let sign = (0..4).any(|i| lane(i) && out[i] >> 31 != 0);
+    u32::from(zero) | (u32::from(sign) << 1)
+}
+
 /// A register write a pair makes, applied after both halves have read.
 #[derive(Clone, Copy, Debug)]
 enum Write {
@@ -450,6 +462,19 @@ impl Visible {
     pub const fn with_mac(self, mac: u32, current: u32) -> Self {
         Self {
             mac,
+            status: (self.status & 0x3C0) | current | (current << 6),
+            ..self
+        }
+    }
+
+    /// These flags with an arithmetic result's Z and S landed, the MAC
+    /// flags left as they were: for a result whose MAC flags nothing reads
+    /// before the next result's replace them.
+    #[allow(clippy::inline_always, reason = "on every FMAC pair")]
+    #[inline(always)]
+    #[must_use]
+    pub const fn with_status(self, current: u32) -> Self {
+        Self {
             status: (self.status & 0x3C0) | current | (current << 6),
             ..self
         }

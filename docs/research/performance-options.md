@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:03:30Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:51:34Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -144,6 +144,28 @@ VU1's thread's waits for the GS, which were most of the difference from
 the machine thread's 3.1. The machine waits for VU1's thread 38-58% of
 the slowest stretches: VU1 is the limit now, so 4 comes next, with the
 shadow VIF1 (12% of the machine thread) after it.
+
+**4, in part** (2026-11-04): the translator now decides, block by block,
+which pairs' MAC flags anything can read and which operands its own
+arithmetic made clean of exponent 255, and leaves out the rest of that
+work ([vu-translation.md](vu-translation.md)). On the 6,000 recorded
+gameplay programs, 2.13 ns a pair instead of 2.68 (without PGO); every
+recording gives the interpreter's result, also handing back after every
+block. In the prologue (PGO, GPU drawing), VU1's programs took 93.6 s
+instead of 103.0 s (2.91 ns a pair, from 3.20), and the whole 148.6 s
+instead of 157.1 s, with the same final hash; lockstep, the new-game
+replay and the full tests unchanged.
+
+| | Before | After |
+| --- | --- | --- |
+| Slowest stretch | 133% of NTSC | 137% |
+| The next slowest | 163-170% | 170-181% |
+| Their threads | VU1's 77-86%, GS 68-82% | VU1's 77-85%, GS 72-89% |
+
+In the slowest stretch (fields 9,600-9,900) the machine waits for VU1's
+thread 57% of the time while that thread is busy only 77%: the waits are
+not all for VU1's work, which is where to look next, with the shadow VIF1
+(13% of the machine thread).
 
 ## Recommendation
 

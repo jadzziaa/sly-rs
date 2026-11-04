@@ -465,6 +465,48 @@ pub mod x4 {
         sub(acc, mul(a, b))
     }
 
+    /// [`add`], for an operand known to hold no exponent 255 (`A`, `B`):
+    /// the same here, where every operand is read exactly; the host forms
+    /// ([`rtz`]) skip reading such operands as ±`MAX`.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn add_k<const A: bool, const B: bool>(a: V, b: V) -> V {
+        add(a, b)
+    }
+
+    /// [`sub`], knowing what [`add_k`] knows.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn sub_k<const A: bool, const B: bool>(a: V, b: V) -> V {
+        sub(a, b)
+    }
+
+    /// [`mul`], knowing what [`add_k`] knows.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn mul_k<const A: bool, const B: bool>(a: V, b: V) -> V {
+        mul(a, b)
+    }
+
+    /// [`madd`], knowing what [`add_k`] knows of ACC (`C`) and the factors.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn madd_k<const C: bool, const A: bool, const B: bool>(acc: V, a: V, b: V) -> V {
+        madd(acc, a, b)
+    }
+
+    /// [`msub`], knowing what [`madd_k`] knows.
+    #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+    #[inline(always)]
+    #[must_use]
+    pub fn msub_k<const C: bool, const A: bool, const B: bool>(acc: V, a: V, b: V) -> V {
+        msub(acc, a, b)
+    }
+
     /// The same operations for code run in the VU environment
     /// (`ps2_fenv::with_vu_rounding`: rounding toward zero, denormals
     /// flushed): one host single-precision operation per lane, which there
@@ -476,11 +518,15 @@ pub mod x4 {
 
         /// The lanes as singles, exponent 255 read as ±`MAX` (denormals
         /// read as zero by themselves, in the VU environment).
+        /// With `CLEAN`, the caller knows no lane holds exponent 255
+        /// (what these operations give never does: rounding toward zero,
+        /// a result too large becomes `MAX`, not infinity), so the lanes
+        /// are read as they are.
         #[allow(clippy::inline_always, reason = "the VUs' hot path")]
         #[inline(always)]
-        fn singles(a: V) -> [f32; 4] {
+        fn singles<const CLEAN: bool>(a: V) -> [f32; 4] {
             a.map(|x| {
-                let huge = (x >> 23) & 0xFF == 0xFF;
+                let huge = !CLEAN && (x >> 23) & 0xFF == 0xFF;
                 f32::from_bits(if huge { (x & 0x8000_0000) | MAX } else { x })
             })
         }
@@ -490,7 +536,15 @@ pub mod x4 {
         #[inline(always)]
         #[must_use]
         pub fn add(a: V, b: V) -> V {
-            let (x, y) = (singles(a), singles(b));
+            add_k::<false, false>(a, b)
+        }
+
+        /// [`super::add_k`]: `a` or `b` known to hold no exponent 255.
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn add_k<const A: bool, const B: bool>(a: V, b: V) -> V {
+            let (x, y) = (singles::<A>(a), singles::<B>(b));
             std::array::from_fn(|i| (x[i] + y[i]).to_bits())
         }
 
@@ -499,7 +553,15 @@ pub mod x4 {
         #[inline(always)]
         #[must_use]
         pub fn sub(a: V, b: V) -> V {
-            let (x, y) = (singles(a), singles(b));
+            sub_k::<false, false>(a, b)
+        }
+
+        /// [`super::sub_k`].
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn sub_k<const A: bool, const B: bool>(a: V, b: V) -> V {
+            let (x, y) = (singles::<A>(a), singles::<B>(b));
             std::array::from_fn(|i| (x[i] - y[i]).to_bits())
         }
 
@@ -508,7 +570,15 @@ pub mod x4 {
         #[inline(always)]
         #[must_use]
         pub fn mul(a: V, b: V) -> V {
-            let (x, y) = (singles(a), singles(b));
+            mul_k::<false, false>(a, b)
+        }
+
+        /// [`super::mul_k`].
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn mul_k<const A: bool, const B: bool>(a: V, b: V) -> V {
+            let (x, y) = (singles::<A>(a), singles::<B>(b));
             std::array::from_fn(|i| (x[i] * y[i]).to_bits())
         }
 
@@ -517,7 +587,15 @@ pub mod x4 {
         #[inline(always)]
         #[must_use]
         pub fn madd(acc: V, a: V, b: V) -> V {
-            add(acc, mul(a, b))
+            madd_k::<false, false, false>(acc, a, b)
+        }
+
+        /// [`super::madd_k`]: the product is known clean.
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn madd_k<const C: bool, const A: bool, const B: bool>(acc: V, a: V, b: V) -> V {
+            add_k::<C, true>(acc, mul_k::<A, B>(a, b))
         }
 
         /// [`super::msub`].
@@ -525,7 +603,15 @@ pub mod x4 {
         #[inline(always)]
         #[must_use]
         pub fn msub(acc: V, a: V, b: V) -> V {
-            sub(acc, mul(a, b))
+            msub_k::<false, false, false>(acc, a, b)
+        }
+
+        /// [`super::msub_k`].
+        #[allow(clippy::inline_always, reason = "the VUs' hot path")]
+        #[inline(always)]
+        #[must_use]
+        pub fn msub_k<const C: bool, const A: bool, const B: bool>(acc: V, a: V, b: V) -> V {
+            sub_k::<C, true>(acc, mul_k::<A, B>(a, b))
         }
     }
 

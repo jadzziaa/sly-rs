@@ -10,9 +10,9 @@ sources:
   - id: plan
     resource: docs/plan.md, phase 6
     title: 'The plan: ahead-of-time translation of every .DVP overlay'
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:07:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:51:22Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:51:22Z }
 ---
 
 # VU microcode translated ahead of time
@@ -65,6 +65,16 @@ of the two. Sly 1 enters its programs at 28 addresses.
   across the loop's back edge for the first. (`State` kept the flags as a
   queue of timed writes before; the change left the interpreter's results
   on every recorded program the same.)
+- **What a block knows.** Two facts about a block, found when it is
+  generated, make its code cheaper without changing what it computes:
+  a pair's MAC flags are made only if an FMAND, FMOR or FMEQ may read
+  them while they are visible, or they may still be visible when the
+  block ends (the status bits, sticky ones included, always are); and an
+  operand lane the block's own arithmetic wrote holds no exponent 255
+  (rounding toward zero, a result too large becomes `MAX`, never
+  infinity), so `lanes::add_k` and the rest read it as it is instead of
+  as ±`MAX`. Of the 885 pairs that set flags, 554 now make the status
+  bits alone; 620 operations know an operand clean.
 - **Waits** (WAITQ, WAITP, a DIV or EFU instruction while its unit is
   busy) move the cycle and shift the flags by the cycles waited, as the
   interpreter does. Q and P land where they are read.
@@ -111,8 +121,14 @@ the host CPU):
 | Translated, pairs as statements | 4.4 |
 | ... and waits in place, not handed to the interpreter | 3.9 |
 | ... and pieces cut outside inner loops | 2.5 to 3.6 |
+| ... and what a block knows (MAC flags only where read, operands known clean), 2026-11-04 | 2.68 to 2.13 (2.4 to 2.24 with PGO) |
 
-The figures move by about a nanosecond from run to run. Larger pieces
+The figures move by about a nanosecond from run to run. Measured on the
+way to the last row (the same build each time, the game's other crates
+untouched): no flags at all would give 2.02, no MAC flags 2.24, no
+operand checks 2.01; with what a block knows, no operand checks at all
+would give 1.97, so knowing more across blocks (which any leader can be
+entered at, from the interpreter) is worth at most 7%. Larger pieces
 (up to 1,024 pairs, so that no loop was cut) gave 5.8: big functions
 compile to worse code.
 
