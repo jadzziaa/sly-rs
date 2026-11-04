@@ -303,11 +303,22 @@ impl Hardware {
             };
             match self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs) {
                 ps2_vu::vif::Stop::NeedData => {
+                    // The words the waiting command needs, at once: it
+                    // cannot run on fewer, so the transfer stands where
+                    // it would after reading them one quadword at a time.
                     words.clear();
-                    if !chain.next_words(regions, &mut words) {
-                        break false;
+                    let missing = self.vif1.missing();
+                    let mut ended = false;
+                    while words.len() < missing {
+                        if !chain.next_words(regions, &mut words) {
+                            ended = true;
+                            break;
+                        }
                     }
                     self.vif1.push(&words);
+                    if ended {
+                        break false;
+                    }
                 }
                 ps2_vu::vif::Stop::Interrupt => break true,
                 ps2_vu::vif::Stop::Stalled => {

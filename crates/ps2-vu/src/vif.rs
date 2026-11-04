@@ -74,6 +74,8 @@ pub struct Vif {
     /// MSKPATH3.
     pub mask_path3: bool,
     fifo: VecDeque<u32>,
+    /// The running command's data, a buffer kept between commands.
+    data: Vec<u32>,
     /// Commands run, for reports.
     pub commands: u64,
     /// VU programs started, for reports.
@@ -118,6 +120,7 @@ impl Vif {
             tops: 0,
             mask_path3: false,
             fifo: VecDeque::new(),
+            data: Vec::new(),
             commands: 0,
             programs: 0,
             run_time: std::time::Duration::ZERO,
@@ -131,6 +134,18 @@ impl Vif {
     /// Queues words from DMA.
     pub fn push(&mut self, words: &[u32]) {
         self.fifo.extend(words);
+    }
+
+    /// Words the next command still waits for: its code and data less
+    /// what the FIFO holds (at least one).
+    #[must_use]
+    pub fn missing(&self) -> usize {
+        match self.fifo.front() {
+            Some(&code) => (1 + self.data_words(code))
+                .saturating_sub(self.fifo.len())
+                .max(1),
+            None => 1,
+        }
     }
 
     /// Whether it is stalled.
@@ -246,11 +261,14 @@ impl Vif {
                 return Stop::NeedData;
             }
             self.fifo.pop_front();
-            let data: Vec<u32> = self.fifo.drain(..n).collect();
+            let mut data = std::mem::take(&mut self.data);
+            data.clear();
+            data.extend(self.fifo.drain(..n));
             self.code = code;
             self.commands += 1;
             tracing::trace!(target: "vif", "VIF{} code {code:#010x} ({n} data words)", u8::from(self.vif1));
             self.execute(code, &data, regs, mem, gs);
+            self.data = data;
             if code & 0x8000_0000 != 0 && self.err & 1 == 0 {
                 tracing::debug!(target: "vif", "VIF{} interrupt at code {code:#010x}", u8::from(self.vif1));
                 self.stat |= stat::VIS | stat::INT;
@@ -392,25 +410,27 @@ impl Vif {
         }
         let mem_mask = if self.vif1 { 0x3FF0 } else { 0xFF0 };
         let mut at = addr * 16;
-        let bytes: Vec<u8> = data.iter().flat_map(|w| w.to_le_bytes()).collect();
         let size = vector_bytes(cmd) as usize;
-        // One element of the source (`k`th of the vector at byte `offset`).
+        let width = match vl {
+            0 => 4,
+            1 => 2,
+            _ => 1,
+        };
+        // One element of the source (`k`th of the vector at byte `offset`),
+        // 0 past the data. Elements never straddle words: vectors of 32-bit
+        // elements are whole words, of 16-bit ones whole half-words.
         let element = |offset: usize, k: usize| -> u32 {
-            let width = match vl {
-                0 => 4,
-                1 => 2,
-                _ => 1,
-            };
             let at = offset + k * width;
-            let Some(raw) = bytes.get(at..at + width) else {
+            if at + width > 4 * data.len() {
                 return 0;
-            };
+            }
+            let raw = data[at / 4] >> (8 * (at % 4));
             match (width, usn) {
-                (4, _) => u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-                (2, true) => u32::from(u16::from_le_bytes([raw[0], raw[1]])),
-                (2, false) => i32::from(i16::from_le_bytes([raw[0], raw[1]])) as u32,
-                (_, true) => u32::from(raw[0]),
-                (_, false) => i32::from(raw[0] as i8) as u32,
+                (4, _) => raw,
+                (2, true) => raw & 0xFFFF,
+                (2, false) => i32::from(raw as u16 as i16) as u32,
+                (_, true) => raw & 0xFF,
+                (_, false) => i32::from(raw as u8 as i8) as u32,
             }
         };
         let wl = if self.wl == 0 { 256 } else { self.wl };

@@ -1243,6 +1243,7 @@ pub fn xgkick(data: &[u8], address: u32, gs: &mut dyn Sink) {
             1 => (nloop * nreg).div_ceil(2),
             _ => nloop,
         };
+        packet.reserve(qwords as usize + 1);
         for _ in 0..qwords {
             packet.push(read(q));
             q += 1;

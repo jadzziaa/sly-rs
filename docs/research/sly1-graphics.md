@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T02:06:35Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T02:30:27Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -413,6 +413,31 @@ instructions).
   the EE set the pace there, and a faster GS would not help. In others
   the waits matter (13,800-14,400: 96-97%, waiting 21%; the chase: 88%,
   waiting 10%).
+- **The machine thread, faster.** `replay --timing` now splits each
+  stretch's host time: VU1's programs, the rest of VIF1, VU calls, the
+  IOP, the EE and the rest. In the slow stretches held by the machine,
+  the rest of VIF1 took 24-27%, and stack samples (the replay run under
+  gdb, its machine thread's stack printed at each of a stream of
+  SIGINTs; `ptrace_scope` 1 allows only a parent to trace) put a good
+  part of VU1's time in XGKICK. Changes, each exact (the prologue's
+  final state hash, covering DMA timing and both VUs, is unchanged):
+  - VIF1 is fed the words its waiting command lacks at once, not one
+    quadword at a time with the VIF re-decoding the command after each
+    (it cannot run on fewer, so the DMA chain ends where it did);
+  - a command's data goes into one buffer kept between commands;
+  - UNPACK reads its elements from the words (they never straddle one)
+    instead of copying the data into bytes;
+  - XGKICK reserves each tag's data before copying the packet;
+  - the tag scanner that finds SIGNAL, FINISH and LABEL in packets
+    passes over a tag that cannot hold one (REGLIST, IMAGE, PACKED
+    without A+D among its NREG registers) in one step, also across
+    sends; its test covers those cases.
+
+  The prologue from 304.6 to 295.1 s (124% of NTSC); 9 stretches below
+  NTSC instead of 16, the slowest at 90% (the chase). Taking out each
+  stretch's waits for the GS, the machine alone is at or above NTSC in
+  every one, the slowest at about 104% (fields 9,600-9,900). The dips
+  left are the GS's: its thread is busy about 99% of the time there.
 - **The game clock** (`g_clock`, 0x261858: `MarkClockTick` turns COP0
   Count deltas into seconds, each frame's step clamped to 1/60-1/30 s),
   now in the game state's report, matches the fields exactly in play

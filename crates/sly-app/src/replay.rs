@@ -39,13 +39,24 @@ fn advance(
         return Ok(replay::run(machine, fields, script));
     }
     let mut started = std::time::Instant::now();
-    // The GS's time so far: the machine waiting for it, its thread busy.
-    let gs_times = |machine: &ps2_ee::Machine| {
+    // Host time so far: the machine waiting for the GS, the GS thread
+    // busy, VIF1 with VU1, its waits for the GS, VU1's programs, VU calls
+    // from the EE, the IOP. Reading the GS waits for its thread.
+    let times = |machine: &ps2_ee::Machine| {
         let mut hw = machine.hw.borrow_mut();
         let busy = hw.gs.with(|gs| gs.busy);
-        (hw.gs.waited, busy)
+        let t = &hw.timing;
+        [
+            hw.gs.waited,
+            busy,
+            t.vif1,
+            t.vif1_gs_wait,
+            hw.vif1.run_time,
+            t.vu_calls,
+            t.iop,
+        ]
     };
-    let mut before = gs_times(machine);
+    let mut before = times(machine);
     for _ in 0..fields {
         let stop = replay::run(machine, 1, script);
         if stop != ps2_ee::Stop::Budget {
@@ -54,22 +65,28 @@ fn advance(
         let field = machine.cpu.cycles / ps2_ee::FIELD_CYCLES;
         let every = frames.every.max(1);
         if frames.timing && field.is_multiple_of(every) {
-            // The GS's thread included: `gs_times` waits for it.
-            let now = gs_times(machine);
+            // The GS's thread included: `times` waits for it.
+            let now = times(machine);
             let took = started.elapsed().as_secs_f64();
             started = std::time::Instant::now();
-            let (waited, busy) = (
-                now.0.saturating_sub(before.0).as_secs_f64() / took * 100.0,
-                now.1.saturating_sub(before.1).as_secs_f64() / took * 100.0,
-            );
+            let d: Vec<f64> = now
+                .iter()
+                .zip(&before)
+                .map(|(n, b)| n.saturating_sub(*b).as_secs_f64() / took * 100.0)
+                .collect();
             before = now;
+            let (waited, busy, vif1, vif1_wait, programs, calls, iop) =
+                (d[0], d[1], d[2], d[3], d[4], d[5], d[6]);
+            let ee = 100.0 - vif1 - calls - iop - (waited - vif1_wait);
             let state = Sly1State::read(&mut machine.mem);
             let (real, at) = (every as f64 / 59.94, field as f64 / 59.94);
             println!(
-                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC, waiting for the GS {waited:.0}%, GS thread busy {busy:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
+                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC, waiting for the GS {waited:.0}%, GS thread busy {busy:.0}%; VU1 programs {:.0}%, the rest of VIF1 {:.0}%, VU calls {calls:.0}%, IOP {iop:.0}%, the EE and the rest {ee:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
                 field - every,
                 took * 1000.0 / every as f64,
                 real * 100.0 / took,
+                programs - vif1_wait,
+                vif1 - programs,
                 state.clock(),
                 state.world.0,
                 state.world.1,

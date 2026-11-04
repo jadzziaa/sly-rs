@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: The machine thread faster (VIF1 fed whole commands, UNPACK from words, XGKICK and the tag scanner cheaper): the prologue at 124% of NTSC, the machine alone at or above NTSC in every stretch; the dips left are the GS's ([graphics](research/sly1-graphics.md)).
 * **Update**: The re-recorded prologue reproduces and runs at 120% of NTSC overall, 16 of 73 five-second stretches below (slowest 88%), some held by VU1 and the EE, some by the GS; the game clock matches the fields in play and runs 10% ahead in the opening cutscene ([graphics](research/sly1-graphics.md)).
 * **Update**: Measured what unsafe would buy the GS (unchecked indexing: 2% on one thread, nothing on more) and how it scales on fewer threads ([graphics](research/sly1-graphics.md)).
 * **Update**: GS: a pipeline specialised to the hot state, the decoded state shared across primitives, repeated footprints neither checked nor marked: 60 fields of play in 0.92 s on sixteen threads (was 1.10), the prologue's first 8,000 fields at 112% of console speed, local memory the same on twelve dumps ([graphics](research/sly1-graphics.md)).

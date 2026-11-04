@@ -34,6 +34,10 @@ struct Tag {
     regs: u64,
     flg: u32,
     reg: u32,
+    /// Quadwords of a tag that cannot carry an event (REGLIST, IMAGE, or
+    /// PACKED without A+D) still to pass over; 0 for one walked quadword
+    /// by quadword.
+    skip: u32,
 }
 
 /// Finds the events GIF packets ask for (PACKED A+D writes to SIGNAL,
@@ -48,7 +52,9 @@ impl Scanner {
     /// Walks quadwords sent on `path`.
     pub fn scan(&mut self, path: usize, data: &[u128]) {
         let slot = &mut self.paths[path.min(3)];
-        for &q in data {
+        let mut i = 0;
+        while let Some(&q) = data.get(i) {
+            i += 1;
             let Some(mut tag) = *slot else {
                 let lo = q as u64;
                 let nloop = (lo & 0x7FFF) as u32;
@@ -57,15 +63,34 @@ impl Scanner {
                     0 => 16,
                     n => n,
                 };
+                let regs = (q >> 64) as u64;
+                let ad = flg == 0 && (0..nreg).any(|k| (regs >> (4 * k)) & 0xF == 0xE);
+                let skip = match flg {
+                    _ if ad => 0,
+                    0 => nloop * nreg,
+                    1 => (nloop * nreg).div_ceil(2),
+                    _ => nloop,
+                };
                 *slot = (nloop > 0).then_some(Tag {
                     nloop,
                     nreg: if flg >= 2 { 1 } else { nreg },
-                    regs: (q >> 64) as u64,
+                    regs,
                     flg: flg.min(2),
                     reg: 0,
+                    skip,
                 });
                 continue;
             };
+            if tag.skip > 0 {
+                // This quadword and as many after it as the tag has left.
+                let n = tag
+                    .skip
+                    .min(u32::try_from(data.len() - i + 1).unwrap_or(u32::MAX));
+                tag.skip -= n;
+                i += n as usize - 1;
+                *slot = (tag.skip > 0).then_some(tag);
+                continue;
+            }
             match tag.flg {
                 0 => {
                     if (tag.regs >> (4 * tag.reg)) & 0xF == 0xE {
@@ -286,6 +311,22 @@ mod tests {
                 tag(2, false, 2, &[]),
                 7,
                 8,
+            ],
+            // An IMAGE split over sends; a PACKED tag without A+D whose
+            // data looks like a SIGNAL write, and one whose A+D nibble
+            // lies past NREG.
+            vec![tag(3, false, 2, &[]), 1],
+            vec![
+                2,
+                ad(0x60, 0x9999),
+                tag(2, false, 0, &[0x1]),
+                ad(0x60, 0x7777),
+            ],
+            vec![
+                ad(0x60, 0x6666),
+                // NREG 1: the 0xE in the second nibble is not a register.
+                (tag(1, false, 0, &[0x1, 0xE]) & !(0xF << 60)) | (1 << 60),
+                ad(0x60, 0x5555),
             ],
             vec![tag(3, true, 0, &[0xE]), ad(0x60, 0x1234), ad(0x3B, 0x80)],
             vec![ad(0x62, 0x55)],
