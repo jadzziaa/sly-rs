@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: [Performance techniques in rac-rs and paraLLEl-GS](research/performance-prior-art.md) corrected: triangle setup runs on the drawer thread and is 1.5% of it (callgrind on the play dump), not a quarter of the GS thread; it drops to last.
 * **Creation**: [Performance techniques in rac-rs and paraLLEl-GS](research/performance-prior-art.md): what the two use that sly-rs does not yet, ranked; triangle setup on the GPU first.
 * **Update**: The shadow VIF1 hands VU1's thread its words 4,096 at a time, and VIF1 on that thread reads commands' data in place and unpacks the common formats directly: the prologue 132.3 s instead of 148.6 s (PGO), the machine's waits for VU1's thread split by cause in `replay --timing` ([performance-options.md](research/performance-options.md), [vu1-thread.md](research/vu1-thread.md)).
 * **Update**: The VU translator leaves out MAC flags nothing reads and operand checks a block's own results make needless: VU1's programs 9% faster in the prologue, the whole 148.6 s instead of 157.1 s ([vu-translation.md](research/vu-translation.md), [performance-options.md](research/performance-options.md)).

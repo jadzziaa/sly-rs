@@ -3,18 +3,21 @@ type: Research Note
 title: Performance techniques in rac-rs and paraLLEl-GS
 description: Which performance techniques rac-rs (Ratchet & Clank recompiled) and paraLLEl-GS (a Vulkan compute GS) use that sly-rs does not yet, what each would buy here, and whether it could keep replays bit-exact.
 tags: [research, prior-art, performance, rac-rs, parallel-gs, gpu, gs, ee, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T20:49:13Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:11:37Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: rac-rs
     resource: https://github.com/AsobiCodes/rac-rs
-    title: "AsobiCodes/rac-rs v0.4.3 (commit 5b14154, 2026-10-31), read from a shallow clone, not built"
+    title: AsobiCodes/rac-rs v0.4.3 (commit 5b14154, 2026-10-31), read from a shallow clone, not built
   - id: pgs
     resource: https://github.com/Arntzen-Software/parallel-gs
-    title: "Arntzen-Software/parallel-gs (commit cc6184a), read from a shallow clone, not built"
+    title: Arntzen-Software/parallel-gs (commit cc6184a), read from a shallow clone, not built
   - id: pgs-blog
     resource: https://themaister.net/blog/2024/07/03/playstation-2-gs-emulation-the-final-frontier-of-vulkan-compute-emulation/
-    title: "Themaister: PlayStation 2 GS emulation, the final frontier of Vulkan compute emulation (2024)"
+    title: 'Themaister: PlayStation 2 GS emulation, the final frontier of Vulkan compute emulation (2024)'
+  - id: profile
+    resource: callgrind (--separate-threads) of sly-rs gs-replay on the 60-field play dump with --gpu-only, workspace release build, 2026-11-04
+    title: Instructions by thread on the play dump
   - id: options
     resource: performance-options.md
     title: Performance after the GPU GS
@@ -51,7 +54,7 @@ Neither project has anything for VU1's thread, sly-rs's limit today.
 
 | Technique | From | What it buys | Fit, and determinism |
 | --- | --- | --- | --- |
-| Triangle setup on the GPU (`gs/shaders/triangle_setup.comp`), then binning (`binning.comp`) | paraLLEl-GS | Primitive setup off the CPU: about a quarter of sly-rs's GS thread, the next limit after VU1's thread | Good, if the setup's integer arithmetic is ported as is; the GPU's memory is already compared with the software GS's after every field. paraLLEl-GS's author still finds it bound by geometry processing on the CPU.[^pgs-blog] |
+| Triangle setup on the GPU (`gs/shaders/triangle_setup.comp`), then binning (`binning.comp`) | paraLLEl-GS | Primitive setup off the CPU | **Low.** In sly-rs setup runs on the drawer thread, not the GS thread, and is 1.5% of the drawer's instructions on the play dump (callgrind);[^profile] the drawer's large costs are transfers' pixels turned into word writes (43%) and binning with buffer copies (33%). paraLLEl-GS's author still finds it bound by geometry processing on the CPU.[^pgs-blog] |
 | Single-sample paths when supersampling: sprites at 1×, flat primitives shaded once at the pixel centre (`single_sample_heuristic.comp`) | paraLLEl-GS | Most of the cost of 3× and 4× (4× is 23 ms a field now) | Good: plane 0, the GS's own memory, is unchanged; only the other planes, the picture, change |
 | Deinterlacing and scan-out in shaders, no read back (`weave.frag`) | paraLLEl-GS | The window thread's deinterlacing and the per-field read back | Good, pictures only (option 5) |
 | Fine binning with subgroup ballots, shading only the primitives that cover a tile (`ubershader.comp`) | paraLLEl-GS | GPU time on weak GPUs | Good, deterministic; needs wgpu's subgroup feature, not yet checked on the two GPUs here (option 6) |
@@ -75,15 +78,23 @@ Neither project has anything for VU1's thread, sly-rs's limit today.
 
 ## What is on the table, ranked
 
-1. Triangle setup on the GPU: the GS thread is the limit once VU1's
-   thread is faster.
-2. Single-sample paths when supersampling: cheap, and no hash can move.
-3. Presenting on the GPU (option 5).
-4. Fine binning and lazy shading for weak GPUs (option 6).
-5. Polling-loop skipping on the EE, once a profile shows a loop worth it.
+Neither project relieves sly-rs's two limits, VU1's thread and the GS
+thread: paraLLEl-GS too parses GIF packets and assembles vertices on the
+CPU. On the play dump with the GPU alone drawing, the GS thread's
+instructions go to GIF parsing (27% in `feed` and `packed` themselves),
+vertex handling (11%), IMAGE transfers (9%), primitive bounds (6%), and
+timers and allocation (about 7%);[^profile] speeding those up is sly-rs's
+own work. Of the two projects' techniques:
+
+1. Single-sample paths when supersampling: cheap, and no hash can move.
+2. Presenting on the GPU (option 5).
+3. Fine binning and lazy shading for weak GPUs (option 6).
+4. Polling-loop skipping on the EE, once a profile shows a loop worth it.
+5. Triangle setup on the GPU, only if the drawer thread becomes a limit.
 
 [^rac-rs]: AsobiCodes/rac-rs v0.4.3 (commit 5b14154, 2026-10-31), read from a shallow clone, not built
 [^pgs]: Arntzen-Software/parallel-gs (commit cc6184a), read from a shallow clone, not built
 [^pgs-blog]: Themaister: PlayStation 2 GS emulation, the final frontier of Vulkan compute emulation (2024)
+[^profile]: Instructions by thread on the play dump
 [^options]: Performance after the GPU GS
 [^user]: The user's request (compare with rac-rs and paraLLEl-GS for techniques left on the table)

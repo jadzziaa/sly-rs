@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:03:37Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:11:37Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -201,8 +201,9 @@ runs; the comparisons above were made in turn on the same machine. VU1's
 thread and the GS thread are now the limits together: the stretches the
 GS thread holds at 97% busy run at 165-175% of NTSC. VU1's thread waited
 for the GS 7.2 s (0.2 s before), so the next gains are in the GS thread
-(see [performance-prior-art.md](performance-prior-art.md): triangle setup
-on the GPU) and in VU1's programs.
+(GIF parsing and vertex handling, which no GPU technique takes over; see
+[performance-prior-art.md](performance-prior-art.md)) and in VU1's
+programs.
 
 ## Recommendation
 
