@@ -20,6 +20,7 @@
 pub mod dma;
 pub mod hw;
 pub mod kernel;
+pub mod vu1;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -153,6 +154,8 @@ impl Machine {
         // The IOP publishes its packet buffer in SMCOM when its SIF starts.
         hw.borrow_mut().sbus[1] = IOP_PACKET_BUFFER;
         let mut mem = Memory::new(Box::new(HardwareHandle(Rc::clone(&hw))));
+        // VU1's memories live with VU1, on its thread.
+        mem.regions.vu1_elsewhere = true;
         for section in &image.sections {
             if let Some(bytes) = image.bytes(section.range.clone())
                 && section.kind != ps2_analysis::SectionKind::Bss
@@ -243,7 +246,13 @@ impl Machine {
     pub fn attach_vu(&mut self, translations: &'static [ps2_vu::micro::Translation]) {
         let mut hw = self.hw.borrow_mut();
         hw.vif0.translations = translations;
-        hw.vif1.translations = translations;
+        hw.gs.call(move |vu1| vu1.vif.translations = translations);
+    }
+
+    /// Copies VU1's memories and registers back from its thread into
+    /// `mem.regions` and `hw.vu1`, once it has run everything sent before.
+    pub fn sync_vu1(&mut self) {
+        self.hw.borrow_mut().sync_vu1(&mut self.mem.regions);
     }
 
     /// Runs generated code from the current PC, if there is some and the
@@ -323,6 +332,7 @@ impl Machine {
             let csr = {
                 let mut hw = self.hw.borrow_mut();
                 hw.raise_intc(intc::VBLANK_START);
+                hw.vblank_start(now);
                 hw.gs_csr ^= 1 << 13;
                 hw.gs_event(3);
                 if hw.gs.dumping() {
@@ -371,7 +381,8 @@ impl Machine {
     /// EE's), and the IOP's registers and RAM. Two runs from the same start
     /// must give the same hash.
     #[must_use]
-    pub fn state_hash(&self) -> u64 {
+    pub fn state_hash(&mut self) -> u64 {
+        self.sync_vu1();
         let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
         let mut feed = |bytes: &[u8]| {
             for chunk in bytes.chunks(8) {
@@ -433,7 +444,9 @@ impl Machine {
             code_writes: &mut regions.vu_code_writes[0],
         };
         let started = std::time::Instant::now();
-        if hw.vif0.run(&mut self.cpu.vu0, &mut mem, &mut hw.gs) == ps2_vu::vif::Stop::Interrupt {
+        if hw.vif0.run(&mut self.cpu.vu0, &mut mem, &mut vu1::Nowhere)
+            == ps2_vu::vif::Stop::Interrupt
+        {
             hw.raise_intc(intc::VIF0);
         }
         hw.timing.vif0 += started.elapsed();
@@ -574,22 +587,8 @@ impl Machine {
             );
             return;
         }
-        ps2_vu::micro::run(
-            &mut ps2_vu::micro::Unit {
-                regs: &mut hw.vu1,
-                code: &regions.vu1_code,
-                data: &mut regions.vu1_data,
-                vu1: Some(ps2_vu::micro::Vu1Link {
-                    itop: hw.vif1.read(0xD0),
-                    top: hw.vif1.read(0xE0),
-                    gs: &mut hw.gs,
-                }),
-                cache: &mut hw.vif1.cache,
-                translations: hw.vif1.translations,
-                code_writes: regions.vu_code_writes[1],
-            },
-            address,
-        );
+        // On VU1's thread, in order with VIF1's work.
+        hw.gs.call(move |vu1| vu1.call(address));
     }
 
     /// Runs one instruction (with its delay slot).

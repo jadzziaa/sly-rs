@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T10:20:55Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T11:07:59Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -97,6 +97,15 @@ stretches 119%), because the machine thread holds them at 13.5-14.0 ms a
 field. Moving batching to the drawer thread would free more of the GS
 thread but gain nothing until the machine thread is faster, so it waits;
 3 or 4 (the machine thread) comes first.
+
+**3** (2026-11-04): VIF1 and VU1 run on a thread of their own, the EE
+keeping a shadow of VIF1 ([vu1-thread.md](vu1-thread.md)); replays,
+lockstep and GS dumps unchanged; GS events in packets VU1 builds are
+raised at the next V-blank (Sly 1 has none). The prologue (PGO, GPU
+drawing) takes 171.8 s instead of 203.1 s, its slowest stretches 129%
+then 137-149% of NTSC instead of 119-121%. The GS thread is now the limit
+(90-97% busy in the slowest stretches), VU1's thread next (78-88%): the
+rest of 2 (batching on the drawer thread) pays now, then 4.
 
 ## Recommendation
 

@@ -90,6 +90,10 @@ pub struct Vif {
     pub translations: &'static [micro::Translation],
     /// Programs being recorded (`$SLY_RS_VU_RECORD`).
     recording: Option<crate::record::Recording>,
+    /// A shadow: it follows the codes and keeps the registers as the VIF
+    /// does, but starts no VU program and writes no VU memory (see
+    /// [`Vif::shadow`]).
+    dry: bool,
 }
 
 impl Vif {
@@ -128,6 +132,22 @@ impl Vif {
             cache: micro::Cache::default(),
             translations: &[],
             recording: None,
+            dry: false,
+        }
+    }
+
+    /// A VIF that only follows: it reads the same codes and data as a real
+    /// one and its registers, stalls and interrupts are the same, since none
+    /// depends on what the VU does; but it starts no VU program, loads no
+    /// micro code and unpacks into memory only what changes its own
+    /// registers (ROW, in modes 2 and 3). DIRECT's packets still go to the
+    /// sink (for the events they ask for). The EE keeps one beside the VIF1
+    /// that runs on VU1's thread.
+    #[must_use]
+    pub fn shadow(vif1: bool) -> Self {
+        Self {
+            dry: true,
+            ..Self::new(vif1)
         }
     }
 
@@ -310,6 +330,7 @@ impl Vif {
             0x20 => self.mask = data[0],
             0x30 => self.row.copy_from_slice(data),
             0x31 => self.col.copy_from_slice(data),
+            0x4A if self.dry => {}
             0x4A => {
                 let mut at = imm * 8;
                 for pair in data.as_chunks::<2>().0 {
@@ -326,6 +347,9 @@ impl Vif {
                 });
                 gs.gif(2, qwords.collect());
             }
+            // A shadow unpacks only to keep ROW (modes 2 and 3, which a
+            // V4-5 unpack ignores), into memory nobody reads.
+            0x60..=0x7F if self.dry && (self.mode < 2 || cmd & 0xF == 0xF) => self.num = 0,
             0x60..=0x7F => self.unpack(code, data, mem),
             // NOP, FLUSHE, FLUSH, FLUSHA (the VU has finished: it runs to
             // its end when started), and codes with no effect here.
@@ -352,6 +376,9 @@ impl Vif {
                 self.tops = self.base + self.ofst;
                 self.stat |= stat::DBF;
             }
+        }
+        if self.dry {
+            return;
         }
         tracing::trace!(target: "vu", "VIF{} starts the VU at {pc:x?} (TPC {:#x})", u8::from(self.vif1), regs.tpc);
         let pc = pc.unwrap_or(regs.tpc);

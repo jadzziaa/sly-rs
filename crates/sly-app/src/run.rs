@@ -323,46 +323,44 @@ pub(crate) fn host_time(
     let t = &hw.timing;
     let s = |x: std::time::Duration| x.as_secs_f64();
     let pct = |x: std::time::Duration| 100.0 * x.as_secs_f64() / elapsed.as_secs_f64();
+    let (vu1_busy, programs_time, vu1_gs_wait, programs, pairs) = hw.gs.thread_times();
     writeln!(
         out,
-        "  the machine waited for the GS {:.2} s; it finished at {:.2} s, the GS {:.2} s later",
+        "  the machine waited for VU1's thread {:.2} s; it finished at {:.2} s, the GS {:.2} s later",
         s(hw.gs.waited),
         s(machine_time),
         s(elapsed.saturating_sub(machine_time))
     )?;
     writeln!(
         out,
-        "  VU1: {} programs, {} pairs from VIF1; VIF1 with VU1 {:.2} s, {:.2} s of it waiting for the GS, \
+        "  VU1's thread: {programs} programs, {pairs} pairs from VIF1; busy {:.2} s, {:.2} s of it waiting for the GS, \
          {:.2} s of it in the programs ({:.2} ns a pair, waits included)",
-        hw.vif1.programs,
-        hw.vif1.pairs,
-        s(t.vif1),
-        s(t.vif1_gs_wait),
-        s(hw.vif1.run_time),
-        hw.vif1.run_time.as_secs_f64() * 1e9 / hw.vif1.pairs.max(1) as f64
+        s(vu1_busy),
+        s(vu1_gs_wait),
+        s(programs_time),
+        programs_time.as_secs_f64() * 1e9 / pairs.max(1) as f64
     )?;
     // The machine's time, its parts apart: what is left is the EE and the
     // rest of the hardware.
-    let gs_wait_elsewhere = hw.gs.waited.saturating_sub(t.vif1_gs_wait);
     let rest = machine_time
         .saturating_sub(t.vif1)
         .saturating_sub(t.vif0)
         .saturating_sub(t.vu_calls)
         .saturating_sub(t.iop)
-        .saturating_sub(gs_wait_elsewhere);
+        .saturating_sub(hw.gs.waited);
     writeln!(
         out,
-        "  host time ({:.1} s): VIF1 with VU1 {:.1}% (waiting for the GS {:.1}%); VIF0 with VU0 {:.1}%; \
-         VU programs the EE starts {:.1}%; the IOP {:.1}%; waiting for the GS elsewhere {:.1}%; the EE and the rest {:.1}%; \
-         beside the machine, the GS thread busy {:.1}%, {:.1}% of it queueing and drawing",
+        "  host time ({:.1} s): VIF1's shadow {:.1}%; VIF0 with VU0 {:.1}%; VU programs the EE starts {:.1}%; \
+         the IOP {:.1}%; waiting for VU1's thread {:.1}%; the EE and the rest {:.1}%; \
+         beside the machine, VU1's thread busy {:.1}%, the GS thread busy {:.1}%, {:.1}% of it queueing and drawing",
         s(elapsed),
         pct(t.vif1),
-        pct(t.vif1_gs_wait),
         pct(t.vif0),
         pct(t.vu_calls),
         pct(t.iop),
-        pct(gs_wait_elsewhere),
+        pct(hw.gs.waited),
         pct(rest),
+        pct(vu1_busy),
         pct(busy),
         pct(draw),
     )?;

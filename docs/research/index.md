@@ -8,6 +8,7 @@
 * [How Sly 1 boots in the interpreter](sly1-boot.md) - The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver on the emulated IOP, DMA and GS events, the pad, the memory card check, the title and a new game - up to its first level.
 * [How Sly 1's graphics reach the GS in sly-rs](sly1-graphics.md) - The path Sly 1's frames take through DMA, the scratchpad, VIF0/VIF1, VU0/VU1 and the GS as sly-rs models it, and the four missing pieces that each stopped the first level from drawing. (draft)
 * [VU microcode translated ahead of time](vu-translation.md) - How sly-rs translates the VU microcode overlays into Rust at recompile time, each pair as its own statements with the VU's registers, pipeline and flags in locals, how the translations are matched against what the game uploads and checked against the interpreter bit for bit, and what they gain on Sly 1.
+* [VIF1 and VU1 on a thread of their own](vu1-thread.md) - How sly-rs runs VIF1, VU1 and the GS's feed on their own thread while keeping replays exact - a shadow VIF1 on the EE's side, every GS-bound packet through one ordered queue, the few points where the EE waits - with the rule it changes (PATH1's GS events raised at the next V-blank), the checks and the measured gain.
 
 # Proposal
 

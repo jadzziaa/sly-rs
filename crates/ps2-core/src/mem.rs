@@ -43,6 +43,10 @@ pub struct Regions {
     /// Counts the EE's accesses that may write VU0's and VU1's micro
     /// memory, so translated microcode knows to check it again.
     pub vu_code_writes: [u64; 2],
+    /// VU1's memories live elsewhere (with VU1, on a thread of its own):
+    /// the EE's accesses to them go to the [`Mmio`] handler, and
+    /// `vu1_code` and `vu1_data` here hold them only when copied back.
+    pub vu1_elsewhere: bool,
 }
 
 impl Default for Regions {
@@ -56,6 +60,7 @@ impl Default for Regions {
             vu1_data: vec![0; 16 << 10].into_boxed_slice(),
             iop_ram: vec![0; IOP_RAM_SIZE].into_boxed_slice(),
             vu_code_writes: [0; 2],
+            vu1_elsewhere: false,
         }
     }
 }
@@ -87,6 +92,7 @@ impl Regions {
                 (&mut self.vu0_code, address & 0xFFF)
             }
             0x1100_4000..0x1100_8000 => (&mut self.vu0_data, address & 0xFFF),
+            0x1100_8000..0x1101_0000 if self.vu1_elsewhere => return None,
             0x1100_8000..0x1100_C000 => {
                 self.vu_code_writes[1] += 1;
                 (&mut self.vu1_code, address & 0x3FFF)

@@ -2,8 +2,9 @@
 //! mask registers, timers, the SIF/SBUS registers, the GS's CSR, the VIFs'
 //! registers and FIFOs, and the GIF's FIFO. Everything else is a plain store
 //! that keeps the last value written. Every register's first access is
-//! logged by name. DMA transfers take modelled time ([`crate::dma`]); the
-//! GS, VIF1 and VU1 live here, fed by them.
+//! logged by name. DMA transfers take modelled time ([`crate::dma`]); VIF1
+//! and VU1 run on a thread of their own with the GS behind them
+//! ([`crate::vu1`]), fed from here, with a shadow of VIF1 here.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,19 +81,24 @@ pub struct Hardware {
     pub transfers: Vec<crate::dma::Transfer>,
     /// The GS's SIGNAL and LABEL registers, as packets last set them.
     pub gs_signal_label: (u64, u64),
-    /// The GS itself, drawing on a thread of its own (outside the state
-    /// hash: it only follows what the EE sends it).
-    pub gs: ps2_gs::thread::Threaded,
+    /// VIF1 and VU1 on a thread of their own, with the GS behind them
+    /// (the GS outside the state hash: it only follows what it is sent).
+    pub gs: crate::vu1::Remote,
     /// VIF0.
     pub vif0: ps2_vu::Vif,
     /// VIF0 transfers completed, for the machine to run through VIF0.
     pub vif0_ready: Vec<Vec<u32>>,
-    /// VIF1.
+    /// VIF1's shadow: the real VIF1 runs on VU1's thread.
     pub vif1: ps2_vu::Vif,
-    /// VU1's registers (its memories are in [`Regions`]).
+    /// Memory the shadow unpacks into when it must (ROW): nobody reads it.
+    shadow_memory: (Box<[u8]>, Box<[u8]>, u64),
+    /// VU1's registers, as last copied back from its thread ([`Hardware::sync_vu1`]).
     pub vu1: ps2_vu::Regs,
     /// VIF1's transfer, while it is under way.
     vif1_chain: Option<crate::dma::Chain>,
+    /// VIF1 work handed to VU1's thread whose PATH1 events are still to be
+    /// raised: the job and when its transfer ended.
+    vif1_jobs: Vec<(u64, u64)>,
     /// Host time spent in the VIFs (with the VU programs they start and
     /// what those draw), and in VU programs the EE starts (for reports).
     pub timing: Timing,
@@ -103,10 +109,8 @@ pub struct Hardware {
 pub struct Timing {
     /// VIF0, with VU0 programs.
     pub vif0: std::time::Duration,
-    /// VIF1, with VU1 programs and what they draw.
+    /// VIF1's shadow (the real VIF1 runs on VU1's thread).
     pub vif1: std::time::Duration,
-    /// The part of `vif1` spent waiting for room in the GS's queue.
-    pub vif1_gs_wait: std::time::Duration,
     /// VU programs the EE starts (`vcallms`, CMSAR1).
     pub vu_calls: std::time::Duration,
     /// The IOP catching up.
@@ -134,12 +138,18 @@ impl Hardware {
             console: Vec::new(),
             transfers: Vec::new(),
             gs_signal_label: (0, 0),
-            gs: ps2_gs::thread::Threaded::default(),
+            gs: crate::vu1::Remote::default(),
             vif0: ps2_vu::Vif::new(false),
             vif0_ready: Vec::new(),
-            vif1: ps2_vu::Vif::new(true),
+            vif1: ps2_vu::Vif::shadow(true),
+            shadow_memory: (
+                vec![0; 16 << 10].into_boxed_slice(),
+                vec![0; 16 << 10].into_boxed_slice(),
+                0,
+            ),
             vu1: ps2_vu::reset_regs(),
             vif1_chain: None,
+            vif1_jobs: Vec::new(),
             timing: Timing::default(),
         }
     }
@@ -267,7 +277,7 @@ impl Hardware {
 
     /// Words the EE writes into VIF1's FIFO register: they run at once,
     /// unless a transfer is under way (the FIFO is the DMA's then).
-    fn write_vif1_fifo(&mut self, regions: &mut Regions, value: u128) {
+    fn write_vif1_fifo(&mut self, value: u128) {
         if self.vif1_chain.is_some() {
             // The FIFO is the DMA's while a transfer is under way.
             tracing::warn!(target: "ee::dma", "VIF1 FIFO written during a transfer: dropped");
@@ -275,14 +285,54 @@ impl Hardware {
         }
         let words: [u32; 4] = std::array::from_fn(|k| (value >> (32 * k)) as u32);
         self.vif1.push(&words);
-        let mut mem = ps2_vu::Memories {
-            code: &mut regions.vu1_code,
-            data: &mut regions.vu1_data,
-            code_writes: &mut regions.vu_code_writes[1],
-        };
-        if self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs) == ps2_vu::vif::Stop::Interrupt {
+        let stop = self.run_shadow();
+        let job = self.gs.vif(words.to_vec());
+        self.vif1_jobs.push((job, self.clock.get()));
+        let events = self.gs.take_events();
+        self.raise_gs_events(events);
+        if stop == ps2_vu::vif::Stop::Interrupt {
             self.raise_intc(intc::VIF1);
         }
+    }
+
+    /// Runs VIF1's shadow on the words it holds.
+    fn run_shadow(&mut self) -> ps2_vu::vif::Stop {
+        let (code, data, code_writes) = &mut self.shadow_memory;
+        let mut mem = ps2_vu::Memories {
+            code,
+            data,
+            code_writes,
+        };
+        self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs.path2())
+    }
+
+    /// At V-blank start (`now`): raises the events PATH1's packets asked
+    /// for in VIF1 work whose transfer has ended, once VU1's thread has
+    /// run it.
+    pub fn vblank_start(&mut self, now: u64) {
+        let Some(last) = self
+            .vif1_jobs
+            .iter()
+            .filter(|&&(_, ended)| ended <= now)
+            .map(|&(job, _)| job)
+            .max()
+        else {
+            return;
+        };
+        self.vif1_jobs.retain(|&(job, _)| job > last);
+        let events = self.gs.path1_events(last);
+        self.raise_gs_events(events);
+    }
+
+    /// Copies VU1's memories and registers back from its thread, once it
+    /// has run everything sent before (for state hashes and comparisons).
+    pub fn sync_vu1(&mut self, regions: &mut Regions) {
+        let (code, data, regs) = self
+            .gs
+            .look(|vu1| (vu1.code.clone(), vu1.data.clone(), vu1.regs.clone()));
+        regions.vu1_code.copy_from_slice(&code);
+        regions.vu1_data.copy_from_slice(&data);
+        self.vu1 = regs;
     }
 
     /// Feeds VIF1 from its transfer until the VIF stalls or the transfer
@@ -293,15 +343,11 @@ impl Hardware {
         };
         let before = chain.cycles();
         let started = std::time::Instant::now();
-        let waited = self.gs.waited;
         let mut words = Vec::with_capacity(4);
+        // Everything the shadow reads, for the real VIF1.
+        let mut sent = Vec::new();
         let interrupt = loop {
-            let mut mem = ps2_vu::Memories {
-                code: &mut regions.vu1_code,
-                data: &mut regions.vu1_data,
-                code_writes: &mut regions.vu_code_writes[1],
-            };
-            match self.vif1.run(&mut self.vu1, &mut mem, &mut self.gs) {
+            match self.run_shadow() {
                 ps2_vu::vif::Stop::NeedData => {
                     // The words the waiting command needs, at once: it
                     // cannot run on fewer, so the transfer stands where
@@ -316,6 +362,7 @@ impl Hardware {
                         }
                     }
                     self.vif1.push(&words);
+                    sent.extend_from_slice(&words);
                     if ended {
                         break false;
                     }
@@ -323,15 +370,19 @@ impl Hardware {
                 ps2_vu::vif::Stop::Interrupt => break true,
                 ps2_vu::vif::Stop::Stalled => {
                     self.vif1_chain = Some(chain);
+                    if !sent.is_empty() {
+                        let job = self.gs.vif(sent);
+                        self.vif1_jobs.push((job, self.clock.get()));
+                    }
                     self.timing.vif1 += started.elapsed();
-                    self.timing.vif1_gs_wait += self.gs.waited.saturating_sub(waited);
                     return;
                 }
             }
         };
-        self.timing.vif1 += started.elapsed();
-        self.timing.vif1_gs_wait += self.gs.waited.saturating_sub(waited);
         let due = self.clock.get() + chain.cycles() - before;
+        let job = self.gs.vif(sent);
+        self.vif1_jobs.push((job, due));
+        self.timing.vif1 += started.elapsed();
         self.transfers.push(crate::dma::Transfer {
             channel: 1,
             due,
@@ -393,6 +444,15 @@ impl Hardware {
                 }
             }
         }
+    }
+}
+
+/// The VU1 memory at `address` (`0x1100_8000` on) and the offset in it.
+fn vu1_memory(vu1: &mut crate::vu1::Vu1, address: u32) -> (&mut [u8], usize) {
+    if address < 0x1100_C000 {
+        (&mut vu1.code, (address & 0x3FFF) as usize)
+    } else {
+        (&mut vu1.data, (address & 0x3FFF) as usize)
     }
 }
 
@@ -481,6 +541,10 @@ impl Mmio for HardwareHandle {
                 u128::from(hw.timer_count(((address >> 11) & 3) as usize))
             }
             0x1000_3C00..0x1000_3D80 => u128::from(hw.vif1.read(address - 0x1000_3C00)),
+            0x1100_8000..0x1101_0000 => hw.gs.look(move |vu1| {
+                let (memory, at) = vu1_memory(vu1, address);
+                (0..bytes as usize).fold(0u128, |v, k| v | u128::from(memory[at + k]) << (8 * k))
+            }),
             0x1000_3800..0x1000_3980 => u128::from(hw.vif0.read(address - 0x1000_3800)),
             // CHCR reads busy (STR) until the transfer completes, like every
             // other register: the value last written, as completion left it.
@@ -512,7 +576,7 @@ impl Mmio for HardwareHandle {
             }
             0x1200_1010 => hw.gs_imr = value as u64,
             0x1000_5000 => {
-                hw.write_vif1_fifo(regions, value);
+                hw.write_vif1_fifo(value);
                 return true;
             }
             0x1000_4000 => {
@@ -530,8 +594,18 @@ impl Mmio for HardwareHandle {
                 hw.raise_gs_events(events);
                 return true;
             }
+            0x1100_8000..0x1101_0000 => hw.gs.call(move |vu1| {
+                if address < 0x1100_C000 {
+                    vu1.code_writes += 1;
+                }
+                let (memory, at) = vu1_memory(vu1, address);
+                for k in 0..bytes as usize {
+                    memory[at + k] = (value >> (8 * k)) as u8;
+                }
+            }),
             0x1000_3C00..0x1000_3D80 => {
                 hw.vif1.write(address - 0x1000_3C00, value32);
+                hw.gs.vif_write(address - 0x1000_3C00, value32);
                 if address == 0x1000_3C10 && value32 & 8 != 0 {
                     // STC: the stalled transfer goes on.
                     hw.pump_vif1(regions);

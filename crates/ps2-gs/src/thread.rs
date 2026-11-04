@@ -264,6 +264,15 @@ impl Threaded {
     }
 }
 
+impl Threaded {
+    /// Sends packets on `path` without looking for their events: for a
+    /// sender that scans that path itself (a path's packets must all go
+    /// one way or the other).
+    pub fn gif_unscanned(&mut self, path: usize, data: Vec<u128>) {
+        self.send(Job::Gif(path, data));
+    }
+}
+
 impl Sink for Threaded {
     fn gif(&mut self, path: usize, data: Vec<u128>) {
         self.scanner.scan(path, &data);

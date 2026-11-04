@@ -41,22 +41,15 @@ fn advance(
         return Ok(replay::run(machine, fields, script));
     }
     let mut started = std::time::Instant::now();
-    // Host time so far: the machine waiting for the GS, the GS thread
-    // busy, VIF1 with VU1, its waits for the GS, VU1's programs, VU calls
-    // from the EE, the IOP. Reading the GS waits for its thread.
+    // Host time so far: the machine waiting for VU1's thread, the GS
+    // thread busy, VU1's thread busy and in VU1 programs, VIF1's shadow, VU
+    // calls from the EE, the IOP. Reading the GS waits for both threads.
     let times = |machine: &ps2_ee::Machine| {
         let mut hw = machine.hw.borrow_mut();
         let busy = hw.gs.with(|gs| gs.busy);
+        let (vu1, programs, ..) = hw.gs.thread_times();
         let t = &hw.timing;
-        [
-            hw.gs.waited,
-            busy,
-            t.vif1,
-            t.vif1_gs_wait,
-            hw.vif1.run_time,
-            t.vu_calls,
-            t.iop,
-        ]
+        [hw.gs.waited, busy, vu1, programs, t.vif1, t.vu_calls, t.iop]
     };
     let mut before = times(machine);
     for _ in 0..fields {
@@ -77,18 +70,16 @@ fn advance(
                 .map(|(n, b)| n.saturating_sub(*b).as_secs_f64() / took * 100.0)
                 .collect();
             before = now;
-            let (waited, busy, vif1, vif1_wait, programs, calls, iop) =
+            let (waited, busy, vu1, programs, shadow, calls, iop) =
                 (d[0], d[1], d[2], d[3], d[4], d[5], d[6]);
-            let ee = 100.0 - vif1 - calls - iop - (waited - vif1_wait);
+            let ee = 100.0 - shadow - calls - iop - waited;
             let state = Sly1State::read(&mut machine.mem);
             let (real, at) = (every as f64 / 59.94, field as f64 / 59.94);
             println!(
-                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC, waiting for the GS {waited:.0}%, GS thread busy {busy:.0}%; VU1 programs {:.0}%, the rest of VIF1 {:.0}%, VU calls {calls:.0}%, IOP {iop:.0}%, the EE and the rest {ee:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
+                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC; VU1 thread busy {vu1:.0}% (programs {programs:.0}%), GS thread busy {busy:.0}%; the machine: waiting for VU1's thread {waited:.0}%, VIF1's shadow {shadow:.0}%, VU calls {calls:.0}%, IOP {iop:.0}%, the EE and the rest {ee:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
                 field - every,
                 took * 1000.0 / every as f64,
                 real * 100.0 / took,
-                programs - vif1_wait,
-                vif1 - programs,
                 state.clock(),
                 state.world.0,
                 state.world.1,

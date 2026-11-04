@@ -13,8 +13,11 @@ use sly_common::Game;
 
 use crate::Recompiled;
 
-/// Where two machines differ, if they do.
-fn difference(a: &Machine, b: &Machine) -> Option<String> {
+/// Where two machines differ, if they do. VU1's state is copied back from
+/// both machines' VU1 threads first.
+fn difference(a: &mut Machine, b: &mut Machine) -> Option<String> {
+    a.sync_vu1();
+    b.sync_vu1();
     if a.cpu != b.cpu {
         let (x, y) = (&a.cpu, &b.cpu);
         let mut parts = Vec::new();
@@ -122,7 +125,7 @@ pub(crate) fn run(
         let b = interpreted.run(FIELD_CYCLES);
         time_i += started.elapsed();
         let differs = if a == b {
-            difference(&compiled, &interpreted)
+            difference(&mut compiled, &mut interpreted)
         } else {
             Some(format!("stops: {a:?} / {b:?}"))
         };
@@ -176,7 +179,7 @@ fn narrow(game: Game, recompiled: &Recompiled, from: u64, out: &mut impl Write) 
             let at = (compiled.cpu.pc, interpreted.cpu.cycles);
             compiled.run(size);
             interpreted.run(size);
-            if let Some(what) = difference(&compiled, &interpreted) {
+            if let Some(what) = difference(&mut compiled, &mut interpreted) {
                 found = Some((at, what));
                 break;
             }
