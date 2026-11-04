@@ -93,8 +93,6 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
     let mut app = App {
         shared: Arc::clone(&shared),
         screen: None,
-        fields: Vec::new(),
-        frame: None,
         keys: Vec::new(),
         bindings,
         window_size,
@@ -479,10 +477,6 @@ impl Bindings {
 struct App {
     shared: Arc<Shared>,
     screen: Option<Screen>,
-    /// The latest fields, newest last (at most three).
-    fields: Vec<Field>,
-    /// The picture they make.
-    frame: Option<Frame>,
     /// Keys held.
     keys: Vec<KeyCode>,
     bindings: Bindings,
@@ -520,12 +514,8 @@ impl ApplicationHandler<Event> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
             Event::Frame(field) => {
-                if self.fields.len() == 3 {
-                    self.fields.remove(0);
-                }
-                self.fields.push(field);
-                self.frame = Some(deinterlace(&self.fields));
-                if let Some(screen) = &self.screen {
+                if let Some(screen) = &mut self.screen {
+                    screen.add_field(&field.frame, field.odd);
                     screen.window().request_redraw();
                 }
             }
@@ -600,7 +590,7 @@ impl App {
     /// Shows the latest picture at 4:3 in the window, black around it.
     fn draw(&mut self) -> Result<(), String> {
         match &mut self.screen {
-            Some(screen) => screen.draw(self.frame.as_ref()),
+            Some(screen) => screen.draw(),
             None => Ok(()),
         }
     }
@@ -611,101 +601,6 @@ struct Field {
     frame: Frame,
     /// The odd field: its lines sit one line lower in the picture.
     odd: bool,
-}
-
-/// Row `index` of a picture.
-fn row(frame: &Frame, index: usize) -> &[u8] {
-    let stride = frame.width as usize * 3;
-    &frame.rgb[index * stride..(index + 1) * stride]
-}
-
-/// The difference (summed over red, green and blue, above and below)
-/// under which a pixel counts as unchanged between two fields of the same
-/// parity.
-const STILL: u32 = 24;
-
-/// The picture the latest of `fields` (newest last) makes, deinterlaced
-/// adaptively, roughly as PCSX2's default does: the latest field's lines
-/// in their rows (the odd field's one row lower); each row between them
-/// woven in from the field before where the picture is still, and
-/// interpolated from the latest field's rows above and below where it
-/// moves. Still means the latest field's rows above and below match the
-/// field two before (the same parity). Still 2D then does not bob, still
-/// 3D shows all 448 lines, and moving edges do not comb. A frame-mode
-/// picture is already whole. A picture drawn at a higher internal
-/// resolution has several rows to a line; they go together.
-fn deinterlace(fields: &[Field]) -> Frame {
-    let Some(latest) = fields.last() else {
-        return Frame::default();
-    };
-    let scale = latest.frame.factor() as usize;
-    let (width, height) = (
-        latest.frame.width as usize,
-        latest.frame.height as usize / scale,
-    );
-    if height > 256 || width == 0 || height == 0 {
-        return latest.frame.clone();
-    }
-    let same =
-        |f: &Field| f.frame.width == latest.frame.width && f.frame.height == latest.frame.height;
-    let back = |k: usize| {
-        fields
-            .len()
-            .checked_sub(k)
-            .map(|k| &fields[k])
-            .filter(|f| same(f))
-    };
-    // The field before (the other parity) and the one before that (this
-    // parity again).
-    let before = back(2).filter(|f| f.odd != latest.odd);
-    let earlier = back(3).filter(|f| before.is_some() && f.odd == latest.odd);
-    let own = usize::from(latest.odd);
-    let mut rgb = Vec::with_capacity(width * height * scale * 2 * 3);
-    for (line, sub) in (0..height * 2).flat_map(|line| (0..scale).map(move |sub| (line, sub))) {
-        let index = line / 2;
-        // Row `sub` of field line `i`.
-        let at = |i: usize| i * scale + sub;
-        if line % 2 == own {
-            rgb.extend_from_slice(row(&latest.frame, at(index)));
-            continue;
-        }
-        // The latest field's lines above and below this line.
-        let (up, down) = if latest.odd {
-            (index.saturating_sub(1), index)
-        } else {
-            (index, (index + 1).min(height - 1))
-        };
-        let (up, down) = (at(up), at(down));
-        let (above, below) = (row(&latest.frame, up), row(&latest.frame, down));
-        let was = earlier.map(|f| (row(&f.frame, up), row(&f.frame, down)));
-        let woven = before.map(|f| row(&f.frame, at(index)));
-        for x in 0..width {
-            let px = 3 * x..3 * x + 3;
-            let differ = |a: &[u8], b: &[u8]| -> u32 {
-                a[px.clone()]
-                    .iter()
-                    .zip(&b[px.clone()])
-                    .map(|(&p, &q)| u32::from(p.abs_diff(q)))
-                    .sum()
-            };
-            let still = was.is_some_and(|(a, b)| differ(above, a) + differ(below, b) <= STILL);
-            match woven {
-                Some(n) if still => rgb.extend_from_slice(&n[px]),
-                _ => rgb.extend(
-                    above[px.clone()]
-                        .iter()
-                        .zip(&below[px])
-                        .map(|(&a, &b)| a.midpoint(b)),
-                ),
-            }
-        }
-    }
-    Frame {
-        width: latest.frame.width,
-        height: latest.frame.height * 2,
-        rgb,
-        scale: latest.frame.scale,
-    }
 }
 
 #[cfg(test)]
@@ -764,54 +659,5 @@ mod tests {
         let pad = combine(keyboard, Some(gamepad));
         assert_eq!(pad.buttons, 3);
         assert_eq!(pad.sticks, [0xF0, 0x80, 0x00, 0x80]);
-    }
-
-    fn field(rows: &[u8], odd: bool) -> Field {
-        Field {
-            frame: Frame {
-                width: 1,
-                height: u32::try_from(rows.len()).unwrap_or(0),
-                rgb: rows.iter().flat_map(|&v| [v, v, v]).collect(),
-                scale: 1,
-            },
-            odd,
-        }
-    }
-
-    fn rows(frame: &Frame) -> Vec<u8> {
-        frame.rgb.iter().step_by(3).copied().collect()
-    }
-
-    #[test]
-    fn still_fields_weave_and_do_not_bob() {
-        // The same picture in every field: the odd field's rows land one
-        // line lower, and the rows between come from the other field, so
-        // the picture is identical whichever field is the latest.
-        let still = [10, 200, 30];
-        let even = deinterlace(&[
-            field(&still, false),
-            field(&still, true),
-            field(&still, false),
-        ]);
-        let odd = deinterlace(&[
-            field(&still, true),
-            field(&still, false),
-            field(&still, true),
-        ]);
-        assert_eq!(rows(&even), [10, 10, 200, 200, 30, 30]);
-        assert_eq!(rows(&odd), rows(&even));
-    }
-
-    #[test]
-    fn moving_fields_interpolate_instead_of_combing() {
-        // The latest field differs from the one two before: the field
-        // before is not woven in; the latest field's neighbours are
-        // averaged.
-        let latest = field(&[0, 100, 200], false);
-        let picture = deinterlace(&[field(&[9, 9, 9], false), field(&[50, 50, 50], true), latest]);
-        assert_eq!(rows(&picture), [0, 50, 100, 150, 200, 200]);
-        // With no history, the same.
-        let alone = deinterlace(&[field(&[0, 100, 200], true)]);
-        assert_eq!(rows(&alone), [0, 0, 50, 100, 150, 200]);
     }
 }
