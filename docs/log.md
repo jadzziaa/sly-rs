@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: [Performance after the GPU GS](research/performance-options.md): with the GPU alone drawing, CLUT loads no longer read local memory on the CPU; the GS thread drops to 81-83% busy in the prologue's slowest stretches, and the machine thread is the limit, so the full GS thread split waits.
 * **Update**: [Performance after the GPU GS](research/performance-options.md): profile-guided optimisation done (`cargo xtask recomp sly1 --pgo REPLAY`); with the GPU drawing the prologue's slowest stretches go from 106-110% to 120% of NTSC.
 * **Creation**: [Performance after the GPU GS](research/performance-options.md): where host time goes with the GPU drawing (the machine thread is the limit, the GS thread next) and the options for weaker machines, ranked.
 * **Update**: [GPU GS](research/gpu-gs.md) at higher resolutions: outlines walked per sample plane, and textures drawn into read across the planes (no more hatched shadows); the first plane still matches the software GS.

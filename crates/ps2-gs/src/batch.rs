@@ -693,7 +693,9 @@ impl Gs {
     /// with local memory and the CLUT as they are. With `software` false
     /// the CPU no longer draws (or writes transfers' pixels): local memory
     /// here goes stale, and pictures, dumps and transfers that read it ask
-    /// the tap ([`Gs::picture`], [`Gs::sync_memory`]).
+    /// the tap ([`Gs::picture`], [`Gs::sync_memory`]); so does the CLUT,
+    /// which the tap loads (going back to drawing on the CPU, it is right
+    /// again from the next CLUT load).
     pub fn set_tap(&mut self, tap: Option<Box<dyn export::Tap>>, software: bool) {
         self.sync_memory();
         self.flush();
@@ -958,7 +960,9 @@ impl Gs {
     }
 
     /// Before the CLUT is loaded: the batch is drawn first if it writes
-    /// what the CLUT is read from.
+    /// what the CLUT is read from. When only the tap draws, only the order
+    /// matters (the tap loads the CLUT after what is handed over before
+    /// it): the batch is handed over, not waited for.
     pub(crate) fn before_clut_load(&mut self, t: Tex0) {
         let region = if t.csm {
             let (cbw, cou, cov) = (
@@ -973,7 +977,11 @@ impl Gs {
         };
         let b = &mut self.batch;
         if b.uses.reads_conflict(region) {
-            self.flush();
+            if b.gpu_only {
+                self.submit();
+            } else {
+                self.flush();
+            }
             return;
         }
         if b.upload
@@ -983,7 +991,15 @@ impl Gs {
             // It comes before the primitives queued: it can go alone.
             b.hand_over_upload(&self.mem);
         }
-        b.wait_if(|uses| uses.reads_conflict(region));
+        if !b.gpu_only {
+            b.wait_if(|uses| uses.reads_conflict(region));
+        }
+    }
+
+    /// Only the tap draws: local memory here is stale, and the CLUT is
+    /// loaded by the tap.
+    pub(crate) const fn gpu_only(&self) -> bool {
+        self.batch.gpu_only
     }
 }
 

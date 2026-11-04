@@ -404,33 +404,37 @@ impl Gs {
             0xA => Psm::Ct16s,
             _ => Psm::Ct16,
         };
-        for i in 0..entries {
-            let (x, y, bw) = if t.csm {
-                // CSM2: a line of 16-bit entries at TEXCLUT's offset.
-                let (cbw, cou, cov) = (
-                    bits(self.texclut, 0, 6),
-                    bits(self.texclut, 6, 6),
-                    bits(self.texclut, 12, 10),
-                );
-                (cou * 16 + i, cov, cbw)
-            } else if entries == 256 {
-                // CSM1, 8-bit: 16 x 16 with entries 8-15 and 16-23 of each
-                // 32 swapped.
-                let j = (i & 0xE7) | ((i & 8) << 1) | ((i & 0x10) >> 1);
-                (j % 16, j / 16, 1)
-            } else {
-                (i % 8, i / 8, 1)
-            };
-            if cpsm == Psm::Ct32 && !t.csm {
-                let c = self.mem.read(Psm::Ct32, t.cbp, bw, x, y);
-                let at = ((t.csa * 16 + i) & 0xFF) as usize;
-                self.clut[at] = c as u16;
-                self.clut[256 + at] = (c >> 16) as u16;
-            } else {
-                let c = self
-                    .mem
-                    .read(if t.csm { Psm::Ct16 } else { cpsm }, t.cbp, bw, x, y);
-                self.clut[((t.csa * 16 + i) & 0x1FF) as usize] = c as u16;
+        // When only the tap draws, local memory here is stale and the tap
+        // loads the CLUT itself.
+        if !self.gpu_only() {
+            for i in 0..entries {
+                let (x, y, bw) = if t.csm {
+                    // CSM2: a line of 16-bit entries at TEXCLUT's offset.
+                    let (cbw, cou, cov) = (
+                        bits(self.texclut, 0, 6),
+                        bits(self.texclut, 6, 6),
+                        bits(self.texclut, 12, 10),
+                    );
+                    (cou * 16 + i, cov, cbw)
+                } else if entries == 256 {
+                    // CSM1, 8-bit: 16 x 16 with entries 8-15 and 16-23 of each
+                    // 32 swapped.
+                    let j = (i & 0xE7) | ((i & 8) << 1) | ((i & 0x10) >> 1);
+                    (j % 16, j / 16, 1)
+                } else {
+                    (i % 8, i / 8, 1)
+                };
+                if cpsm == Psm::Ct32 && !t.csm {
+                    let c = self.mem.read(Psm::Ct32, t.cbp, bw, x, y);
+                    let at = ((t.csa * 16 + i) & 0xFF) as usize;
+                    self.clut[at] = c as u16;
+                    self.clut[256 + at] = (c >> 16) as u16;
+                } else {
+                    let c = self
+                        .mem
+                        .read(if t.csm { Psm::Ct16 } else { cpsm }, t.cbp, bw, x, y);
+                    self.clut[((t.csa * 16 + i) & 0x1FF) as usize] = c as u16;
+                }
             }
         }
         if self.tapped() {

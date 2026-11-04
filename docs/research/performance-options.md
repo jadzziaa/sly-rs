@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T09:50:27Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T10:20:55Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -81,6 +81,22 @@ with the same state hash at the end:
 
 With the GPU drawing, the slowest stretches now have the GS thread 93-95%
 busy: it is the limit next, as foreseen, so 2 comes next.
+
+**2, in part** (2026-11-04). Timed on the play dump with the GPU alone
+drawing, the GS thread's 0.755 s for 60 fields went about 40% to parsing
+GIF packets, 25% to building primitives, 30% to batching (12% to
+footprints), and inside the parsing 15% to CLUT loads, which read local
+memory on the CPU that the GPU does not need: it loads its CLUTs itself,
+in order. With the GPU alone drawing, a CLUT load now only hands over a
+batch that draws into what it reads (without waiting for it) and records
+the load for the GPU: 0.660 s for those 60 fields, every dump's GPU
+memory still equal to the software GS's. On the prologue (PGO build) the
+GS thread is now 81-83% busy in the slowest stretches (74% over the
+whole, from 90%), and the speed is unchanged (203.1 s; the slowest
+stretches 119%), because the machine thread holds them at 13.5-14.0 ms a
+field. Moving batching to the drawer thread would free more of the GS
+thread but gain nothing until the machine thread is faster, so it waits;
+3 or 4 (the machine thread) comes first.
 
 ## Recommendation
 
