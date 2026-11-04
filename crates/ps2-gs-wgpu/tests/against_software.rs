@@ -1,9 +1,11 @@
 //! The GPU GS draws what the software GS draws, word for word, over
-//! random memory: triangles (lists, strips, fans) and sprites in every
+//! random memory: points, lines, triangles (lists, strips, fans; either
+//! antialiased) and sprites (UV or STQ) in every
 //! frame, depth and texture format, nearest and bilinear, every texture
 //! function, wrap mode, alpha and destination alpha test, depth test,
 //! blend, fog, scan mask, FBMSK, PABE, COLCLAMP and FBA, UV and STQ (Q of
-//! either sign), with CLUTs loaded from memory.
+//! either sign), with CLUTs loaded from memory and transfers into the
+//! blocks drawn among the primitives.
 //!
 //! Skipped on a machine with no GPU that has 64-bit integers in shaders.
 
@@ -38,8 +40,43 @@ impl Random {
     }
 }
 
+/// A host-to-local transfer of random pixels into the frame, the depth
+/// buffer or the texture, somewhere in the 64 × 64 they use.
+fn transfer(gs: &mut Gs, r: &mut Random, frame_psm: u64, zpsm: u64, tex_psm: u64) {
+    let (bp, bw, psm) = r.pick(&[
+        (0u64, 1u64, frame_psm),
+        (0x40, 1, 0x30 | zpsm),
+        (0x80, 2, tex_psm),
+    ]);
+    let (width, height) = (r.pick(&[8u64, 16, 32]), r.pick(&[4u64, 8]));
+    let (left, top) = (r.below(64 - width), r.below(64 - height));
+    gs.write(addr::BITBLTBUF, bp << 32 | bw << 48 | psm << 56);
+    gs.write(addr::TRXPOS, left << 32 | top << 48);
+    gs.write(addr::TRXREG, width | height << 32);
+    gs.write(addr::TRXDIR, 0);
+    let bits = match psm {
+        0x00 | 0x30 | 0x1B | 0x24 | 0x2C => 32,
+        0x01 | 0x31 => 24,
+        0x13 => 8,
+        0x14 => 4,
+        _ => 16,
+    };
+    // T8H, T4HL and T4HH move 8 or 4 bits a pixel.
+    let bits = match psm {
+        0x1B => 8,
+        0x24 | 0x2C => 4,
+        _ => bits,
+    };
+    let qwords = (width * height * bits).div_ceil(128);
+    let tag = u128::from(qwords | 1 << 15 | 2 << 58);
+    let data: Vec<u128> = std::iter::once(tag)
+        .chain((0..qwords).map(|_| u128::from(r.next()) | u128::from(r.next()) << 64))
+        .collect();
+    gs.gif(2, data);
+}
+
 /// One case: registers, then primitives, through a GS drawing on two
-/// threads with the GPU as its tap.
+/// threads with the GPU as its tap, with transfers among them.
 fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize) {
     let mut gs = Gs::default();
     let random: Vec<u8> = (0..ps2_gs::mem::SIZE).map(|_| r.next() as u8).collect();
@@ -124,6 +161,11 @@ fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize) {
             addr::XYZ2,
             r.below(72 * 16) | r.below(72 * 16) << 16 | (r.next() & 0xFFFF_FFFF) << 32,
         );
+        // Transfers among the primitives, sometimes two in a row, into
+        // blocks they use: the GPU must have them in the same order.
+        while r.below(4) == 0 {
+            transfer(&mut gs, r, frame_psm, zpsm, tex_psm);
+        }
     }
     gs.flush();
     let cpu = gs.mem.to_words();
@@ -154,8 +196,6 @@ fn the_gpu_draws_what_the_software_gs_draws() {
         drew += usize::from(changed > 0);
         words += changed;
     }
-    let left_out = gpu.0.lock().map_or(1, |g| g.skipped);
-    assert_eq!(left_out, 0, "primitives left out");
     // Tests reject some cases whole, but not most.
     assert!(
         drew >= 100,

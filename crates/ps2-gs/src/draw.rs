@@ -612,26 +612,18 @@ impl Raster<'_> {
         va: &Vertex,
         vb: &Vertex,
     ) {
-        let (fa, fb) = (attrs(p, va), attrs(p, vb));
-        let ((x0, u0), (x1, u1)) = if a.0 <= b.0 {
-            ((a.0, fa.uv.0), (b.0, fb.uv.0))
-        } else {
-            ((b.0, fb.uv.0), (a.0, fa.uv.0))
-        };
-        let ((y0, v0), (y1, v1)) = if a.1 <= b.1 {
-            ((a.1, fa.uv.1), (b.1, fb.uv.1))
-        } else {
-            ((b.1, fb.uv.1), (a.1, fa.uv.1))
-        };
+        let fb = attrs(p, vb);
+        let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
+        let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
         if x0 == x1 || y0 == y1 {
             return;
         }
-        let [cx0, cx1, cy0, cy1] = clip;
-        let px0 = ((x0 + 15) >> 4).max(cx0);
-        let px1 = ((x1 + 15) >> 4).min(cx1 + 1);
-        let py0 = ((y0 + 15) >> 4).max(cy0);
-        let py1 = ((y1 + 15) >> 4).min(cy1 + 1);
         if let Some(fill) = Fill::of(p, &fb) {
+            let [cx0, cx1, cy0, cy1] = clip;
+            let px0 = ((x0 + 15) >> 4).max(cx0);
+            let px1 = ((x1 + 15) >> 4).min(cx1 + 1);
+            let py0 = ((y0 + 15) >> 4).max(cy0);
+            let py1 = ((y1 + 15) >> 4).min(cy1 + 1);
             for y in py0..py1 {
                 if y < 0 || matches!((p.scanmsk, y & 1), (2, 0) | (3, 1)) {
                     continue;
@@ -642,17 +634,9 @@ impl Raster<'_> {
             }
             return;
         }
-        let at = |c0, c1, s0, s1, s| sprite_coord(p.fst, c0, c1, s0, s1, s);
-        // U depends on the column alone: once per column, not per pixel.
-        let us: Vec<i32> = (px0..px1)
-            .map(|x| texcoord(p, (at(u0, u1, x0, x1, x * 16), 0.0)).0)
-            .collect();
-        for y in py0..py1 {
-            let v = texcoord(p, (0.0, at(v0, v1, y0, y1, y * 16))).1;
-            for (x, &u) in (px0..px1).zip(&us) {
-                self.fragment::<false>(p, x, y, Frag { tex: (u, v), ..fb });
-            }
-        }
+        sprite_frags(p, clip, a, b, va, vb, &mut |x, y, f| {
+            self.fragment::<false>(p, x, y, f);
+        });
     }
 
     /// A triangle; `HOT` when `p` is in the specialised state.
@@ -777,8 +761,7 @@ impl Raster<'_> {
         }
     }
 
-    /// An antialiased triangle's edges (`AA1`), after its inside: PCSX2's
-    /// walk, each pixel with the share of it the triangle covers.
+    /// An antialiased triangle's edges (`AA1`), after its inside.
     fn aa_edges(
         &self,
         p: &Pipe,
@@ -787,24 +770,12 @@ impl Raster<'_> {
         given: &[Frag; 3],
         last: &Frag,
     ) {
-        crate::aa::triangle(pos, p.scissor, &mut |e| {
-            if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
-                let frag = edge_frag(p, &given[e.from], &given[e.to], e.t, last);
-                self.fragment::<false>(
-                    p,
-                    e.x,
-                    e.y,
-                    Frag {
-                        coverage: Some(e.coverage),
-                        ..frag
-                    },
-                );
-            }
+        aa_edge_frags(p, clip, pos, given, last, &mut |x, y, f| {
+            self.fragment::<false>(p, x, y, f);
         });
     }
 
-    /// An antialiased line (`AA1`): PCSX2's walk, two pixels a step, every
-    /// one an edge pixel.
+    /// An antialiased line (`AA1`).
     fn aa_line(
         &self,
         p: &Pipe,
@@ -814,20 +785,8 @@ impl Raster<'_> {
         va: &Vertex,
         vb: &Vertex,
     ) {
-        let (fa, fb) = (attrs(p, va), attrs(p, vb));
-        crate::aa::line(a, b, p.scissor, &mut |e| {
-            if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
-                let frag = edge_frag(p, &fa, &fb, e.t, &fb);
-                self.fragment::<false>(
-                    p,
-                    e.x,
-                    e.y,
-                    Frag {
-                        coverage: Some(e.coverage),
-                        ..frag
-                    },
-                );
-            }
+        aa_line_frags(p, clip, a, b, va, vb, &mut |x, y, f| {
+            self.fragment::<false>(p, x, y, f);
         });
     }
 
@@ -840,43 +799,9 @@ impl Raster<'_> {
         va: &Vertex,
         vb: &Vertex,
     ) {
-        let (fa, fb) = (attrs(p, va), attrs(p, vb));
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let steps = (dx.abs().max(dy.abs()) + 15) >> 4;
-        let [cx0, cx1, cy0, cy1] = clip;
-        for i in 0..steps.max(1) {
-            let t = i as f32 / steps.max(1) as f32;
-            let x = (a.0 as f32 + dx as f32 * t) as i32;
-            let y = (a.1 as f32 + dy as f32 * t) as i32;
-            let (px, py) = ((x + 8) >> 4, (y + 8) >> 4);
-            if px < cx0 || px > cx1 || py < cy0 || py > cy1 {
-                continue;
-            }
-            let mix = |a: i32, b: i32| a + ((b - a) as f32 * t) as i32;
-            let rgba = if p.iip {
-                std::array::from_fn(|k| mix(fa.rgba[k], fb.rgba[k]))
-            } else {
-                fb.rgba
-            };
-            let z = (f64::from(fa.z) + (f64::from(fb.z) - f64::from(fa.z)) * f64::from(t)) as u32;
-            let uv = (
-                fa.uv.0 + (fb.uv.0 - fa.uv.0) * t,
-                fa.uv.1 + (fb.uv.1 - fa.uv.1) * t,
-            );
-            self.fragment::<false>(
-                p,
-                px,
-                py,
-                Frag {
-                    z,
-                    rgba,
-                    uv,
-                    tex: texcoord(p, uv),
-                    f: mix(fa.f, fb.f),
-                    ..fb
-                },
-            );
-        }
+        line_frags(p, clip, a, b, va, vb, &mut |x, y, f| {
+            self.fragment::<false>(p, x, y, f);
+        });
     }
 
     /// The texel at (`u`, `v`), already wrapped, as RGBA8888.
@@ -1153,6 +1078,149 @@ impl Raster<'_> {
             _ => (rgba, fbmsk),
         };
         self.mem.set(at, (new & !mask) | (dst & mask));
+    }
+}
+
+/// An antialiased triangle's edges (`AA1`), inside `clip`: PCSX2's walk,
+/// each pixel with the share of it the triangle covers, handed to `emit`.
+fn aa_edge_frags(
+    p: &Pipe,
+    clip: [i32; 4],
+    pos: [(i32, i32); 3],
+    given: &[Frag; 3],
+    last: &Frag,
+    emit: &mut impl FnMut(i32, i32, Frag),
+) {
+    crate::aa::triangle(pos, p.scissor, &mut |e| {
+        if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
+            let frag = edge_frag(p, &given[e.from], &given[e.to], e.t, last);
+            emit(
+                e.x,
+                e.y,
+                Frag {
+                    coverage: Some(e.coverage),
+                    ..frag
+                },
+            );
+        }
+    });
+}
+
+/// An antialiased line (`AA1`), inside `clip`: PCSX2's walk, two pixels a
+/// step, every one an edge pixel, handed to `emit`.
+fn aa_line_frags(
+    p: &Pipe,
+    clip: [i32; 4],
+    a: (i32, i32),
+    b: (i32, i32),
+    va: &Vertex,
+    vb: &Vertex,
+    emit: &mut impl FnMut(i32, i32, Frag),
+) {
+    let (fa, fb) = (attrs(p, va), attrs(p, vb));
+    crate::aa::line(a, b, p.scissor, &mut |e| {
+        if (clip[0]..=clip[1]).contains(&e.x) && (clip[2]..=clip[3]).contains(&e.y) {
+            let frag = edge_frag(p, &fa, &fb, e.t, &fb);
+            emit(
+                e.x,
+                e.y,
+                Frag {
+                    coverage: Some(e.coverage),
+                    ..frag
+                },
+            );
+        }
+    });
+}
+
+/// A line's fragments inside `clip`, handed to `emit`.
+fn line_frags(
+    p: &Pipe,
+    clip: [i32; 4],
+    a: (i32, i32),
+    b: (i32, i32),
+    va: &Vertex,
+    vb: &Vertex,
+    emit: &mut impl FnMut(i32, i32, Frag),
+) {
+    let (fa, fb) = (attrs(p, va), attrs(p, vb));
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let steps = (dx.abs().max(dy.abs()) + 15) >> 4;
+    let [cx0, cx1, cy0, cy1] = clip;
+    for i in 0..steps.max(1) {
+        let t = i as f32 / steps.max(1) as f32;
+        let x = (a.0 as f32 + dx as f32 * t) as i32;
+        let y = (a.1 as f32 + dy as f32 * t) as i32;
+        let (px, py) = ((x + 8) >> 4, (y + 8) >> 4);
+        if px < cx0 || px > cx1 || py < cy0 || py > cy1 {
+            continue;
+        }
+        let mix = |a: i32, b: i32| a + ((b - a) as f32 * t) as i32;
+        let rgba = if p.iip {
+            std::array::from_fn(|k| mix(fa.rgba[k], fb.rgba[k]))
+        } else {
+            fb.rgba
+        };
+        let z = (f64::from(fa.z) + (f64::from(fb.z) - f64::from(fa.z)) * f64::from(t)) as u32;
+        let uv = (
+            fa.uv.0 + (fb.uv.0 - fa.uv.0) * t,
+            fa.uv.1 + (fb.uv.1 - fa.uv.1) * t,
+        );
+        emit(
+            px,
+            py,
+            Frag {
+                z,
+                rgba,
+                uv,
+                tex: texcoord(p, uv),
+                f: mix(fa.f, fb.f),
+                ..fb
+            },
+        );
+    }
+}
+
+/// A textured sprite's fragments inside `clip` (corners `a` and `b`),
+/// handed to `emit`.
+fn sprite_frags(
+    p: &Pipe,
+    clip: [i32; 4],
+    a: (i32, i32),
+    b: (i32, i32),
+    va: &Vertex,
+    vb: &Vertex,
+    emit: &mut impl FnMut(i32, i32, Frag),
+) {
+    let (fa, fb) = (attrs(p, va), attrs(p, vb));
+    let ((x0, u0), (x1, u1)) = if a.0 <= b.0 {
+        ((a.0, fa.uv.0), (b.0, fb.uv.0))
+    } else {
+        ((b.0, fb.uv.0), (a.0, fa.uv.0))
+    };
+    let ((y0, v0), (y1, v1)) = if a.1 <= b.1 {
+        ((a.1, fa.uv.1), (b.1, fb.uv.1))
+    } else {
+        ((b.1, fb.uv.1), (a.1, fa.uv.1))
+    };
+    if x0 == x1 || y0 == y1 {
+        return;
+    }
+    let [cx0, cx1, cy0, cy1] = clip;
+    let px0 = ((x0 + 15) >> 4).max(cx0);
+    let px1 = ((x1 + 15) >> 4).min(cx1 + 1);
+    let py0 = ((y0 + 15) >> 4).max(cy0);
+    let py1 = ((y1 + 15) >> 4).min(cy1 + 1);
+    let at = |c0, c1, s0, s1, s| sprite_coord(p.fst, c0, c1, s0, s1, s);
+    // U depends on the column alone: once per column, not per pixel.
+    let us: Vec<i32> = (px0..px1)
+        .map(|x| texcoord(p, (at(u0, u1, x0, x1, x * 16), 0.0)).0)
+        .collect();
+    for y in py0..py1 {
+        let v = texcoord(p, (0.0, at(v0, v1, y0, y1, y * 16))).1;
+        for (x, &u) in (px0..px1).zip(&us) {
+            emit(x, y, Frag { tex: (u, v), ..fb });
+        }
     }
 }
 

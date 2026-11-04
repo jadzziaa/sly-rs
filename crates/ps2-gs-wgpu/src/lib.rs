@@ -16,7 +16,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ps2_gs::export::{self, PRIM_WORDS, Write, flag, word};
+use ps2_gs::export::{self, FRAG_WORDS, PRIM_WORDS, Write, flag, word};
 
 /// Local memory, in words.
 const WORDS: u64 = 1 << 20;
@@ -61,7 +61,10 @@ fn header() -> String {
         ("V", word::V),
         ("Q", word::Q),
         ("FLAT_RGBA", word::FLAT_RGBA),
+        ("FRAGS", word::FRAGS),
+        ("FRAG_COUNT", word::FRAG_COUNT),
         ("PRIM_WORDS", PRIM_WORDS),
+        ("FRAG_WORDS", FRAG_WORDS),
     ];
     let flags = [
         ("TME", flag::TME),
@@ -81,6 +84,8 @@ fn header() -> String {
         ("OWNED", flag::OWNED),
         ("FLAT_Z", flag::FLAT_Z),
         ("STQ", flag::STQ),
+        ("AA1", flag::AA1),
+        ("LISTED", flag::LISTED),
     ];
     words
         .iter()
@@ -145,15 +150,15 @@ pub struct GpuGs {
     cluts: Grown,
     tiles: Grown,
     order: Grown,
+    frags: Grown,
     writes: Grown,
-    /// Each tile's primitives, while a batch is binned.
-    lists: Vec<Vec<u32>>,
+    /// Each tile's entries (primitive, first fragment, fragments), while a
+    /// batch is binned.
+    lists: Vec<Vec<[u32; 3]>>,
     /// The GPU's name and backend.
     pub name: String,
     /// Batches drawn.
     pub batches: u64,
-    /// Primitives left out (kinds not drawn yet).
-    pub skipped: u64,
 }
 
 impl GpuGs {
@@ -232,11 +237,11 @@ impl GpuGs {
             cluts: Grown::new("cluts"),
             tiles: Grown::new("tiles"),
             order: Grown::new("order"),
+            frags: Grown::new("fragments"),
             writes: Grown::new("writes"),
             lists: vec![Vec::new(); TILES * TILES],
             name: format!("{} ({:?})", info.name, info.backend),
             batches: 0,
-            skipped: 0,
         })
     }
 
@@ -328,7 +333,9 @@ impl export::Tap for GpuGs {
         if writes.is_empty() {
             return;
         }
-        let flat: Vec<u32> = writes.iter().flatten().copied().collect();
+        let flat: Vec<u32> = std::iter::once(writes.len() as u32)
+            .chain(writes.iter().flatten().copied())
+            .collect();
         let buffer = self.writes.fill(&self.device, &self.queue, &flat).clone();
         let groups = (writes.len() as u32).div_ceil(64);
         self.dispatch(&self.write, &[&self.mem, &buffer], groups, false);
@@ -336,24 +343,63 @@ impl export::Tap for GpuGs {
 
     fn batch(&mut self, batch: &export::Batch) {
         self.batches += 1;
-        self.skipped += u64::from(batch.skipped);
         let count = batch.prims.len() / PRIM_WORDS;
         if count == 0 {
             return;
         }
         let mut used = Vec::new();
         let mut snapshot = false;
+        // Fragments, each primitive's grouped by tile (in order within one).
+        let mut binned: Vec<u32> = Vec::with_capacity(batch.frags.len());
+        let mut by_tile: Vec<(usize, usize)> = Vec::new();
         for (i, prim) in batch.prims.as_chunks::<PRIM_WORDS>().0.iter().enumerate() {
             snapshot |= prim[word::KIND] & flag::SNAPSHOT != 0;
+            let tile_of = |x: u32, y: u32| (y / TILE) as usize * TILES + (x / TILE) as usize;
+            let mut entry =
+                |t: usize, first: usize, count: usize, lists: &mut Vec<Vec<[u32; 3]>>| {
+                    if lists[t].is_empty() {
+                        used.push(t);
+                    }
+                    lists[t].push([i as u32, first as u32, count as u32]);
+                };
+            // Its fragments, by tile.
+            let (first, count) = (prim[word::FRAGS] as usize, prim[word::FRAG_COUNT] as usize);
+            by_tile.clear();
+            for f in first..first + count {
+                let xy = batch.frags[f * FRAG_WORDS];
+                by_tile.push((tile_of(xy & 0xFFFF, xy >> 16), f));
+            }
+            by_tile.sort_by_key(|&(t, _)| t);
+            let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+            for &(t, f) in &by_tile {
+                let at = binned.len() / FRAG_WORDS;
+                binned.extend_from_slice(&batch.frags[f * FRAG_WORDS..(f + 1) * FRAG_WORDS]);
+                match runs.last_mut() {
+                    Some(run) if run.0 == t => run.2 += 1,
+                    _ => runs.push((t, at, 1)),
+                }
+            }
+            if prim[word::KIND] & flag::LISTED != 0 {
+                for (t, at, n) in runs {
+                    entry(t, at, n, &mut self.lists);
+                }
+                continue;
+            }
+            // Its inside: every tile of its box, with the fragments there.
             let (bx, by) = (prim[word::BBOX_X], prim[word::BBOX_Y]);
             let (x0, x1, y0, y1) = (bx & 0xFFFF, bx >> 16, by & 0xFFFF, by >> 16);
+            let mut runs = runs.into_iter().peekable();
             for ty in y0 / TILE..=(y1 / TILE).min(TILES as u32 - 1) {
                 for tx in x0 / TILE..=(x1 / TILE).min(TILES as u32 - 1) {
                     let t = ty as usize * TILES + tx as usize;
-                    if self.lists[t].is_empty() {
-                        used.push(t);
-                    }
-                    self.lists[t].push(i as u32);
+                    let (at, n) = match runs.peek() {
+                        Some(&(rt, at, n)) if rt == t => {
+                            runs.next();
+                            (at, n)
+                        }
+                        _ => (0, 0),
+                    };
+                    entry(t, at, n, &mut self.lists);
                 }
             }
         }
@@ -364,10 +410,10 @@ impl export::Tap for GpuGs {
             tiles.extend([
                 (t % TILES) as u32,
                 (t / TILES) as u32,
-                order.len() as u32,
+                (order.len() / 3) as u32,
                 list.len() as u32,
             ]);
-            order.extend_from_slice(list);
+            order.extend(list.iter().flatten());
             list.clear();
         }
         let (device, queue) = (&self.device, &self.queue);
@@ -375,6 +421,7 @@ impl export::Tap for GpuGs {
         let cluts = self.cluts.fill(device, queue, &batch.cluts).clone();
         let tile_buffer = self.tiles.fill(device, queue, &tiles).clone();
         let order_buffer = self.order.fill(device, queue, &order).clone();
+        let frag_buffer = self.frags.fill(device, queue, &binned).clone();
         self.dispatch(
             &self.draw,
             &[
@@ -385,6 +432,7 @@ impl export::Tap for GpuGs {
                 &cluts,
                 &tile_buffer,
                 &order_buffer,
+                &frag_buffer,
             ],
             used.len() as u32,
             snapshot,

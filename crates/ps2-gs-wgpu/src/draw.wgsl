@@ -14,7 +14,13 @@
 @group(0) @binding(4) var<storage, read> cluts: array<u32>;
 // x, y (in tiles), the first entry in `order`, how many.
 @group(0) @binding(5) var<storage, read> tiles: array<vec4<u32>>;
+// Entries of three words: the primitive, its first fragment in this tile,
+// how many.
 @group(0) @binding(6) var<storage, read> order: array<u32>;
+// Fragments walked on the CPU (`W_FRAG_WORDS` words each).
+@group(0) @binding(7) var<storage, read> frags: array<u32>;
+
+const NO_COVERAGE: u32 = 0xFFFFFFFFu;
 
 const RATIO_MAX: u64 = 1073741824lu;
 
@@ -208,7 +214,7 @@ fn pack16(c: u32) -> u32 {
     return ((c >> 3u) & 0x1Fu) | (((c >> 11u) & 0x1Fu) << 5u) | (((c >> 19u) & 0x1Fu) << 10u) | ((c >> 31u) << 15u);
 }
 
-fn fragment(pb: u32, x: u32, y: u32, z: u32, rgba: vec4<i32>, tex: vec2<i32>, fog: i32) {
+fn fragment(pb: u32, x: u32, y: u32, z: u32, rgba: vec4<i32>, tex: vec2<i32>, fog: i32, coverage: u32) {
     let scanmsk = word(pb, W_SCANMSK);
     if (scanmsk == 2u && (y & 1u) == 0u) || (scanmsk == 3u && (y & 1u) == 1u) {
         return;
@@ -278,6 +284,14 @@ fn fragment(pb: u32, x: u32, y: u32, z: u32, rgba: vec4<i32>, tex: vec2<i32>, fo
             }
         }
     }
+    if has(pb, F_AA1) {
+        // Coverage alpha: an edge's share of the pixel, else 0x80; it
+        // replaces alpha, or with blending on only an alpha of 0x80.
+        let a = select(i32(coverage >> 9u), 0x80, coverage == NO_COVERAGE);
+        if !has(pb, F_ABE) || c.w == 0x80 {
+            c.w = a;
+        }
+    }
     if has(pb, F_FGE) {
         let fc = channels(word(pb, W_FOGCOL));
         let mixed = (fog * c + (255 - fog) * fc) >> vec4<u32>(8u);
@@ -285,7 +299,8 @@ fn fragment(pb: u32, x: u32, y: u32, z: u32, rgba: vec4<i32>, tex: vec2<i32>, fo
     }
     // Alpha test: which writes survive.
     var write_fb = true;
-    var write_z = !has(pb, F_ZMSK);
+    // Antialiased edges test depth but never write it.
+    var write_z = !has(pb, F_ZMSK) && coverage == NO_COVERAGE;
     var write_alpha = true;
     if bits(t, 0u, 1u) != 0u {
         let a = c.w;
@@ -327,7 +342,8 @@ fn fragment(pb: u32, x: u32, y: u32, z: u32, rgba: vec4<i32>, tex: vec2<i32>, fo
         d = dst | 0x80000000u;
     }
     let dc = channels(d);
-    if has(pb, F_ABE) && (!has(pb, F_PABE) || (c.w & 0x80) != 0) {
+    // AA1 blends (with ALPHA) even without ABE.
+    if (has(pb, F_ABE) || has(pb, F_AA1)) && (!has(pb, F_PABE) || (c.w & 0x80) != 0) {
         let al = word(pb, W_ALPHA);
         let cs = c;
         var coeff = i32(bits(al, 8u, 8u));
@@ -525,7 +541,7 @@ fn triangle(pb: u32, x: u32, y: u32) {
             );
         }
     }
-    fragment(pb, x, y, z, rgba, tex, fog);
+    fragment(pb, x, y, z, rgba, tex, fog, NO_COVERAGE);
 }
 
 // A sprite's texture coordinate at sample `s` between corners at `s0`
@@ -542,7 +558,7 @@ fn sprite(pb: u32, x: u32, y: u32) {
             sprite_coord(sword(pb, W_V), sword(pb, W_V + 1u), sword(pb, W_POS + 1u), sword(pb, W_POS + 3u), i32(y) * 16),
         );
     }
-    fragment(pb, x, y, word(pb, W_Z), channels(word(pb, W_RGBA)), tex, i32(word(pb, W_FOG)));
+    fragment(pb, x, y, word(pb, W_Z), channels(word(pb, W_RGBA)), tex, i32(word(pb, W_FOG)), NO_COVERAGE);
 }
 
 @compute @workgroup_size(16, 16)
@@ -551,17 +567,40 @@ fn draw(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
     let x = tile.x * 16u + local.x;
     let y = tile.y * 16u + local.y;
     for (var i = tile.z; i < tile.z + tile.w; i++) {
-        let pb = order[i] * W_PRIM_WORDS;
+        let pb = order[3u * i] * W_PRIM_WORDS;
+        let first = order[3u * i + 1u];
+        let count = order[3u * i + 2u];
         let bx = word(pb, W_BBOX_X);
         let by = word(pb, W_BBOX_Y);
         if x < (bx & 0xFFFFu) || x > (bx >> 16u) || y < (by & 0xFFFFu) || y > (by >> 16u) {
             continue;
         }
-        let kind = word(pb, W_KIND) & 7u;
-        if kind >= 6u {
-            sprite(pb, x, y);
-        } else {
-            triangle(pb, x, y);
+        if !has(pb, F_LISTED) {
+            let kind = word(pb, W_KIND) & 7u;
+            if kind >= 6u {
+                sprite(pb, x, y);
+            } else {
+                triangle(pb, x, y);
+            }
+        }
+        // Fragments walked on the CPU: an antialiased triangle's edges
+        // after its inside, or all of a point's, line's or STQ sprite's.
+        let here = x | (y << 16u);
+        for (var f = first; f < first + count; f++) {
+            let at = f * W_FRAG_WORDS;
+            if frags[at] != here {
+                continue;
+            }
+            fragment(
+                pb,
+                x,
+                y,
+                frags[at + 1u],
+                channels(frags[at + 2u]),
+                vec2<i32>(bitcast<i32>(frags[at + 3u]), bitcast<i32>(frags[at + 4u])),
+                bitcast<i32>(frags[at + 5u]),
+                frags[at + 6u],
+            );
         }
     }
 }

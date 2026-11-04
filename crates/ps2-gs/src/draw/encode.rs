@@ -2,8 +2,10 @@
 
 use std::sync::Arc;
 
-use super::{Pipe, Prim, Vertex, attrs};
-use crate::export::{self, PRIM_WORDS, flag, word};
+use super::{
+    Frag, Pipe, Prim, Vertex, aa_edge_frags, aa_line_frags, attrs, line_frags, point, sprite_frags,
+};
+use crate::export::{self, FRAG_WORDS, PRIM_WORDS, flag, word};
 use crate::fixed;
 use crate::regs::bits;
 
@@ -21,32 +23,73 @@ pub(crate) fn batch(prims: &[Prim], snapshot: bool) -> export::Batch {
                 .extend((0..256).map(|i| u32::from(p.clut[i]) | u32::from(p.clut[256 + i]) << 16));
             cluts.len() - 1
         });
-        if !encode(prim, clut as u32, snapshot, &mut out.prims) {
-            out.skipped += 1;
-        }
+        encode(prim, clut as u32, snapshot, &mut out.prims, &mut out.frags);
     }
     out
 }
 
-/// Appends `prim`'s words to `out`; false if the GPU does not draw its kind
-/// yet (nothing appended). A primitive that draws nothing appends nothing.
-fn encode(prim: &Prim, clut: u32, snapshot: bool, out: &mut Vec<u32>) -> bool {
+/// Appends `prim`'s words to `out`, and its fragments, if it has any, to
+/// `frags`. A primitive that draws nothing appends nothing.
+fn encode(prim: &Prim, clut: u32, snapshot: bool, out: &mut Vec<u32>, frags: &mut Vec<u32>) {
     let p = &prim.pipe;
+    let v = &prim.v;
     let mut w = [0u32; PRIM_WORDS];
-    let drawn = match prim.kind {
-        3..=5 if !p.aa1 => triangle(p, &prim.v, &mut w),
-        6 | 7 => match sprite(p, &prim.v, &mut w) {
-            Some(drawn) => drawn,
-            None => return false,
-        },
-        _ => return false,
+    let first = frags.len() / FRAG_WORDS;
+    let mut emit = |x: i32, y: i32, f: Frag| {
+        frags.extend_from_slice(&[
+            x as u32 | (y as u32) << 16,
+            f.z,
+            rgba(f.rgba),
+            f.tex.0 as u32,
+            f.tex.1 as u32,
+            f.f as u32,
+            f.coverage.unwrap_or(u32::MAX),
+            0,
+        ]);
     };
-    if !drawn {
-        return true;
+    let clip = prim.bbox;
+    let (a, b) = (at(p, &v[0]), at(p, &v[1]));
+    let drawn = match prim.kind {
+        0 => {
+            let (x, y) = point(a);
+            if (clip[0]..=clip[1]).contains(&x) && (clip[2]..=clip[3]).contains(&y) {
+                emit(x, y, attrs(p, &v[0]));
+            }
+            w[word::KIND] |= flag::LISTED;
+            true
+        }
+        1 | 2 => {
+            if p.aa1 {
+                aa_line_frags(p, clip, a, b, &v[0], &v[1], &mut emit);
+            } else {
+                line_frags(p, clip, a, b, &v[0], &v[1], &mut emit);
+            }
+            w[word::KIND] |= flag::LISTED;
+            true
+        }
+        3..=5 => {
+            let drawn = triangle(p, v, &mut w);
+            if drawn && p.aa1 {
+                let pos = [a, b, at(p, &v[2])];
+                let given = [attrs(p, &v[0]), attrs(p, &v[1]), attrs(p, &v[2])];
+                aa_edge_frags(p, clip, pos, &given, &given[2], &mut emit);
+            }
+            drawn
+        }
+        _ => sprite(p, v, &mut w).unwrap_or_else(|| {
+            sprite_frags(p, clip, a, b, &v[0], &v[1], &mut emit);
+            w[word::KIND] |= flag::LISTED;
+            true
+        }),
+    };
+    let count = frags.len() / FRAG_WORDS - first;
+    if !drawn || (w[word::KIND] & flag::LISTED != 0 && count == 0) {
+        return;
     }
+    w[word::FRAGS] = first as u32;
+    w[word::FRAG_COUNT] = count as u32;
     common(prim, clut, snapshot, &mut w);
     out.extend_from_slice(&w);
-    true
 }
 
 /// The pipeline's state, the same for every kind.
@@ -67,6 +110,7 @@ fn common(prim: &Prim, clut: u32, snapshot: bool, w: &mut [u32; PRIM_WORDS]) {
         (p.zbuf.is_some() && p.depth_layout.is_some(), flag::ZBUF),
         (p.tex_psm.is_some() && p.tex_layout.is_some(), flag::TEX),
         (snapshot, flag::SNAPSHOT),
+        (p.aa1, flag::AA1),
     ];
     w[word::KIND] |= (prim.kind as u32 & 7)
         | flags
@@ -176,7 +220,7 @@ fn triangle(p: &Pipe, v: &[Vertex; 3], w: &mut [u32; PRIM_WORDS]) -> bool {
 }
 
 /// A sprite as `Raster::sprite` sets it up: `Some(false)` if it has no
-/// area, `None` if the GPU does not draw it yet (an STQ texture).
+/// area, `None` if its pixels are walked on the CPU (an STQ texture).
 fn sprite(p: &Pipe, v: &[Vertex; 3], w: &mut [u32; PRIM_WORDS]) -> Option<bool> {
     let (a, b) = (at(p, &v[0]), at(p, &v[1]));
     let (fa, fb) = (attrs(p, &v[0]), attrs(p, &v[1]));

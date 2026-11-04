@@ -737,9 +737,6 @@ impl Gs {
         writes: &[(u32, u32, u32)],
         region: Region,
     ) {
-        if let Some(tap) = &mut self.tap {
-            tap.writes(&word_writes(psm, bp, bw, writes));
-        }
         if !self.batching() {
             for &(x, y, value) in writes {
                 self.mem.write(psm, bp, bw, x, y, value);
@@ -749,6 +746,12 @@ impl Gs {
         if self.batch.uses.uploads_conflict(region) {
             // After the primitives queued, which use those blocks.
             self.submit();
+        }
+        // The tap gets the pixels in the drawer's order: after the batches
+        // handed over, before the primitives queued (which do not use those
+        // blocks).
+        if let Some(tap) = &mut self.tap {
+            tap.writes(&word_writes(psm, bp, bw, writes));
         }
         let b = &mut self.batch;
         let (upload, uses) = b

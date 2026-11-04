@@ -4,7 +4,7 @@ title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:47:10Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T07:14:19Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -134,15 +134,36 @@ writes. The GPU bins a batch into 16 × 16 tiles on the CPU and draws it
 in one dispatch, a workgroup per tile, an invocation per pixel, each
 pixel's primitives in order (`draw.wgsl`, the `fragment` pipeline line
 for line); sub-word writes (16-bit frames, CLUT formats) use atomic and
-and or. Lines, points, antialiased triangles and STQ sprites are left
-out (M3). `gs-replay --gpu` compares the two memories after every field:
+and or. `gs-replay --gpu` compares the two memories after every field:
 the title's 3D, the trial, our Paris dump and the two probes are the
 same after every field, twice on the RX 9070 XT and once on the
 integrated Radeon; breaking one line of the shader is caught at the
-first field. The dumps with lines, points or antialiasing differ from
-their first such primitive. A test draws 160 random cases (every format,
-filter, function, test, blend and wrap mode, UV and STQ with Q of either
-sign) through both and compares every word.
+first field. A test draws 160 random cases (every format, filter,
+function, test, blend and wrap mode, UV and STQ with Q of either sign)
+through both and compares every word.
+
+**M3, checked** (2026-11-04): points, lines, antialiased edges (AA1) and
+sprites with STQ textures are walked on the CPU by the software GS's own
+walks (now handing each fragment to a callback, which the software GS
+draws and the encoder records), sent as fragments (eight words each) and
+shaded on the GPU: a batch's fragments are binned by tile, an
+antialiased triangle's after its inside, with coverage alpha and AA1's
+blending in the shader. Hazards are the software GS's batch boundaries,
+one dispatch each. Transfers' pixels reach the tap in the drawer's order
+(a transfer that must wait for the queued batch comes after it). All
+thirteen dumps, play60's 35,000 antialiased lines among them, are the
+same after every field, twice on the RX 9070 XT and once on the
+integrated Radeon. The random test adds points, lines, AA1 and STQ
+sprites, and transfers among the primitives into the blocks they draw;
+handing transfers over in the old order fails it.
+
+CLUT loads stay on the CPU. With the GPU drawing alone (M4), the CPU's
+memory will have only transfers in it: in all thirteen dumps every CLUT
+load reads the same values from such a memory as from the whole one.
+Checked word by word against what primitives may have written, two loads
+a field in play (CBP 5120 and 5121, pages the depth buffer shares) read
+words a primitive's footprint covered; M4 must notice such a load and
+then read the CLUT from the GPU.
 
 ## Facts checked
 
@@ -179,7 +200,7 @@ sign) through both and compares every word.
 | M0 | wgpu in `play`: device, surface, presentation (softbuffer goes); the software GS still draws (**done**, 2026-11-04) | the window shows the same frames; `play` still records and replays |
 | M1 | the shared integer arithmetic in the software GS (**done**, 2026-11-03: only triangles' texture coordinates changed) | PCSX2 parity re-run; twelve dumps re-baselined |
 | M2 | compute rasteriser for triangles and sprites, the full `fragment` pipeline (not just the hot state: mixing CPU and GPU drawing would need constant syncs) (**done**, 2026-11-04) | GPU memory hash equals the software's on the dumps that use only those, twice in a row |
-| M3 | hazards as dispatch boundaries, uploads, CLUT loads, AA1, lines, points | all twelve dumps |
+| M3 | hazards as dispatch boundaries, uploads, CLUT loads, AA1, lines, points (**done**, 2026-11-04) | all twelve dumps |
 | M4 | play on the GPU, the display read on the GPU | the prologue replays with its state hashes; `replay --timing` shows the GS off the critical path; runs on the integrated GPU |
 | M5 | super-sampling, behind an option | options off leave the hashes as they are |
 

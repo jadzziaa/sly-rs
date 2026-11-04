@@ -160,15 +160,15 @@ impl GpuCheck {
             .fold(0xCBF2_9CE4_8422_2325u64, |h, b| {
                 (h ^ u64::from(b)).wrapping_mul(0x100_0000_01B3)
             });
-        let (name, batches, skipped) = self
+        let (name, batches) = self
             .shared
             .0
             .lock()
-            .map(|g| (g.name.clone(), g.batches, g.skipped))
+            .map(|g| (g.name.clone(), g.batches))
             .unwrap_or_default();
         writeln!(
             out,
-            "GPU ({name}): {batches} batches, {skipped} primitives left out, {} copies resynced; GPU memory hash {hash:016x}",
+            "GPU ({name}): {batches} batches, {} copies resynced; GPU memory hash {hash:016x}",
             gs.tap_resyncs
         )?;
         match (self.first, first) {
