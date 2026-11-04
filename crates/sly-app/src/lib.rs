@@ -35,14 +35,15 @@ pub struct Recompiled {
     pub vu: &'static [ps2_vu::micro::Translation],
 }
 
-/// Has `machine`'s GS draw on the GPU alone from now on; returns the GPU's
-/// name.
+/// Has `machine`'s GS draw on the GPU alone from now on, at `scale` times
+/// its resolution; returns the GPU's name.
 ///
 /// # Errors
 ///
 /// If there is no GPU it can draw on.
-pub(crate) fn use_gpu(machine: &ps2_ee::Machine) -> anyhow::Result<String> {
-    let gpu = ps2_gs_wgpu::GpuGs::new().map_err(|e| anyhow::anyhow!("the GPU GS: {e}"))?;
+pub(crate) fn use_gpu(machine: &ps2_ee::Machine, scale: u32) -> anyhow::Result<String> {
+    let gpu =
+        ps2_gs_wgpu::GpuGs::with_scale(scale).map_err(|e| anyhow::anyhow!("the GPU GS: {e}"))?;
     let name = gpu.name.clone();
     machine
         .hw
@@ -229,6 +230,10 @@ enum Command {
         /// Draw on the GPU (as `gpu = true` under `[play]`).
         #[arg(long)]
         gpu: bool,
+        /// With --gpu, draw at this many times the GS's resolution, 1 to 4
+        /// (as `scale` under `[play]`).
+        #[arg(long)]
+        scale: Option<u32>,
     },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
@@ -262,6 +267,10 @@ enum Command {
         /// Draw on the GPU alone.
         #[arg(long)]
         gpu_only: bool,
+        /// With --gpu or --gpu-only, draw on the GPU at this many times the
+        /// GS's resolution (1 to 4).
+        #[arg(long, default_value_t = 1)]
+        scale: u32,
     },
     /// Run a replay (scripted presses) and check its checkpoints: the game's
     /// world and level, and the machine's state hash.
@@ -300,6 +309,9 @@ enum Command {
         /// Draw on the GPU.
         #[arg(long)]
         gpu: bool,
+        /// With --gpu, draw at this many times the GS's resolution (1 to 4).
+        #[arg(long, default_value_t = 1)]
+        scale: u32,
     },
     /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
     /// as PCSX2 keeps them), or check an existing one with --check.
@@ -395,6 +407,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             gs_dump_fields,
             timing,
             gpu,
+            scale,
         } => replay::run(
             &path,
             record,
@@ -404,7 +417,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 beyond,
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
                 timing,
-                gpu,
+                gpu: gpu.then_some(scale),
             },
             recompiled.filter(|_| !interpret),
         ),
@@ -441,6 +454,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             replay,
             interpret,
             gpu,
+            scale,
         } => sly_common::Game::from_key(&game)
             .ok_or_else(|| anyhow::anyhow!("unknown game {game:?}"))
             .and_then(|game| {
@@ -448,6 +462,9 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                     .map(|c| c.play().clone())
                     .unwrap_or_default();
                 settings.gpu |= gpu;
+                if let Some(scale) = scale {
+                    settings.scale = scale;
+                }
                 play::run(
                     play::Options {
                         game,
@@ -468,6 +485,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             states,
             gpu,
             gpu_only,
+            scale,
         } => gs_replay::run(
             &path,
             repeat,
@@ -476,9 +494,9 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             frames.as_deref(),
             states,
             if gpu {
-                Some(gs_replay::Gpu::Check)
+                Some((gs_replay::Gpu::Check, scale))
             } else {
-                gpu_only.then_some(gs_replay::Gpu::Only)
+                gpu_only.then_some((gs_replay::Gpu::Only, scale))
             },
         ),
     };

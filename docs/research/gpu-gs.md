@@ -3,8 +3,7 @@ type: Proposal
 title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
-status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T07:49:52Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T08:14:22Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -206,6 +205,35 @@ loads CLUTs on the GPU.
   pixels before shading (as paraLLEl-GS does) is the next step for weak
   GPUs.
 
+**M5, checked** (2026-11-04): a higher internal resolution, `scale` S
+of 1 to 4 (`play --gpu --scale 3`, `scale = 3` under `[play]`,
+`replay --gpu --scale`, `gs-replay --gpu --scale`). Local memory is kept
+S² times on the GPU, in sample planes: plane `j·S + i` is drawn with
+every sample moved `(i, j)/S` pixel (16/S in 1/16 pixel; a primitive's
+box widened by a pixel left and up, within the scissor), its textures
+read from the same plane, so a frame drawn and then textured from stays
+consistent. Plane 0 samples where the GS does, so it is local memory
+exactly: CLUT loads and read-backs use it, and with any scale the
+hashes cannot move. Transfers go to every plane; the display reads each
+GS pixel as S × S pixels, one from each plane; the window filters a
+scaled picture (bilinear) instead of taking its pixels.
+
+- With `--scale 2`, all thirteen dumps are the same as the software GS
+  after every field (memory, and the pictures' plane-0 pixels); a test
+  compares random cases at 2× and 3× likewise. With the option off
+  nothing changes: the software hashes and the 1× comparisons are as
+  before.
+- GPU time on 60 fields of play (RX 9070 XT, the GS's own work
+  included): 0.73 s at 1×, 0.76 s at 2×, 0.83 s at 3×, 1.33 s at 4× (22
+  ms a field: slower than real time).
+- Seen in the window at 3×: geometry and textures are sharper. Two
+  limits: points, lines and antialiased edges (Sly's outlines), walked on
+  the CPU, are the same in every plane, so they stay a GS pixel wide and
+  look blocky beside the sharper geometry; and effects that blur a small
+  frame by texturing it from itself (Sly's character shadows) show a fine
+  hatching, each plane blurring its own shifted copy. A session played at
+  3× wrote a recording that replays to its checkpoint.
+
 ## Facts checked
 
 - **Sly never reads GS memory back.** On six dumps (ours and PCSX2's, the
@@ -243,7 +271,7 @@ loads CLUTs on the GPU.
 | M2 | compute rasteriser for triangles and sprites, the full `fragment` pipeline (not just the hot state: mixing CPU and GPU drawing would need constant syncs) (**done**, 2026-11-04) | GPU memory hash equals the software's on the dumps that use only those, twice in a row |
 | M3 | hazards as dispatch boundaries, uploads, CLUT loads, AA1, lines, points (**done**, 2026-11-04) | all twelve dumps |
 | M4 | play on the GPU, the display read on the GPU (**done**, 2026-11-04) | the prologue replays with its state hashes; `replay --timing` shows the GS off the critical path; runs on the integrated GPU |
-| M5 | super-sampling, behind an option | options off leave the hashes as they are |
+| M5 | super-sampling, behind an option (**done**, 2026-11-04) | options off leave the hashes as they are |
 
 ## Risks
 

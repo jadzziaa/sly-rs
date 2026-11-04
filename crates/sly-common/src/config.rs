@@ -83,6 +83,9 @@ pub struct Play {
     pub gamepad: BTreeMap<String, String>,
     /// Draw on the GPU (the GPU GS) instead of the CPU.
     pub gpu: bool,
+    /// When drawing on the GPU, draw at this many times the GS's
+    /// resolution (1 to 4).
+    pub scale: u32,
 }
 
 impl Default for Play {
@@ -93,6 +96,7 @@ impl Default for Play {
             keys: BTreeMap::new(),
             gamepad: BTreeMap::new(),
             gpu: false,
+            scale: 1,
         }
     }
 }

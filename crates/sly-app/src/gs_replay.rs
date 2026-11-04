@@ -16,7 +16,7 @@ pub(crate) fn run(
     screenshot: Option<&Path>,
     frames: Option<&Path>,
     states: bool,
-    gpu: Option<Gpu>,
+    gpu: Option<(Gpu, u32)>,
 ) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if let Some(dir) = frames {
@@ -32,9 +32,9 @@ pub(crate) fn run(
             gs.states = Some(std::collections::HashMap::new());
         }
         let mut check = None;
-        if let Some(gpu) = gpu {
+        if let Some((gpu, scale)) = gpu {
             let shared = ps2_gs_wgpu::Shared(std::sync::Arc::new(std::sync::Mutex::new(
-                ps2_gs_wgpu::GpuGs::new().map_err(|e| anyhow!(e))?,
+                ps2_gs_wgpu::GpuGs::with_scale(scale).map_err(|e| anyhow!(e))?,
             )));
             gs.set_tap(Some(Box::new(shared.clone())), gpu == Gpu::Check);
             check = Some(GpuCheck {
@@ -172,6 +172,9 @@ impl GpuCheck {
             .lock()
             .map(|mut g| ps2_gs::export::Tap::display(&mut *g, regs))
             .unwrap_or_default();
+        // At a higher resolution: the pixels plane 0 gave, one in `scale`
+        // each way.
+        let gpu = plane_zero(&gpu);
         self.pictures.0 += 1;
         if cpu != gpu && self.pictures.1.is_none() {
             self.pictures.1 = Some(field);
@@ -219,6 +222,29 @@ impl GpuCheck {
             )?,
         }
         Ok(())
+    }
+}
+
+/// The pixels of a picture drawn at a higher internal resolution that its
+/// first sample plane gave: one in `scale` each way.
+fn plane_zero(frame: &ps2_gs::Frame) -> ps2_gs::Frame {
+    let scale = frame.factor();
+    if scale == 1 {
+        return frame.clone();
+    }
+    let (width, height) = (frame.width / scale, frame.height / scale);
+    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let at = ((y * scale * frame.width + x * scale) * 3) as usize;
+            rgb.extend_from_slice(&frame.rgb[at..at + 3]);
+        }
+    }
+    ps2_gs::Frame {
+        width,
+        height,
+        rgb,
+        scale: 1,
     }
 }
 

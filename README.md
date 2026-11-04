@@ -66,7 +66,9 @@ Commands so far:
   true` under `[play]`) has the GPU draw the game too, the same pixels as
   the CPU, faster (it needs 64-bit integers in shaders: Vulkan, DirectX 12
   or Metal); `replay --gpu` and `gs-replay --gpu-only` do the same, and
-  `gs-replay --gpu` draws on both and compares them after every field. The
+  `gs-replay --gpu` draws on both and compares them after every field.
+  With the GPU, `--scale 2` (to 4, or `scale` under `[play]`) draws at
+  twice the PS2's resolution or more, for a sharper picture. The
   recompiled binary below plays faster in busy scenes.
 - `sly-rs format-card card.ps2` writes a freshly formatted 8 MB memory
   card image as PCSX2 keeps them (`--check` reads one and reports on it).

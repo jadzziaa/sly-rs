@@ -2,7 +2,8 @@
 //! texture and shown at 4:3, centred, black around it. A shader maps
 //! window pixels to picture pixels with the same integer arithmetic the
 //! CPU painter used (nearest, a field's lines doubled), so the window
-//! shows exactly the picture's pixels, scaled.
+//! shows exactly the picture's pixels, scaled; a picture drawn at a
+//! higher internal resolution is filtered instead.
 //!
 //! The adapter is the high-performance one unless `WGPU_POWER_PREF=low`
 //! (or `WGPU_BACKEND`) says otherwise.
@@ -22,7 +23,9 @@ struct Place {
     // field's are doubled).
     frame: vec2<u32>,
     lines: u32,
-    pad: u32,
+    // A picture drawn at a higher internal resolution: filtered (bilinear)
+    // rather than taken pixel by pixel.
+    filtered: u32,
 }
 
 @group(0) @binding(0) var picture: texture_2d<f32>;
@@ -42,6 +45,16 @@ fn fragment(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
     let p = pixel - place.origin;
+    if place.filtered != 0u {
+        let at = (vec2<f32>(p) + 0.5) * vec2<f32>(place.frame) / vec2<f32>(place.size) - 0.5;
+        let last = vec2<i32>(place.frame) - 1;
+        let low = clamp(vec2<i32>(floor(at)), vec2<i32>(0), last);
+        let high = min(low + 1, last);
+        let w = clamp(at - floor(at), vec2<f32>(0.0), vec2<f32>(1.0));
+        let top = mix(textureLoad(picture, low, 0), textureLoad(picture, vec2<i32>(high.x, low.y), 0), w.x);
+        let bottom = mix(textureLoad(picture, vec2<i32>(low.x, high.y), 0), textureLoad(picture, high, 0), w.x);
+        return vec4<f32>(mix(top, bottom, w.y).rgb, 1.0);
+    }
     let line = p.y * place.lines / place.size.y;
     let row = min(line * place.frame.y / place.lines, place.frame.y - 1u);
     let column = p.x * place.frame.x / place.size.x;
@@ -371,7 +384,7 @@ impl Painter {
 fn place((width, height): (u32, u32), frame: &Frame) -> [u8; 32] {
     let (tw, th) = fit((width, height));
     // A field is half the picture's lines; a frame-mode picture is whole.
-    let lines = if frame.height <= 256 {
+    let lines = if frame.height / frame.factor() <= 256 {
         frame.height * 2
     } else {
         frame.height
@@ -384,7 +397,7 @@ fn place((width, height): (u32, u32), frame: &Frame) -> [u8; 32] {
         frame.width,
         frame.height,
         lines,
-        0,
+        u32::from(frame.factor() > 1),
     ];
     let mut bytes = [0; 32];
     for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
@@ -513,6 +526,7 @@ mod tests {
                     seed.to_le_bytes()[0]
                 })
                 .collect(),
+            scale: 1,
         };
         // A field (its lines doubled), a frame-mode picture and a small one,
         // in windows wider, taller and exactly 4:3.
@@ -543,6 +557,7 @@ mod tests {
             width: 2,
             height: 2,
             rgb: vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
+            scale: 1,
         };
         let mut buffer = vec![0u32; 8 * 4];
         paint(&mut buffer, (8, 4), &frame);

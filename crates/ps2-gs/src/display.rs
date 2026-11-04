@@ -52,6 +52,17 @@ pub struct Frame {
     pub height: u32,
     /// Three bytes per pixel.
     pub rgb: Vec<u8>,
+    /// Pixels a GS pixel became, along each axis (drawn at a higher
+    /// internal resolution); 0 and 1 both mean one.
+    pub scale: u32,
+}
+
+impl Frame {
+    /// Pixels a GS pixel became, along each axis.
+    #[must_use]
+    pub const fn factor(&self) -> u32 {
+        if self.scale == 0 { 1 } else { self.scale }
+    }
 }
 
 /// One read circuit's placement.
@@ -190,7 +201,12 @@ impl Gs {
                 rgb.extend(out.map(|v| v as u8));
             }
         }
-        Frame { width, height, rgb }
+        Frame {
+            width,
+            height,
+            rgb,
+            scale: 1,
+        }
     }
 }
 

@@ -98,6 +98,10 @@ pub mod word {
     pub const FRAGS: usize = 66;
     /// See [`FRAGS`].
     pub const FRAG_COUNT: usize = 67;
+    /// The scissor, inclusive: `x0 | x1 << 16`.
+    pub const SCISSOR_X: usize = 68;
+    /// `y0 | y1 << 16`.
+    pub const SCISSOR_Y: usize = 69;
 }
 
 /// Words a fragment takes in [`Batch::frags`]: `x | y << 16`, depth,

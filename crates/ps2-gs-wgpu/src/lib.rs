@@ -8,6 +8,15 @@
 //! (`draw.wgsl`). A transfer's pixels are written as words
 //! (`write.wgsl`). Drawing needs 64-bit integers in shaders
 //! (`SHADER_INT64`: Vulkan, DirectX 12, Metal).
+//!
+//! At a higher internal resolution (`scale` S above 1) local memory is
+//! kept S² times, in sample planes: plane `j·S + i` is drawn with every
+//! sample moved by `(i, j)/S` pixel, reading its textures from itself.
+//! Plane 0 samples where the GS does: it is local memory exactly, which
+//! CLUT loads and read-backs use. Transfers go to every plane; the
+//! display reads each GS pixel as S × S pixels, one from each plane.
+//! Points, lines and antialiased edges, walked on the CPU, are the same
+//! in every plane.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -27,6 +36,11 @@ const TILE: u32 = 16;
 const TILES: usize = 2048 / TILE as usize;
 /// Workgroups a dispatch may have along one dimension.
 const GROUPS_MAX: u32 = 65535;
+
+/// The shaders' constants: the internal resolution and a plane's size.
+fn constants(scale: u32) -> String {
+    format!("const SCALE: u32 = {scale}u;\nconst WORDS: u32 = {WORDS}u;\n")
+}
 
 /// The shader's constants: the encoding's word indices and flags.
 fn header() -> String {
@@ -62,6 +76,8 @@ fn header() -> String {
         ("V", word::V),
         ("Q", word::Q),
         ("FLAT_RGBA", word::FLAT_RGBA),
+        ("SCISSOR_X", word::SCISSOR_X),
+        ("SCISSOR_Y", word::SCISSOR_Y),
         ("FRAGS", word::FRAGS),
         ("FRAG_COUNT", word::FRAG_COUNT),
         ("PRIM_WORDS", PRIM_WORDS),
@@ -163,6 +179,8 @@ pub struct GpuGs {
     lists: Vec<Vec<[u32; 3]>>,
     /// The GPU's name and backend.
     pub name: String,
+    /// The internal resolution: GS pixels are drawn as `scale` × `scale`.
+    pub scale: u32,
     /// Batches drawn.
     pub batches: u64,
 }
@@ -175,6 +193,21 @@ impl GpuGs {
     ///
     /// If there is no GPU, or it has no 64-bit integers in shaders.
     pub fn new() -> Result<Self, String> {
+        Self::with_scale(1)
+    }
+
+    /// Opens the GPU, drawing at `scale` times the GS's resolution (1 to
+    /// 4).
+    ///
+    /// # Errors
+    ///
+    /// If there is no GPU, or it has no 64-bit integers in shaders, or
+    /// `scale` is not 1 to 4.
+    pub fn with_scale(scale: u32) -> Result<Self, String> {
+        if !(1..=4).contains(&scale) {
+            return Err(format!("an internal resolution of {scale}: 1 to 4"));
+        }
+        let planes = u64::from(scale * scale);
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter =
@@ -196,6 +229,7 @@ impl GpuGs {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gs"),
             required_features: wgpu::Features::SHADER_INT64,
+            // Sixteen planes of local memory (64 MB) fit the defaults.
             required_limits: wgpu::Limits::default(),
             ..Default::default()
         }))
@@ -210,8 +244,8 @@ impl GpuGs {
                 mapped_at_creation: false,
             })
         };
-        let mem = storage("local memory", WORDS * 4);
-        let snap = storage("snapshot", WORDS * 4);
+        let mem = storage("local memory", WORDS * 4 * planes);
+        let snap = storage("snapshot", WORDS * 4 * planes);
         let flat = ps2_gs::mem::page_tables_flat();
         let tables = storage("page tables", (flat.len() * 4) as u64);
         queue.write_buffer(&tables, 0, &bytes(&flat));
@@ -229,13 +263,16 @@ impl GpuGs {
                 cache: None,
             })
         };
-        let draw = pipeline(header() + include_str!("draw.wgsl"), "draw");
-        let write = pipeline(include_str!("write.wgsl").to_owned(), "write");
+        let draw = pipeline(
+            constants(scale) + &header() + include_str!("draw.wgsl"),
+            "draw",
+        );
+        let write = pipeline(constants(scale) + include_str!("write.wgsl"), "write");
         let clut = pipeline(
             format!("const SLOTS: u32 = {CLUT_SLOTS}u;\n") + include_str!("clut.wgsl"),
             "load",
         );
-        let display = pipeline(include_str!("display.wgsl").to_owned(), "display");
+        let display = pipeline(constants(scale) + include_str!("display.wgsl"), "display");
         let cluts = storage("cluts", u64::from(CLUT_SLOTS) * 256 * 4);
         Ok(Self {
             device,
@@ -257,6 +294,7 @@ impl GpuGs {
             writes: Grown::new("writes"),
             lists: vec![Vec::new(); TILES * TILES],
             name: format!("{} ({:?})", info.name, info.backend),
+            scale,
             batches: 0,
         })
     }
@@ -318,19 +356,19 @@ impl GpuGs {
         self.dispatch(
             &self.clut,
             &[&self.mem, &self.cluts, &self.tables, &buffer],
-            [1, 1],
+            [1, 1, 1],
             false,
         );
     }
 
     /// Runs `pipeline` with `buffers` bound in order: `groups` workgroups
-    /// (along x, or x and y when the second is more than 1; a large x is
-    /// spread over y), after copying local memory to the snapshot.
+    /// (along x, or x and y when the second is more than 1, a large x
+    /// spread over y; and z), after copying local memory to the snapshot.
     fn dispatch(
         &self,
         pipeline: &wgpu::ComputePipeline,
         buffers: &[&wgpu::Buffer],
-        groups: [u32; 2],
+        groups: [u32; 3],
         snapshot: bool,
     ) {
         let layout = pipeline.get_bind_group_layout(0);
@@ -351,19 +389,19 @@ impl GpuGs {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         if snapshot {
-            encoder.copy_buffer_to_buffer(&self.mem, 0, &self.snap, 0, WORDS * 4);
+            encoder.copy_buffer_to_buffer(&self.mem, 0, &self.snap, 0, self.mem.size());
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind, &[]);
             if groups[1] > 1 {
-                pass.dispatch_workgroups(groups[0], groups[1], 1);
+                pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
             } else {
                 pass.dispatch_workgroups(
                     groups[0].min(GROUPS_MAX),
                     groups[0].div_ceil(GROUPS_MAX),
-                    1,
+                    groups[2],
                 );
             }
         }
@@ -373,7 +411,10 @@ impl GpuGs {
 
 impl export::Tap for GpuGs {
     fn memory(&mut self, words: &[u32]) {
-        self.queue.write_buffer(&self.mem, 0, &bytes(words));
+        let data = bytes(words);
+        for plane in 0..u64::from(self.scale * self.scale) {
+            self.queue.write_buffer(&self.mem, plane * WORDS * 4, &data);
+        }
     }
 
     fn writes(&mut self, writes: &[Write]) {
@@ -385,7 +426,12 @@ impl export::Tap for GpuGs {
             .collect();
         let buffer = self.writes.fill(&self.device, &self.queue, &flat).clone();
         let groups = (writes.len() as u32).div_ceil(64);
-        self.dispatch(&self.write, &[&self.mem, &buffer], [groups, 1], false);
+        self.dispatch(
+            &self.write,
+            &[&self.mem, &buffer],
+            [groups, 1, self.scale * self.scale],
+            false,
+        );
     }
 
     fn cluts(&mut self, cluts: &[Clut]) {
@@ -415,7 +461,7 @@ impl export::Tap for GpuGs {
         let Some(params) = ps2_gs::display::gpu_display(regs) else {
             return Frame::default();
         };
-        let (width, height) = (params[0], params[1]);
+        let (width, height) = (params[0] * self.scale, params[1] * self.scale);
         if width == 0 || height == 0 {
             return Frame::default();
         }
@@ -430,13 +476,14 @@ impl export::Tap for GpuGs {
         self.dispatch(
             &self.display,
             &[&self.mem, &self.tables, &params, &picture],
-            [width.div_ceil(8), height.div_ceil(8)],
+            [width.div_ceil(8), height.div_ceil(8), 1],
             false,
         );
         let words = self.read_back(&picture, size);
         Frame {
             width,
             height,
+            scale: self.scale,
             rgb: words
                 .iter()
                 .flat_map(|w| [*w as u8, (w >> 8) as u8, (w >> 16) as u8])
@@ -492,9 +539,14 @@ impl export::Tap for GpuGs {
                 }
                 continue;
             }
-            // Its inside: every tile of its box, with the fragments there.
+            // Its inside: every tile of its box (as `bounds` in the shader
+            // makes it), with the fragments there.
             let (bx, by) = (prim[word::BBOX_X], prim[word::BBOX_Y]);
-            let (x0, x1, y0, y1) = (bx & 0xFFFF, bx >> 16, by & 0xFFFF, by >> 16);
+            let (mut x0, x1, mut y0, y1) = (bx & 0xFFFF, bx >> 16, by & 0xFFFF, by >> 16);
+            if self.scale > 1 {
+                x0 = x0.saturating_sub(1).max(prim[word::SCISSOR_X] & 0xFFFF);
+                y0 = y0.saturating_sub(1).max(prim[word::SCISSOR_Y] & 0xFFFF);
+            }
             let mut runs = runs.into_iter().peekable();
             for ty in y0 / TILE..=(y1 / TILE).min(TILES as u32 - 1) {
                 for tx in x0 / TILE..=(x1 / TILE).min(TILES as u32 - 1) {
@@ -541,7 +593,7 @@ impl export::Tap for GpuGs {
                 &order_buffer,
                 &frag_buffer,
             ],
-            [used.len() as u32, 1],
+            [used.len() as u32, 1, self.scale * self.scale],
             snapshot,
         );
     }

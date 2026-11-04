@@ -25,8 +25,8 @@ pub(crate) struct Frames<'a> {
     pub(crate) gs_dump: Option<(&'a Path, u64)>,
     /// Print how fast every `every` fields ran, and the game's clock.
     pub(crate) timing: bool,
-    /// Draw on the GPU.
-    pub(crate) gpu: bool,
+    /// Draw on the GPU, at this many times the GS's resolution.
+    pub(crate) gpu: Option<u32>,
 }
 
 /// Runs `fields` fields of `script`, saving pictures on the way.
@@ -119,8 +119,8 @@ pub(crate) fn run(
         Game::from_key(&replay.game).with_context(|| format!("unknown game {:?}", replay.game))?;
     let script = replay::Script::of(&replay)?;
     let (mut machine, _) = crate::boot(game, recompiled)?;
-    if frames.gpu {
-        let name = crate::use_gpu(&machine)?;
+    if let Some(scale) = frames.gpu {
+        let name = crate::use_gpu(&machine, scale)?;
         println!("drawing on the GPU: {name}");
     }
     if let Some(dir) = frames.dir {

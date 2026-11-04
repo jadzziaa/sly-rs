@@ -14,6 +14,9 @@ window = [1280, 896]
 # Draw on the GPU instead of the CPU (needs 64-bit integers in shaders:
 # Vulkan, DirectX 12 or Metal). WGPU_POWER_PREF=low picks an integrated GPU.
 gpu = false
+# With the GPU, draw at this many times the PS2's resolution (1 to 4): a
+# sharper picture for four, nine or sixteen times the GPU's work.
+scale = 1
 
 # Key bindings replace the defaults one by one: a DualShock button (as in a
 # replay's presses) or a stick direction (left-up, right-down, ...) = a key

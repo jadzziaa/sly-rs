@@ -134,6 +134,9 @@ fn common(prim: &Prim, clut: u32, snapshot: bool, w: &mut [u32; PRIM_WORDS]) {
     let [x0, x1, y0, y1] = prim.bbox.map(|c| c as u32);
     w[word::BBOX_X] = x0 | x1 << 16;
     w[word::BBOX_Y] = y0 | y1 << 16;
+    let [sx0, sx1, sy0, sy1] = p.scissor.map(|c| c as u32);
+    w[word::SCISSOR_X] = sx0 | sx1 << 16;
+    w[word::SCISSOR_Y] = sy0 | sy1 << 16;
     w[word::FRAME_PSM] = p.frame.0.code();
     w[word::FBMSK] = p.fbmsk;
     w[word::ZBUF_PSM] = p.zbuf.map_or(u32::MAX, |(psm, _)| psm.code());

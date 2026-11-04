@@ -213,20 +213,23 @@ fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize, [ps
     (cpu, words, case, changed, picture)
 }
 
-#[test]
-fn the_gpu_draws_what_the_software_gs_draws() {
-    let Ok(gpu) = GpuGs::new() else {
+/// `cases` random cases drawn on the GPU at internal resolution `scale`,
+/// each compared with the software GS: local memory (the first sample
+/// plane) word for word, and the pictures, from the first plane's pixels.
+fn compare(scale: u32, cases: usize) {
+    let Ok(gpu) = GpuGs::with_scale(scale) else {
         return;
     };
     let gpu = Shared(Arc::new(Mutex::new(gpu)));
     let mut r = Random(0x2545_F491_4F6C_DD1D);
     let (mut drew, mut words) = (0, 0);
-    for case in 0..160 {
+    for case in 0..cases {
         let (cpu, gpu_words, what, changed, [cpu_picture, gpu_picture]) = draw(&gpu, &mut r);
         let differ = (0..cpu.len()).filter(|&i| cpu[i] != gpu_words[i]).count();
         assert_eq!(differ, 0, "case {case} ({what}): {differ} words differ");
+        assert_eq!(gpu_picture.factor(), scale);
         assert!(
-            cpu_picture == gpu_picture,
+            cpu_picture == plane_zero(&gpu_picture),
             "case {case} ({what}): the pictures differ"
         );
         drew += usize::from(changed > 0);
@@ -234,7 +237,36 @@ fn the_gpu_draws_what_the_software_gs_draws() {
     }
     // Tests reject some cases whole, but not most.
     assert!(
-        drew >= 100,
-        "{drew} of 160 cases drew anything ({words} words)"
+        drew * 8 >= cases * 5,
+        "{drew} of {cases} cases drew anything ({words} words)"
     );
+}
+
+/// The pixels of a picture that its first sample plane gave.
+fn plane_zero(frame: &ps2_gs::Frame) -> ps2_gs::Frame {
+    let scale = frame.factor() as usize;
+    let (width, height) = (frame.width as usize / scale, frame.height as usize / scale);
+    let rgb = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (y * scale * frame.width as usize + x * scale) * 3))
+        .flat_map(|at| frame.rgb[at..at + 3].to_vec())
+        .collect();
+    ps2_gs::Frame {
+        width: width as u32,
+        height: height as u32,
+        rgb,
+        scale: 1,
+    }
+}
+
+#[test]
+fn the_gpu_draws_what_the_software_gs_draws() {
+    compare(1, 160);
+}
+
+/// At a higher internal resolution the first sample plane is the GS's
+/// own: the same memory, the same pixels.
+#[test]
+fn at_a_higher_resolution_the_first_plane_is_the_gs() {
+    compare(2, 60);
+    compare(3, 20);
 }

@@ -22,6 +22,11 @@
 
 const NO_COVERAGE: u32 = 0xFFFFFFFFu;
 
+// The sample plane this invocation draws (see `lib.rs`): its first word
+// in `mem` and `snap`, and its sample's offset in the pixel (1/16 pixel).
+var<private> base: u32;
+var<private> offset: vec2<i32>;
+
 const RATIO_MAX: u64 = 1073741824lu;
 
 fn word(pb: u32, i: u32) -> u32 {
@@ -65,19 +70,20 @@ fn locate(pb: u32, at: u32, x: u32, y: u32) -> Pixel {
 }
 
 fn load(p: Pixel) -> u32 {
-    return (atomicLoad(&mem[p.word]) >> p.shift) & p.mask;
+    return (atomicLoad(&mem[base + p.word]) >> p.shift) & p.mask;
 }
 
 fn store(p: Pixel, value: u32) {
+    let at = base + p.word;
     if p.mask == 0xFFFFFFFFu {
-        atomicStore(&mem[p.word], value);
+        atomicStore(&mem[at], value);
         return;
     }
     // Other pixels may share the word: clear this one's bits, then set
     // them, which commutes with theirs.
     let m = p.mask << p.shift;
-    atomicAnd(&mem[p.word], ~m);
-    atomicOr(&mem[p.word], (value & p.mask) << p.shift);
+    atomicAnd(&mem[at], ~m);
+    atomicOr(&mem[at], (value & p.mask) << p.shift);
 }
 
 // --- Texture ----------------------------------------------------------------
@@ -124,7 +130,7 @@ fn texel(pb: u32, u: i32, v: i32) -> u32 {
     let p = locate(pb, W_TEX_LAYOUT, u32(u & 0x7FF), u32(v & 0x7FF));
     var raw: u32;
     if has(pb, F_SNAPSHOT) {
-        raw = (snap[p.word] >> p.shift) & p.mask;
+        raw = (snap[base + p.word] >> p.shift) & p.mask;
     } else {
         raw = load(p);
     }
@@ -529,8 +535,8 @@ fn triangle(pb: u32, x: u32, y: u32) {
     let y1 = sword(pb, W_POS + 3u);
     let x2 = sword(pb, W_POS + 4u);
     let y2 = sword(pb, W_POS + 5u);
-    let sx = i64(x) * 16li;
-    let sy = i64(y) * 16li;
+    let sx = i64(i32(x) * 16 + offset.x);
+    let sy = i64(i32(y) * 16 + offset.y);
     let w = vec3<i64>(
         edge(x1, y1, x2, y2, sx, sy),
         edge(x2, y2, x0, y0, sx, sy),
@@ -597,18 +603,40 @@ fn sprite_coord(c0: i32, c1: i32, s0: i32, s1: i32, s: i32) -> i32 {
 }
 
 fn sprite(pb: u32, x: u32, y: u32) {
+    // A sample is covered from the left and top corner up to, not
+    // including, the right and bottom.
+    let s = vec2<i32>(i32(x) * 16, i32(y) * 16) + offset;
+    if s.x < sword(pb, W_POS) || s.x >= sword(pb, W_POS + 2u) || s.y < sword(pb, W_POS + 1u) || s.y >= sword(pb, W_POS + 3u) {
+        return;
+    }
     var tex = vec2<i32>(0);
     if has(pb, F_TME) {
         tex = vec2<i32>(
-            sprite_coord(sword(pb, W_U), sword(pb, W_U + 1u), sword(pb, W_POS), sword(pb, W_POS + 2u), i32(x) * 16),
-            sprite_coord(sword(pb, W_V), sword(pb, W_V + 1u), sword(pb, W_POS + 1u), sword(pb, W_POS + 3u), i32(y) * 16),
+            sprite_coord(sword(pb, W_U), sword(pb, W_U + 1u), sword(pb, W_POS), sword(pb, W_POS + 2u), s.x),
+            sprite_coord(sword(pb, W_V), sword(pb, W_V + 1u), sword(pb, W_POS + 1u), sword(pb, W_POS + 3u), s.y),
         );
     }
     fragment(pb, x, y, word(pb, W_Z), channels(word(pb, W_RGBA)), tex, i32(word(pb, W_FOG)), NO_COVERAGE);
 }
 
+// The box a primitive's samples may lie in: its pixels, and at a higher
+// internal resolution one more to the left and top (where a sample off
+// the pixel's corner can still be inside), within the scissor.
+fn bounds(pb: u32) -> vec4<u32> {
+    let bx = word(pb, W_BBOX_X);
+    let by = word(pb, W_BBOX_Y);
+    var b = vec4<u32>(bx & 0xFFFFu, bx >> 16u, by & 0xFFFFu, by >> 16u);
+    if SCALE > 1u {
+        b.x = max(max(b.x, 1u) - 1u, word(pb, W_SCISSOR_X) & 0xFFFFu);
+        b.z = max(max(b.z, 1u) - 1u, word(pb, W_SCISSOR_Y) & 0xFFFFu);
+    }
+    return b;
+}
+
 @compute @workgroup_size(16, 16)
 fn draw(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+    base = group.z * WORDS;
+    offset = vec2<i32>(i32(group.z % SCALE), i32(group.z / SCALE)) * 16 / i32(SCALE);
     let tile = tiles[group.x];
     let x = tile.x * 16u + local.x;
     let y = tile.y * 16u + local.y;
@@ -616,9 +644,8 @@ fn draw(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
         let pb = order[3u * i] * W_PRIM_WORDS;
         let first = order[3u * i + 1u];
         let count = order[3u * i + 2u];
-        let bx = word(pb, W_BBOX_X);
-        let by = word(pb, W_BBOX_Y);
-        if x < (bx & 0xFFFFu) || x > (bx >> 16u) || y < (by & 0xFFFFu) || y > (by >> 16u) {
+        let b = bounds(pb);
+        if x < b.x || x > b.y || y < b.z || y > b.w {
             continue;
         }
         if !has(pb, F_LISTED) {

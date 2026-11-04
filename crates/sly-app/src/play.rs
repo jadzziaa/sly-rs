@@ -121,7 +121,7 @@ fn emulate(
 ) -> Result<()> {
     let (mut machine, _) = crate::boot(options.game, recompiled)?;
     if options.settings.gpu {
-        let name = crate::use_gpu(&machine)?;
+        let name = crate::use_gpu(&machine, options.settings.scale)?;
         tracing::info!("drawing on the GPU: {name}");
     }
     let (script, ahead) = match &options.replay {
@@ -632,16 +632,17 @@ const STILL: u32 = 24;
 /// moves. Still means the latest field's rows above and below match the
 /// field two before (the same parity). Still 2D then does not bob, still
 /// 3D shows all 448 lines, and moving edges do not comb. A frame-mode
-/// picture is already whole.
+/// picture is already whole. A picture drawn at a higher internal
+/// resolution has several rows to a line; they go together.
 fn deinterlace(fields: &[Field]) -> Frame {
     let Some(latest) = fields.last() else {
-        return Frame {
-            width: 0,
-            height: 0,
-            rgb: Vec::new(),
-        };
+        return Frame::default();
     };
-    let (width, height) = (latest.frame.width as usize, latest.frame.height as usize);
+    let scale = latest.frame.factor() as usize;
+    let (width, height) = (
+        latest.frame.width as usize,
+        latest.frame.height as usize / scale,
+    );
     if height > 256 || width == 0 || height == 0 {
         return latest.frame.clone();
     }
@@ -659,22 +660,25 @@ fn deinterlace(fields: &[Field]) -> Frame {
     let before = back(2).filter(|f| f.odd != latest.odd);
     let earlier = back(3).filter(|f| before.is_some() && f.odd == latest.odd);
     let own = usize::from(latest.odd);
-    let mut rgb = Vec::with_capacity(width * height * 2 * 3);
-    for line in 0..height * 2 {
+    let mut rgb = Vec::with_capacity(width * height * scale * 2 * 3);
+    for (line, sub) in (0..height * 2).flat_map(|line| (0..scale).map(move |sub| (line, sub))) {
         let index = line / 2;
+        // Row `sub` of field line `i`.
+        let at = |i: usize| i * scale + sub;
         if line % 2 == own {
-            rgb.extend_from_slice(row(&latest.frame, index));
+            rgb.extend_from_slice(row(&latest.frame, at(index)));
             continue;
         }
-        // The latest field's rows above and below this line.
+        // The latest field's lines above and below this line.
         let (up, down) = if latest.odd {
             (index.saturating_sub(1), index)
         } else {
             (index, (index + 1).min(height - 1))
         };
+        let (up, down) = (at(up), at(down));
         let (above, below) = (row(&latest.frame, up), row(&latest.frame, down));
         let was = earlier.map(|f| (row(&f.frame, up), row(&f.frame, down)));
-        let woven = before.map(|f| row(&f.frame, index));
+        let woven = before.map(|f| row(&f.frame, at(index)));
         for x in 0..width {
             let px = 3 * x..3 * x + 3;
             let differ = |a: &[u8], b: &[u8]| -> u32 {
@@ -700,6 +704,7 @@ fn deinterlace(fields: &[Field]) -> Frame {
         width: latest.frame.width,
         height: latest.frame.height * 2,
         rgb,
+        scale: latest.frame.scale,
     }
 }
 
@@ -767,6 +772,7 @@ mod tests {
                 width: 1,
                 height: u32::try_from(rows.len()).unwrap_or(0),
                 rgb: rows.iter().flat_map(|&v| [v, v, v]).collect(),
+                scale: 1,
             },
             odd,
         }
