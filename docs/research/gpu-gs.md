@@ -3,7 +3,7 @@ type: Proposal
 title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T08:14:22Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T08:34:28Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -227,12 +227,21 @@ scaled picture (bilinear) instead of taking its pixels.
   included): 0.73 s at 1×, 0.76 s at 2×, 0.83 s at 3×, 1.33 s at 4× (22
   ms a field: slower than real time).
 - Seen in the window at 3×: geometry and textures are sharper. Two
-  limits: points, lines and antialiased edges (Sly's outlines), walked on
-  the CPU, are the same in every plane, so they stay a GS pixel wide and
-  look blocky beside the sharper geometry; and effects that blur a small
-  frame by texturing it from itself (Sly's character shadows) show a fine
-  hatching, each plane blurring its own shifted copy. A session played at
-  3× wrote a recording that replays to its checkpoint.
+  limits, fixed the same day: points, lines and antialiased edges (Sly's
+  outlines, an antialiased line then a depth-only one) were walked once
+  and the same in every plane, so they stayed blocky; they are now walked
+  once per plane, moved by minus its offset, so each plane's fragments
+  sit where its samples do (a plane's box widened as on the GPU). And
+  effects that blur a small frame by texturing it from itself (the
+  character shadows) showed a fine hatching, each plane blurring its own
+  shifted copy: the GS now tracks blocks drawn into since a transfer last
+  wrote them (`flag::RENDERED` when a primitive's texture lies there), and
+  planes other than the first read such a texture as the one picture the
+  planes make together, at the higher resolution (a texel clamped to an
+  edge takes that edge's samples). The first plane still samples as the
+  GS does: all thirteen dumps are the same as the software GS at 1× and
+  2×. 60 fields of play: 0.81 s at 2×, 0.91 s at 3×, 1.40 s at 4×. A
+  session played at 3× wrote a recording that replays to its checkpoint.
 
 ## Facts checked
 

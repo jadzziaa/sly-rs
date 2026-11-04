@@ -185,6 +185,11 @@ impl Blocks {
             self.empty = true;
         }
     }
+
+    /// Takes block `block` out.
+    fn unmark(&mut self, block: u32) {
+        self.bits[block as usize / 64] &= !(1 << (block % 64));
+    }
 }
 
 /// What a batch draws into: the frame and the depth buffer.
@@ -312,6 +317,8 @@ pub(crate) struct Batch {
     cluts: Vec<export::Clut>,
     /// The CLUT version of the batch's first primitive.
     first_clut: Option<u32>,
+    /// With a tap: blocks drawn into since a transfer last wrote them.
+    frames: Blocks,
 }
 
 /// What the drawer does, in order: draw a batch (on the pool or not),
@@ -367,9 +374,11 @@ impl Drawer {
                                 }
                             }
                             if let Some(tap) = &mut tap {
+                                let scale = tap.scale();
                                 tap.batch(&crate::draw::encode::batch(
                                     &work.prims,
                                     work.snapshot.is_some(),
+                                    scale,
                                 ));
                             }
                             (Some(work), usize::from(!parallel))
@@ -828,7 +837,7 @@ impl Gs {
 
     /// Queues a primitive, handing the batch to the drawing threads first
     /// when it must.
-    pub(crate) fn queue(&mut self, prim: Prim) {
+    pub(crate) fn queue(&mut self, mut prim: Prim) {
         let f = footprint(&prim);
         let p = &prim.pipe;
         let (_, _, fbw) = p.frame;
@@ -849,9 +858,18 @@ impl Gs {
         let b = &mut self.batch;
         b.target = Some(target);
         b.first_clut.get_or_insert(prim.pipe.clut_version);
+        if b.tapped {
+            prim.rendered = f.texture.is_some_and(|t| b.frames.hits(t));
+        }
         if b.marked != Some(f) {
             b.uses.mark(&f);
             b.marked = Some(f);
+            if b.tapped {
+                b.frames.mark(f.frame);
+                if let (Some(d), true) = (f.depth, f.depth_written) {
+                    b.frames.mark(d);
+                }
+            }
         }
         let [x0, x1, y0, y1] = prim.bbox;
         b.work.pixels += ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
@@ -922,6 +940,18 @@ impl Gs {
         upload.add(psm, bp, bw, writes);
         // Written, for a CLUT load from it.
         uses.frame.mark(region);
+        if b.tapped {
+            // No longer a frame: the blocks the pixels land in.
+            let layout = crate::Layout::new(psm, bp, bw);
+            let mut last = u32::MAX;
+            for &(x, y, _) in writes {
+                let block = (layout.locate(x, y).word() / 64) as u32;
+                if block != last {
+                    b.frames.unmark(block);
+                    last = block;
+                }
+            }
+        }
         if upload.pixels >= UPLOAD_MAX {
             self.batch.hand_over_upload(&self.mem);
         }

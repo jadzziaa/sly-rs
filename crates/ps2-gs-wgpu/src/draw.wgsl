@@ -124,15 +124,20 @@ fn clut_color(pb: u32, index: u32) -> u32 {
 
 // The texel at (`u`, `v`), already wrapped, as RGBA8888.
 fn texel(pb: u32, u: i32, v: i32) -> u32 {
+    return texel_in(pb, base, u, v);
+}
+
+// The texel at (`u`, `v`) of the sample plane starting at `plane`.
+fn texel_in(pb: u32, plane: u32, u: i32, v: i32) -> u32 {
     if !has(pb, F_TEX) {
         return 0u;
     }
     let p = locate(pb, W_TEX_LAYOUT, u32(u & 0x7FF), u32(v & 0x7FF));
     var raw: u32;
     if has(pb, F_SNAPSHOT) {
-        raw = (snap[base + p.word] >> p.shift) & p.mask;
+        raw = (snap[plane + p.word] >> p.shift) & p.mask;
     } else {
-        raw = load(p);
+        raw = (atomicLoad(&mem[plane + p.word]) >> p.shift) & p.mask;
     }
     let texa = word(pb, W_TEXA);
     switch word(pb, W_TEX_PSM) {
@@ -210,6 +215,53 @@ fn sample(pb: u32, tex: vec2<i32>) -> vec4<i32> {
     return lerp(lerp(t00, t10, fu), lerp(t01, t11, fu), fv);
 }
 
+// A texture drawn into at a higher resolution, read at that resolution:
+// texel (`u`, `v`) of the picture the sample planes make together
+// (`SCALE` to a GS texel each way), from the plane that sampled it. CLAMP
+// wraps the GS texel; one clamped to an edge takes that edge's samples.
+fn fine_texel(pb: u32, u: i32, v: i32) -> vec4<i32> {
+    let s = i32(SCALE);
+    let su = ((u % s) + s) % s;
+    let sv = ((v % s) + s) % s;
+    let nu = (u - su) / s;
+    let nv = (v - sv) / s;
+    let wu = wrap_u(pb, nu);
+    let wv = wrap_v(pb, nv);
+    var iu = su;
+    var iv = sv;
+    if wu > nu {
+        iu = 0;
+    } else if wu < nu && bits(word(pb, W_WRAP), 0u, 2u) != 0u && bits(word(pb, W_WRAP), 0u, 2u) != 3u {
+        iu = s - 1;
+    }
+    if wv > nv {
+        iv = 0;
+    } else if wv < nv && bits(word(pb, W_WRAP), 2u, 2u) != 0u && bits(word(pb, W_WRAP), 2u, 2u) != 3u {
+        iv = s - 1;
+    }
+    return channels(texel_in(pb, u32(iv * s + iu) * WORDS, wu, wv));
+}
+
+// `sample` at the higher resolution (see `fine_texel`): coordinates `SCALE`
+// times as fine, the same filter.
+fn sample_fine(pb: u32, tex: vec2<i32>) -> vec4<i32> {
+    let s = i32(SCALE);
+    if !has(pb, F_LINEAR) {
+        return fine_texel(pb, (tex.x * s) >> 4u, (tex.y * s) >> 4u);
+    }
+    let u = tex.x * s - 8;
+    let v = tex.y * s - 8;
+    let iu = u >> 4u;
+    let iv = v >> 4u;
+    let fu = u & 15;
+    let fv = v & 15;
+    let t00 = fine_texel(pb, iu, iv);
+    let t10 = fine_texel(pb, iu + 1, iv);
+    let t01 = fine_texel(pb, iu, iv + 1);
+    let t11 = fine_texel(pb, iu + 1, iv + 1);
+    return lerp(lerp(t00, t10, fu), lerp(t01, t11, fu), fv);
+}
+
 // --- The pixel pipeline -----------------------------------------------------
 
 fn modulate(t: i32, v: i32) -> i32 {
@@ -264,7 +316,14 @@ fn fragment(pb: u32, x: u32, y: u32, z: u32, rgba: vec4<i32>, tex: vec2<i32>, fo
     }
     var c = rgba;
     if has(pb, F_TME) {
-        let s = sample(pb, tex);
+        // The first plane samples as the GS does; the others read a texture
+        // drawn into at their own resolution.
+        var s: vec4<i32>;
+        if base != 0u && has(pb, F_RENDERED) {
+            s = sample_fine(pb, tex);
+        } else {
+            s = sample(pb, tex);
+        }
         let tcc = has(pb, F_TCC);
         let va = c.w;
         let tfx = bits(word(pb, W_TEX_FUNC), 0u, 2u);
@@ -661,7 +720,7 @@ fn draw(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
         let here = x | (y << 16u);
         for (var f = first; f < first + count; f++) {
             let at = f * W_FRAG_WORDS;
-            if frags[at] != here {
+            if frags[at] != here || frags[at + 7u] != group.z {
                 continue;
             }
             fragment(

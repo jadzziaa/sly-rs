@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: [GPU GS](research/gpu-gs.md) at higher resolutions: outlines walked per sample plane, and textures drawn into read across the planes (no more hatched shadows); the first plane still matches the software GS.
 * **Update**: M5 of the [GPU GS](research/gpu-gs.md): a higher internal resolution (`--scale` 1-4) from sample planes, plane 0 the GS's own memory; all thirteen dumps the same at 2× as in software.
 * **Update**: M4 of the [GPU GS](research/gpu-gs.md): play and replay draw on the GPU alone (`--gpu`, `gpu = true` under `[play]`), CLUTs and the display on the GPU; the prologue replays to its hash with the GS off the critical path (every stretch at or above 108% of NTSC); the integrated Radeon runs it, not in real time.
 * **Update**: M3 of the [GPU GS](research/gpu-gs.md): points, lines, antialiased edges and STQ sprites walked on the CPU and shaded on the GPU; all thirteen dumps the same as the software GS after every field on both GPUs. CLUT loads checked for GPU-only play.

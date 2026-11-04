@@ -103,6 +103,7 @@ fn header() -> String {
         ("STQ", flag::STQ),
         ("AA1", flag::AA1),
         ("LISTED", flag::LISTED),
+        ("RENDERED", flag::RENDERED),
     ];
     words
         .iter()
@@ -495,6 +496,10 @@ impl export::Tap for GpuGs {
         self.read_memory()
     }
 
+    fn scale(&self) -> u32 {
+        self.scale
+    }
+
     fn batch(&mut self, batch: &export::Batch) {
         self.batches += 1;
         let count = batch.prims.len() / PRIM_WORDS;
@@ -640,5 +645,9 @@ impl export::Tap for Shared {
             .lock()
             .map(|gpu| gpu.read_memory())
             .unwrap_or_default()
+    }
+
+    fn scale(&self) -> u32 {
+        self.0.lock().map_or(1, |gpu| gpu.scale)
     }
 }

@@ -8,17 +8,18 @@ use crate::fixed;
 use crate::regs::bits;
 use rayon::prelude::*;
 
-/// `prims` as a batch for a GPU; their textures read from a snapshot when
-/// `snapshot` (a primitive drawn alone that textures from its own writes).
-/// A large batch is encoded in parts on several threads.
-pub(crate) fn batch(prims: &[Prim], snapshot: bool) -> export::Batch {
+/// `prims` as a batch for a GPU drawing at internal resolution `scale`;
+/// their textures read from a snapshot when `snapshot` (a primitive drawn
+/// alone that textures from its own writes). A large batch is encoded in
+/// parts on several threads.
+pub(crate) fn batch(prims: &[Prim], snapshot: bool, scale: u32) -> export::Batch {
     /// Primitives a part takes.
     const PART: usize = 1024;
     let part = |prims: &[Prim]| {
         let mut out = export::Batch::default();
         for prim in prims {
             let clut = prim.pipe.clut_version % export::CLUT_SLOTS;
-            encode(prim, clut, snapshot, &mut out.prims, &mut out.frags);
+            encode(prim, clut, snapshot, scale, &mut out.prims, &mut out.frags);
         }
         out
     };
@@ -42,62 +43,99 @@ pub(crate) fn batch(prims: &[Prim], snapshot: bool) -> export::Batch {
     out
 }
 
+/// A sample plane's offset in the pixel at internal resolution `scale`, in
+/// 1/16 pixel (as the GPU's draw shader takes it).
+fn offset(plane: u32, scale: u32) -> (i32, i32) {
+    (
+        ((plane % scale) * 16 / scale) as i32,
+        ((plane / scale) * 16 / scale) as i32,
+    )
+}
+
+/// The pixels a plane's samples may light: the primitive's, and for planes
+/// other than the first one more to the left and top, within the scissor
+/// (as the GPU's `bounds`).
+fn plane_clip(prim: &Prim, plane: u32) -> [i32; 4] {
+    let [x0, x1, y0, y1] = prim.bbox;
+    if plane == 0 {
+        return prim.bbox;
+    }
+    let [sx0, _, sy0, _] = prim.pipe.scissor;
+    [(x0 - 1).max(sx0).max(0), x1, (y0 - 1).max(sy0).max(0), y1]
+}
+
 /// Appends `prim`'s words to `out`, and its fragments, if it has any, to
-/// `frags`. A primitive that draws nothing appends nothing.
-fn encode(prim: &Prim, clut: u32, snapshot: bool, out: &mut Vec<u32>, frags: &mut Vec<u32>) {
+/// `frags`: for each of the `scale`² sample planes, walked with the
+/// primitive moved by minus the plane's offset, so that each plane's
+/// samples sit where the GPU's do. A primitive that draws nothing appends
+/// nothing.
+fn encode(
+    prim: &Prim,
+    clut: u32,
+    snapshot: bool,
+    scale: u32,
+    out: &mut Vec<u32>,
+    frags: &mut Vec<u32>,
+) {
     let p = &prim.pipe;
     let v = &prim.v;
     let mut w = [0u32; PRIM_WORDS];
     let first = frags.len() / FRAG_WORDS;
-    let mut emit = |x: i32, y: i32, f: Frag| {
-        frags.extend_from_slice(&[
-            x as u32 | (y as u32) << 16,
-            f.z,
-            rgba(f.rgba),
-            f.tex.0 as u32,
-            f.tex.1 as u32,
-            f.f as u32,
-            f.coverage.unwrap_or(u32::MAX),
-            0,
-        ]);
-    };
-    let clip = prim.bbox;
-    let (a, b) = (at(p, &v[0]), at(p, &v[1]));
+    let corners = [at(p, &v[0]), at(p, &v[1]), at(p, &v[2])];
+    // Points, lines and sprites with STQ textures are walked on the CPU
+    // alone; triangles and other sprites are drawn inside on the GPU, an
+    // antialiased triangle's edges walked here too.
+    let mut listed = false;
     let drawn = match prim.kind {
-        0 => {
-            let (x, y) = point(a);
-            if (clip[0]..=clip[1]).contains(&x) && (clip[2]..=clip[3]).contains(&y) {
-                emit(x, y, attrs(p, &v[0]));
-            }
-            w[word::KIND] |= flag::LISTED;
-            true
-        }
-        1 | 2 => {
-            if p.aa1 {
-                aa_line_frags(p, clip, a, b, &v[0], &v[1], &mut emit);
-            } else {
-                line_frags(p, clip, a, b, &v[0], &v[1], &mut emit);
-            }
-            w[word::KIND] |= flag::LISTED;
-            true
-        }
-        3..=5 => {
-            let drawn = triangle(p, v, &mut w);
-            if drawn && p.aa1 {
-                let pos = [a, b, at(p, &v[2])];
-                let given = [attrs(p, &v[0]), attrs(p, &v[1]), attrs(p, &v[2])];
-                aa_edge_frags(p, clip, pos, &given, &given[2], &mut emit);
-            }
-            drawn
-        }
-        _ => sprite(p, v, &mut w).unwrap_or_else(|| {
-            sprite_frags(p, clip, a, b, &v[0], &v[1], &mut emit);
-            w[word::KIND] |= flag::LISTED;
+        3..=5 => triangle(p, v, &mut w),
+        6 | 7 => sprite(p, v, &mut w).unwrap_or_else(|| {
+            listed = true;
             true
         }),
+        _ => {
+            listed = true;
+            true
+        }
     };
+    if drawn && (listed || (matches!(prim.kind, 3..=5) && p.aa1)) {
+        for plane in 0..scale * scale {
+            let (ox, oy) = offset(plane, scale);
+            let clip = plane_clip(prim, plane);
+            let [a, b, c] = corners.map(|(x, y)| (x - ox, y - oy));
+            let mut emit = |x: i32, y: i32, f: Frag| {
+                frags.extend_from_slice(&[
+                    x as u32 | (y as u32) << 16,
+                    f.z,
+                    rgba(f.rgba),
+                    f.tex.0 as u32,
+                    f.tex.1 as u32,
+                    f.f as u32,
+                    f.coverage.unwrap_or(u32::MAX),
+                    plane,
+                ]);
+            };
+            match prim.kind {
+                0 => {
+                    let (x, y) = point(a);
+                    if (clip[0]..=clip[1]).contains(&x) && (clip[2]..=clip[3]).contains(&y) {
+                        emit(x, y, attrs(p, &v[0]));
+                    }
+                }
+                1 | 2 if p.aa1 => aa_line_frags(p, clip, a, b, &v[0], &v[1], &mut emit),
+                1 | 2 => line_frags(p, clip, a, b, &v[0], &v[1], &mut emit),
+                3..=5 => {
+                    let given = [attrs(p, &v[0]), attrs(p, &v[1]), attrs(p, &v[2])];
+                    aa_edge_frags(p, clip, [a, b, c], &given, &given[2], &mut emit);
+                }
+                _ => sprite_frags(p, clip, a, b, &v[0], &v[1], &mut emit),
+            }
+        }
+    }
+    if listed {
+        w[word::KIND] |= flag::LISTED;
+    }
     let count = frags.len() / FRAG_WORDS - first;
-    if !drawn || (w[word::KIND] & flag::LISTED != 0 && count == 0) {
+    if !drawn || (listed && count == 0) {
         return;
     }
     w[word::FRAGS] = first as u32;
@@ -125,6 +163,7 @@ fn common(prim: &Prim, clut: u32, snapshot: bool, w: &mut [u32; PRIM_WORDS]) {
         (p.tex_psm.is_some() && p.tex_layout.is_some(), flag::TEX),
         (snapshot, flag::SNAPSHOT),
         (p.aa1, flag::AA1),
+        (prim.rendered, flag::RENDERED),
     ];
     w[word::KIND] |= (prim.kind as u32 & 7)
         | flags

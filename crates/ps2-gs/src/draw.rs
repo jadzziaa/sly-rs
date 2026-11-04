@@ -199,6 +199,10 @@ pub(crate) struct Prim {
     kind: u64,
     v: [Vertex; 3],
     pub(crate) bbox: [i32; 4],
+    /// Its texture lies in blocks drawn into since they were last written
+    /// by a transfer (a frame used as a texture), for a GPU drawing at a
+    /// higher resolution; set when queued for a tap.
+    pub(crate) rendered: bool,
 }
 
 impl Prim {
@@ -488,6 +492,7 @@ impl Gs {
                 kind,
                 v: vertices,
                 bbox,
+                rendered: false,
             };
             if self.batching() {
                 self.queue(prim);

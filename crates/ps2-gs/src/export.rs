@@ -106,8 +106,8 @@ pub mod word {
 
 /// Words a fragment takes in [`Batch::frags`]: `x | y << 16`, depth,
 /// colour (RGBA bytes), texture coordinates U and V in 1/16 texel (`i32`),
-/// fog, and coverage (0 to 0xFFFF on an antialiased edge, else
-/// `u32::MAX`), then a word unused.
+/// fog, coverage (0 to 0xFFFF on an antialiased edge, else `u32::MAX`),
+/// and the sample plane it is for (see [`Tap::scale`]).
 pub const FRAG_WORDS: usize = 8;
 
 /// Flags in [`word::KIND`].
@@ -153,6 +153,10 @@ pub mod flag {
     /// sprites with STQ textures); a triangle's fragments, if any, are its
     /// antialiased edges, drawn after its inside.
     pub const LISTED: u32 = 1 << 28;
+    /// Its texture was drawn into (a frame used as a texture): at a higher
+    /// internal resolution, sample planes other than the first read it at
+    /// that resolution, across the planes.
+    pub const RENDERED: u32 = 1 << 29;
 }
 
 /// Primitives that may be drawn at once, each pixel's in order.
@@ -213,4 +217,11 @@ pub trait Tap: Send {
     fn display(&mut self, regs: &crate::Privileged) -> crate::Frame;
     /// Local memory as it is after everything handed over.
     fn read(&mut self) -> Vec<u32>;
+    /// The internal resolution it draws at: GS pixels as `scale` × `scale`
+    /// samples, each in a sample plane drawn with every sample moved by
+    /// `(i, j)/scale` pixel (plane `j·scale + i`). Fragments walked on the
+    /// CPU come once per plane.
+    fn scale(&self) -> u32 {
+        1
+    }
 }
