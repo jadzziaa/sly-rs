@@ -21,7 +21,12 @@
 //! A primitive whose texture overlaps its own frame or the depth it writes,
 //! that reaches past its frame's width (where pixels of one row share pages
 //! with the next), or whose depth buffer, where it uses it, overlaps its
-//! frame, is drawn alone, in order.
+//! frame, is drawn alone, in order. One that textures from blocks it
+//! writes reads its texture as those blocks were before it ([`Snapshot`]),
+//! not as its own pixels leave them: the same whatever order its pixels
+//! are drawn in (so a GPU can draw them at once), and nearer PCSX2's
+//! pictures than drawing order (Sly's 64 × 64 sprite that textures from its
+//! own frame).
 //!
 //! Batches go to a drawer thread, which draws them in order, each on the
 //! pool of drawing threads or one primitive after another, while the GS
@@ -40,6 +45,7 @@ use std::sync::{Arc, mpsc};
 use rayon::prelude::*;
 
 use crate::draw::{Prim, Raster};
+use crate::mem::Pixel;
 use crate::mem::page_shape;
 use crate::regs::{Tex0, bits};
 use crate::transfer::Upload;
@@ -251,6 +257,9 @@ struct Work {
     tiles: Vec<Vec<u32>>,
     /// Drawn one primitive after another (a primitive drawn alone).
     serial: bool,
+    /// For a primitive drawn alone that textures from blocks it writes:
+    /// its texture's blocks, taken before it is drawn.
+    snapshot: Option<Region>,
     pixels: u64,
     /// Local memory, while the batch is with the drawer (it draws there).
     memory: Option<Arc<Memory>>,
@@ -370,6 +379,7 @@ impl Batch {
             if let Some(mut work) = back {
                 work.prims.clear();
                 work.serial = false;
+                work.snapshot = None;
                 work.pixels = 0;
                 self.spare_work.push(work);
             }
@@ -467,11 +477,65 @@ fn footprint(prim: &Prim) -> Footprint {
     }
 }
 
+/// Blocks of local memory as they were at some moment: what a primitive
+/// that textures from blocks it writes reads its texture from.
+pub(crate) struct Snapshot {
+    /// Each block's place in `words`, or `u32::MAX` if it was not taken.
+    index: Vec<u32>,
+    words: Vec<u32>,
+}
+
+impl Snapshot {
+    /// The blocks of `region`, as `mem` holds them now.
+    pub(crate) fn of(mem: &Memory, region: Region) -> Self {
+        let mut index = vec![u32::MAX; BLOCKS as usize];
+        let mut words = Vec::new();
+        for (from, to) in region.ranges() {
+            for block in from..to {
+                if index[block as usize] == u32::MAX {
+                    index[block as usize] = (words.len() / 64) as u32;
+                    let first = block as usize * 64;
+                    words.extend((first..first + 64).map(|w| mem.word(w)));
+                }
+            }
+        }
+        Self { index, words }
+    }
+
+    /// The pixel at `p` as it was, or as `mem` holds it if its block was not
+    /// taken.
+    #[inline]
+    pub(crate) fn get(&self, mem: &Memory, p: Pixel) -> u32 {
+        let (word, block) = (p.word(), p.word() / 64);
+        match self.index[block] {
+            u32::MAX => mem.get(p),
+            at => p.of(self.words[at as usize * 64 + word % 64]),
+        }
+    }
+}
+
+/// The blocks a primitive's texture takes up, if it textures from blocks
+/// it writes (its frame, or the depth it writes).
+pub(crate) fn own_texture(prim: &Prim) -> Option<Region> {
+    let f = footprint(prim);
+    f.texture.filter(|&t| reads_own_writes(&f, t))
+}
+
+/// Whether texture `t` overlaps what footprint `f` writes.
+fn reads_own_writes(f: &Footprint, t: Region) -> bool {
+    t.overlaps(f.frame) || f.depth.is_some_and(|d| f.depth_written && t.overlaps(d))
+}
+
 /// Draws a batch's primitives: split into tiles drawn in parallel, or one
 /// after another.
 fn draw(mem: &Memory, work: &mut Work, parallel: bool) {
-    let raster = Raster { mem };
+    let raster = Raster { mem, tex: None };
     if !parallel {
+        let snapshot = work.snapshot.map(|r| Snapshot::of(mem, r));
+        let raster = Raster {
+            mem,
+            tex: snapshot.as_ref(),
+        };
         for prim in &work.prims {
             raster.prim(prim, prim.bbox);
         }
@@ -568,9 +632,7 @@ impl Gs {
         let alone = fbw == 0
             || prim.bbox[1] >= (fbw * 64) as i32
             || f.depth.is_some_and(|d| d.overlaps(f.frame))
-            || f.texture.is_some_and(|t| {
-                t.overlaps(f.frame) || f.depth.is_some_and(|d| f.depth_written && t.overlaps(d))
-            });
+            || f.texture.is_some_and(|t| reads_own_writes(&f, t));
         let target = (p.frame, p.zbuf);
         let b = &self.batch;
         let again = b.marked == Some(f);
@@ -594,6 +656,7 @@ impl Gs {
             // A batch of its own, drawn as one primitive after another.
             self.alone += 1;
             self.batch.work.serial = true;
+            self.batch.work.snapshot = f.texture.filter(|&t| reads_own_writes(&f, t));
             self.submit();
         }
     }

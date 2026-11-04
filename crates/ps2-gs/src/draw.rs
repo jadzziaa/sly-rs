@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use crate::batch::{Snapshot, own_texture};
 use crate::fixed;
 use crate::regs::{Tex0, bits};
 use crate::{Gs, Layout, Memory, Psm, Vertex, clut_color, expand16, expand24};
@@ -486,7 +487,12 @@ impl Gs {
             if self.batching() {
                 self.queue(prim);
             } else {
-                Raster { mem: &self.mem }.prim(&prim, prim.bbox);
+                let snapshot = own_texture(&prim).map(|r| Snapshot::of(&self.mem, r));
+                Raster {
+                    mem: &self.mem,
+                    tex: snapshot.as_ref(),
+                }
+                .prim(&prim, prim.bbox);
             }
         }
         self.draw_time += started.elapsed();
@@ -562,6 +568,9 @@ fn bounds(p: &Pipe, kind: u64, v: &[Vertex; 3]) -> Option<[i32; 4]> {
 /// local memory.
 pub(crate) struct Raster<'a> {
     pub(crate) mem: &'a Memory,
+    /// For a primitive that textures from blocks it writes: those blocks
+    /// as they were before it, which it reads its texture from.
+    pub(crate) tex: Option<&'a Snapshot>,
 }
 
 impl Raster<'_> {
@@ -873,9 +882,11 @@ impl Raster<'_> {
         let (Some(psm), Some(layout)) = (p.tex_psm, &p.tex_layout) else {
             return 0;
         };
-        let raw = self
-            .mem
-            .get(layout.locate((u & 0x7FF) as u32, (v & 0x7FF) as u32));
+        let at = layout.locate((u & 0x7FF) as u32, (v & 0x7FF) as u32);
+        let raw = match self.tex {
+            Some(snapshot) => snapshot.get(self.mem, at),
+            None => self.mem.get(at),
+        };
         if HOT {
             // A CLUT format.
             return clut_color(&p.clut, p.texa, &p.tex, raw);
@@ -1402,9 +1413,14 @@ mod tests {
                     reference.mem.load_bytes(&random);
                     for _ in 0..200 {
                         let (x, y) = ((next() % 128) as u32, (next() % 64) as u32);
-                        Raster { mem: &gs.mem }.fill(&p, &fill, x, y);
+                        Raster {
+                            mem: &gs.mem,
+                            tex: None,
+                        }
+                        .fill(&p, &fill, x, y);
                         Raster {
                             mem: &reference.mem,
+                            tex: None,
                         }
                         .fragment::<false>(&p, x as i32, y as i32, frag);
                     }
@@ -1581,6 +1597,36 @@ mod tests {
         }
         assert!(between > 40, "{between} edge pixels");
         assert_eq!(pixel(&aa, 2, 2) & 0xFF_FFFF, 0x40_4040);
+    }
+
+    /// A sprite that textures from its own frame reads it as it was before
+    /// the sprite, whatever order its pixels are drawn in: shifted right by
+    /// a texel, a row moves along whole instead of smearing its first pixel.
+    #[test]
+    fn a_primitive_reads_its_own_frame_as_it_was_before_it() {
+        for threads in [1, 4] {
+            let mut gs = gs();
+            gs.set_threads(threads);
+            let value = |x: u32| 0x8000_0000 | (x * 0x01_0101);
+            for x in 0..8 {
+                gs.mem.write(Psm::Ct32, 0, 1, x, 0, value(x));
+            }
+            // TEX0: the frame itself (block 0, 64 wide, CT32), 64 × 64,
+            // decal with its alpha.
+            gs.write(
+                addr::TEX0_1,
+                1 << 14 | 6 << 26 | 6 << 30 | 1 << 34 | 1 << 35,
+            );
+            gs.write(addr::PRIM, 6 | 1 << 4 | 1 << 8);
+            gs.write(addr::UV, 0);
+            xyz(&mut gs, 1, 0);
+            gs.write(addr::UV, (7 * 16) | (16 << 16));
+            xyz(&mut gs, 8, 1);
+            gs.flush();
+            for x in 1..8 {
+                assert_eq!(pixel(&gs, x, 0), value(x - 1), "{threads} threads, x {x}");
+            }
+        }
     }
 
     #[test]

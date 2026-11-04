@@ -4,7 +4,7 @@ title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:08:03Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:31:10Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -95,6 +95,18 @@ shaders translate it):
   coordinate constant over a triangle stays the same texel). Magnitudes
   are held to 2^30. Q = 0 counts as 1.
 
+**Texture reads, normative**: a primitive that textures from blocks it
+writes (its own frame, or the depth it writes; such a primitive is drawn
+alone) reads its texture as those blocks were before it, not as its own
+pixels leave them. Drawing order then does not matter, so the GPU can draw
+its pixels at once (it copies the blocks first). Sly does this with a
+64 × 64 sprite that textures from its own frame, shifted.
+Checked (2026-11-04): with this rule the title's 3D against PCSX2 is
+87.19% identical (was 86.40%), 100% within 8 (was 99.9708%), largest
+difference 3 (was 17); the dialog and the level intro are unchanged; one
+thread and four give the same hashes; seven of the thirteen dumps are
+re-baselined.
+
 **Checked** (2026-11-03): with the old `f64` path selected, all twelve
 dumps hashed as before (the refactor itself is exact); with the new one,
 the dumps with sprites and lines only are unchanged, and PCSX2 parity is
@@ -171,8 +183,10 @@ recording in the window wrote a recording that replays to its checkpoint.
 ## Decided
 
 The user agreed (2026-11-03) that the reference renderer's pixels may
-change so that the GPU can match it exactly; in the event only triangles'
-texture coordinates changed, and PCSX2 parity improved slightly.
+change so that the GPU can match it exactly; in the event triangles'
+texture coordinates changed (M1), and so did what a primitive that
+textures from its own writes reads (2026-11-04, under that agreement);
+PCSX2 parity improved both times.
 
 [^parallel-gs]: PlayStation 2 GS emulation - the final frontier of Vulkan compute emulation (paraLLEl-GS)
 [^parallel-gs-repo]: paraLLEl-GS (LGPL-3.0)

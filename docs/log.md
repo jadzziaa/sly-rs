@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: [GPU GS](research/gpu-gs.md): a primitive that textures from blocks it writes reads them as they were before it (both renderers); PCSX2 parity on the title's 3D improves to 100% within 8, largest difference 3.
 * **Update**: M0 of the [GPU GS](research/gpu-gs.md): `play` draws with wgpu instead of softbuffer, pixel for pixel the same picture (checked offscreen on both GPUs, Vulkan and OpenGL); [plan.md](plan.md) phase 7 status updated.
 
 ## 2026-11-03

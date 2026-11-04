@@ -98,6 +98,16 @@ pub struct Pixel {
 }
 
 impl Pixel {
+    /// The word of local memory it lies in.
+    pub(crate) const fn word(self) -> usize {
+        self.word
+    }
+
+    /// The pixel's value in `word`, the word it lies in.
+    pub(crate) const fn of(self, word: u32) -> u32 {
+        (word >> self.shift) & self.mask
+    }
+
     /// The block of local memory it lies in.
     #[cfg(test)]
     pub(crate) const fn block(self) -> u32 {
@@ -335,6 +345,12 @@ impl Memory {
     #[must_use]
     pub fn get(&self, p: Pixel) -> u32 {
         (self.words[p.word].load(Ordering::Relaxed) >> p.shift) & p.mask
+    }
+
+    /// Word `index` of local memory.
+    #[inline]
+    pub(crate) fn word(&self, index: usize) -> u32 {
+        self.words[index].load(Ordering::Relaxed)
     }
 
     /// Writes the pixel at `p`; bits the format does not hold are kept.
