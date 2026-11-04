@@ -316,7 +316,7 @@ pub(crate) fn run(
 }
 
 /// Where the host's time went: the machine's parts, and the GS thread
-/// beside it (`draw` is its time queueing and drawing). The machine runs
+/// beside it (`draw` is its time drawing primitives itself). The machine runs
 /// for `machine_time`, the GS catches up by `elapsed`.
 #[allow(clippy::cast_precision_loss, reason = "a report")]
 pub(crate) fn host_time(
@@ -366,7 +366,7 @@ pub(crate) fn host_time(
         out,
         "  host time ({:.1} s): VIF1's shadow {:.1}%; VIF0 with VU0 {:.1}%; VU programs the EE starts {:.1}%; \
          the IOP {:.1}%; waiting for VU1's thread {:.1}%; the EE and the rest {:.1}%; \
-         beside the machine, VU1's thread busy {:.1}%, the GS thread busy {:.1}%, {:.1}% of it queueing and drawing",
+         beside the machine, VU1's thread busy {:.1}%, the GS thread busy {:.1}%, {:.1}% of it drawing primitives itself",
         s(elapsed),
         pct(t.vif1),
         pct(t.vif0),

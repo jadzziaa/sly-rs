@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:11:37Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:58:51Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -204,6 +204,51 @@ for the GS 7.2 s (0.2 s before), so the next gains are in the GS thread
 (GIF parsing and vertex handling, which no GPU technique takes over; see
 [performance-prior-art.md](performance-prior-art.md)) and in VU1's
 programs.
+
+**The GS thread's own work** (2026-11-04). `gs-replay` now reports the GS
+thread's time on packets apart from its waits for the batching thread:
+about 0.42 s of the play dump's 0.5 s with the GPU alone drawing. Four
+changes, none to what the GS draws:
+
+- `Gs::draw` read the clock twice for every primitive to report the time
+  spent queueing them, about 23 ns a read: 0.12 s of those 0.42. It now
+  times only primitives it draws itself (software drawing on one thread),
+  and the reports say "drawing primitives itself".
+- The decoded pipeline state was rebuilt (and allocated) whenever a
+  register other than a vertex's was written: 255,000 times for 2.66
+  million primitives, 245,000 of them for PRIM, which Sly writes with
+  every GIF tag. A PRIM write now keeps it when the attribute bits are
+  unchanged (or PRMODECONT takes them from PRMODE); the cache remembers
+  whether it was made for a kind that may be antialiased.
+- PACKED RGBAQ, ST, UV and XYZ quadwords set their registers and queue
+  their vertex directly instead of through `Gs::write`'s dispatch.
+- VU1's thread sent each packet VU1 kicked as a job of its own (about
+  3,000 a field, each an allocation, a channel message and two clock
+  reads on the GS thread); consecutive packets on one path now go as one
+  job, at most 4,096 quadwords, handed over after each of VU1's thread's
+  jobs. While a dump is written they go one by one as before, so dumps
+  keep their transfers.
+
+On the play dump the GS thread is now busy about 0.27 s. Checked: the
+thirteen dumps' GS and GPU memory, drawn by the GPU alone and by the CPU
+on four threads, equal to the build before; `gs-replay --gpu` the same
+in memory and pictures; a dump of three fields written by the game byte
+for byte the same; lockstep, the new-game replay and the full tests
+unchanged; the prologue's final hash the same.
+
+| | Before | After |
+| --- | --- | --- |
+| GS thread busy over the prologue, without PGO (two pairs, in turn) | 80-81% | 54-58% |
+| Whole prologue, without PGO, the quieter pair | 138.4 s | 132.7 s |
+| Whole prologue, PGO | 132.3 s | 113.5 s (a quieter machine: load 6-12, against 8-18) |
+| Slowest and median stretch, PGO | 149%, 274% of NTSC | 187%, 307% |
+| VU1's thread waiting for the GS, PGO | 7.2 s | 0.0 s |
+| VU1's programs, PGO | 3.29 ns a pair (waits included) | 2.73 ns |
+
+VU1's thread (92% busy) is now the one limit; the machine waits for it
+25% of the time, mostly at V-blanks. VU1's thread still reads the clock
+twice for every program (61 million in the prologue, about 2.8 s), for
+the programs' share in the reports.
 
 ## Recommendation
 

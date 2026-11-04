@@ -46,9 +46,16 @@ pub(crate) fn run(
         }
         let started = Instant::now();
         let mut fields = 0;
+        // Host time in GIF packets: the GS thread's work and its waits for
+        // the batching thread.
+        let mut in_packets = Duration::ZERO;
         for packet in packets {
             match packet {
-                Packet::Transfer(path, data) => gs.gif(path, data),
+                Packet::Transfer(path, data) => {
+                    let at = Instant::now();
+                    gs.gif(path, data);
+                    in_packets += at.elapsed();
+                }
                 Packet::Registers(block) => privileged = block,
                 Packet::VSync(_) => {
                     fields += 1;
@@ -82,6 +89,13 @@ pub(crate) fn run(
             report_states(&mut out, states)?;
         }
         report_batching(&mut out, &gs)?;
+        writeln!(
+            out,
+            "  the GS thread busy on packets {:.3} s, besides waiting for the batching thread",
+            in_packets
+                .saturating_sub(gs.batching_times().1)
+                .as_secs_f64()
+        )?;
         let hash = gs
             .mem
             .to_bytes()
@@ -278,7 +292,7 @@ fn report_batching(out: &mut impl io::Write, gs: &ps2_gs::Gs) -> Result<()> {
     writeln!(
         out,
         "  {} primitives drawn alone; {} batches, {} on the pool; the drawer: {:.3} s on the pool, \
-         {:.3} s one primitive after another, {:.3} s uploading; the GS thread queueing and drawing {:.3} s; batching waiting for the drawer {:.3} s",
+         {:.3} s one primitive after another, {:.3} s uploading; the GS thread drawing primitives itself {:.3} s; batching waiting for the drawer {:.3} s",
         gs.alone,
         gs.batches,
         gs.parallel_batches,

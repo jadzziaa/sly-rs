@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: The GS thread's own work cut by about a third: no clock reads per primitive queued, the pipeline state kept across PRIM writes that change no attributes, PACKED vertex registers set directly, VU1's packets gathered into one job; the prologue 113.5 s (PGO), VU1's thread now the one limit ([performance-options.md](research/performance-options.md)).
 * **Update**: [Performance techniques in rac-rs and paraLLEl-GS](research/performance-prior-art.md) corrected: triangle setup runs on the drawer thread and is 1.5% of it (callgrind on the play dump), not a quarter of the GS thread; it drops to last.
 * **Creation**: [Performance techniques in rac-rs and paraLLEl-GS](research/performance-prior-art.md): what the two use that sly-rs does not yet, ranked; triangle setup on the GPU first.
 * **Update**: The shadow VIF1 hands VU1's thread its words 4,096 at a time, and VIF1 on that thread reads commands' data in place and unpacks the common formats directly: the prologue 132.3 s instead of 148.6 s (PGO), the machine's waits for VU1's thread split by cause in `replay --timing` ([performance-options.md](research/performance-options.md), [vu1-thread.md](research/vu1-thread.md)).

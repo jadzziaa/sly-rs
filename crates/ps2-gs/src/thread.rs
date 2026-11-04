@@ -149,6 +149,9 @@ fn drawing_threads() -> usize {
 
 /// Packets the machine may be ahead of the GS by.
 const QUEUE: usize = 4096;
+/// Quadwords of packets on one path gathered into one job before it is
+/// sent.
+const GATHER: usize = 4096;
 
 /// Work for the GS's thread: packets, a call once everything before is
 /// drawn, a call in turn.
@@ -164,6 +167,11 @@ pub struct Threaded {
     worker: Option<JoinHandle<()>>,
     scanner: Scanner,
     dumping: bool,
+    /// Packets on one path not sent yet: consecutive packets go to the GS
+    /// as one job (the GS reads a path's quadwords the same however they
+    /// are split), until another job, [`Threaded::hand_over`] or
+    /// [`GATHER`] quadwords.
+    gathered: Option<(usize, Vec<u128>)>,
     /// Time the machine spent waiting for room in the queue (for reports).
     pub waited: std::time::Duration,
 }
@@ -211,6 +219,7 @@ impl Default for Threaded {
             worker,
             scanner: Scanner::default(),
             dumping: false,
+            gathered: None,
             waited: std::time::Duration::ZERO,
         }
     }
@@ -218,6 +227,11 @@ impl Default for Threaded {
 
 impl Threaded {
     fn send(&mut self, job: Job) {
+        self.hand_over();
+        self.send_now(job);
+    }
+
+    fn send_now(&mut self, job: Job) {
         if let Some(jobs) = &self.jobs {
             // A send fails only when the thread has died, which `with`
             // reports.
@@ -226,6 +240,37 @@ impl Threaded {
                 let _ = jobs.send(job);
                 self.waited += started.elapsed();
             }
+        }
+    }
+
+    /// Packets on `path`: gathered with those before them on the same
+    /// path, or sent at once while a dump is written (which records each
+    /// transfer as it comes).
+    fn packets(&mut self, path: usize, data: Vec<u128>) {
+        if self.dumping {
+            self.send(Job::Gif(path, data));
+            return;
+        }
+        match &mut self.gathered {
+            Some((p, gathered)) if *p == path => gathered.extend_from_slice(&data),
+            _ => {
+                self.hand_over();
+                self.gathered = Some((path, data));
+            }
+        }
+        if self
+            .gathered
+            .as_ref()
+            .is_some_and(|(_, g)| g.len() >= GATHER)
+        {
+            self.hand_over();
+        }
+    }
+
+    /// Sends the packets gathered so far.
+    pub fn hand_over(&mut self) {
+        if let Some((path, data)) = self.gathered.take() {
+            self.send_now(Job::Gif(path, data));
         }
     }
 
@@ -287,20 +332,21 @@ impl Threaded {
     /// sender that scans that path itself (a path's packets must all go
     /// one way or the other).
     pub fn gif_unscanned(&mut self, path: usize, data: Vec<u128>) {
-        self.send(Job::Gif(path, data));
+        self.packets(path, data);
     }
 }
 
 impl Sink for Threaded {
     fn gif(&mut self, path: usize, data: Vec<u128>) {
         self.scanner.scan(path, &data);
-        self.send(Job::Gif(path, data));
+        self.packets(path, data);
     }
 }
 
 impl Drop for Threaded {
     fn drop(&mut self) {
         // Closing the queue ends the thread once it has drawn everything.
+        self.hand_over();
         self.jobs = None;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();

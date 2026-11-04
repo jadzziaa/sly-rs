@@ -189,6 +189,8 @@ impl Default for Remote {
                         Job::Path3(data) => vu1.gs.gif_unscanned(3, data),
                         Job::Call(f) => f(&mut vu1),
                     }
+                    // What the job kicked to the GS goes to it now.
+                    vu1.gs.hand_over();
                     let add = |at: &AtomicU64, d: Duration| {
                         at.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
                     };

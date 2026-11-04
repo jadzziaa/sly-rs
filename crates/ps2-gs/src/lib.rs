@@ -100,8 +100,9 @@ pub struct Gs {
     clut_shared: Option<std::sync::Arc<[u16; 512]>>,
     /// The last primitive's decoded state, shared by the primitives after
     /// it until a register it reads changes; with RGBAQ's Q when the
-    /// filter depends on it.
-    pipe_cache: Option<(std::sync::Arc<draw::Pipe>, Option<u32>)>,
+    /// filter depends on it, and whether it was for a kind that may be
+    /// antialiased.
+    pipe_cache: Option<(std::sync::Arc<draw::Pipe>, Option<u32>, bool)>,
     /// CBP0 and CBP1, for CLD 4 and 5.
     cbp: [u32; 2],
     /// The host-to-local transfer under way.
@@ -125,8 +126,8 @@ pub struct Gs {
     /// When set, primitives and their pixels (the bounding box, half of it
     /// for triangles) by pipeline state, for `gs-replay --states`.
     pub states: Option<std::collections::HashMap<String, (u64, u64)>>,
-    /// Host time spent drawing, or queueing primitives when drawing on
-    /// several threads (for reports).
+    /// Host time spent drawing primitives on this thread, when they are
+    /// not queued for others (for reports).
     pub draw_time: std::time::Duration,
     /// Host time its thread spent on packets and calls, not waiting for
     /// them (for reports).
@@ -202,18 +203,22 @@ impl Default for Gs {
 impl Gs {
     /// Writes general-purpose register `address` (as A+D does).
     pub fn write(&mut self, address: u8, value: u64) {
-        // Every register but a vertex's may change how primitives draw.
-        if !matches!(
-            address,
+        // Every register but a vertex's may change how primitives draw;
+        // PRIM only through its attributes, and those only while PRMODECONT
+        // takes them from PRIM (the kind is checked when drawing).
+        let keeps_pipe = match address {
             addr::RGBAQ
-                | addr::ST
-                | addr::UV
-                | addr::FOG
-                | addr::XYZF2
-                | addr::XYZF3
-                | addr::XYZ2
-                | addr::XYZ3
-        ) {
+            | addr::ST
+            | addr::UV
+            | addr::FOG
+            | addr::XYZF2
+            | addr::XYZF3
+            | addr::XYZ2
+            | addr::XYZ3 => true,
+            addr::PRIM => self.prmodecont & 1 == 0 || (self.prim ^ value) & 0x7F8 == 0,
+            _ => false,
+        };
+        if !keeps_pipe {
             self.pipe_cache = None;
         }
         match address {

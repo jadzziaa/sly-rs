@@ -418,18 +418,20 @@ impl Gs {
     /// when the GS draws with several threads.
     pub(crate) fn draw(&mut self, v: &[Vertex]) {
         self.drawn += 1;
-        let started = std::time::Instant::now();
         let kind = self.prim & 7;
         let q = (self.rgbaq >> 32) as u32;
+        let may_aa = matches!(kind, 1..=5);
         let pipe = match &self.pipe_cache {
-            Some((pipe, uses)) if uses.is_none_or(|used| used == q) => Arc::clone(pipe),
+            Some((pipe, uses, aa)) if *aa == may_aa && uses.is_none_or(|used| used == q) => {
+                Arc::clone(pipe)
+            }
             _ => {
                 let mut pipe = self.pipe();
-                pipe.aa1 &= matches!(kind, 1..=5);
+                pipe.aa1 &= may_aa;
                 pipe.hot = self.specialise && pipe.is_hot();
                 let pipe = Arc::new(pipe);
                 let uses = self.filter_uses_q().then_some(q);
-                self.pipe_cache = Some((Arc::clone(&pipe), uses));
+                self.pipe_cache = Some((Arc::clone(&pipe), uses, may_aa));
                 pipe
             }
         };
@@ -497,15 +499,18 @@ impl Gs {
             if self.batching() {
                 self.queue(prim);
             } else {
+                // Timed only here: two clock reads for every primitive
+                // queued would cost the GS thread more than queueing.
+                let started = std::time::Instant::now();
                 let snapshot = own_texture(&prim).map(|r| Snapshot::of(&self.mem, r));
                 Raster {
                     mem: &self.mem,
                     tex: snapshot.as_ref(),
                 }
                 .prim(&prim, prim.bbox);
+                self.draw_time += started.elapsed();
             }
         }
-        self.draw_time += started.elapsed();
     }
 }
 

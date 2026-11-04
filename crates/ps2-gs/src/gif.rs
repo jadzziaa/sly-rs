@@ -128,7 +128,8 @@ impl Gs {
         })
     }
 
-    /// A PACKED quadword for descriptor `desc`.
+    /// A PACKED quadword for descriptor `desc`. The registers a vertex
+    /// takes are set here directly, as [`Gs::write`] sets them.
     fn packed(&mut self, desc: u8, q: u128, latched_q: &mut u32) {
         let w = |k: u32| (q >> (32 * k)) as u32;
         let lo = q as u64;
@@ -139,29 +140,22 @@ impl Gs {
                     | ((w(1) & 0xFF) << 8)
                     | ((w(2) & 0xFF) << 16)
                     | ((w(3) & 0xFF) << 24);
-                self.write(addr::RGBAQ, u64::from(rgba) | (u64::from(*latched_q) << 32));
+                self.rgbaq = u64::from(rgba) | (u64::from(*latched_q) << 32);
             }
             0x2 => {
                 *latched_q = w(2);
-                self.write(addr::ST, u64::from(w(0)) | (u64::from(w(1)) << 32));
+                self.st = u64::from(w(0)) | (u64::from(w(1)) << 32);
             }
-            0x3 => self.write(
-                addr::UV,
-                u64::from(w(0) & 0x3FFF) | (u64::from(w(1) & 0x3FFF) << 16),
-            ),
+            0x3 => self.uv = u64::from(w(0) & 0x3FFF) | (u64::from(w(1) & 0x3FFF) << 16),
             0x4 | 0xC => {
-                let xy = u64::from(w(0) & 0xFFFF) | (u64::from(w(1) & 0xFFFF) << 16);
-                let z = u64::from((w(2) >> 4) & 0x00FF_FFFF);
-                let f = u64::from((w(3) >> 4) & 0xFF);
                 let adc = desc == 0xC || (w(3) >> 15) & 1 != 0;
-                let reg = if adc { addr::XYZF3 } else { addr::XYZF2 };
-                self.write(reg, xy | (z << 32) | (f << 56));
+                let (x, y) = (w(0) & 0xFFFF, w(1) & 0xFFFF);
+                let (z, f) = ((w(2) >> 4) & 0x00FF_FFFF, ((w(3) >> 4) & 0xFF) as u8);
+                self.vertex(x, y, z, Some(f), !adc);
             }
             0x5 | 0xD => {
-                let xy = u64::from(w(0) & 0xFFFF) | (u64::from(w(1) & 0xFFFF) << 16);
                 let adc = desc == 0xD || (w(3) >> 15) & 1 != 0;
-                let reg = if adc { addr::XYZ3 } else { addr::XYZ2 };
-                self.write(reg, xy | (u64::from(w(2)) << 32));
+                self.vertex(w(0) & 0xFFFF, w(1) & 0xFFFF, w(2), None, !adc);
             }
             0x6..=0x9 => self.write(desc, lo),
             0xA => self.write(addr::FOG, u64::from((w(3) >> 4) & 0xFF) << 56),
