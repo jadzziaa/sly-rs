@@ -36,14 +36,22 @@ pub struct Recompiled {
 }
 
 /// Has `machine`'s GS draw on the GPU alone from now on, at `scale` times
-/// its resolution; returns the GPU's name.
+/// its resolution: on `shared`'s GPU, presenting its pictures there, or on
+/// one it opens; returns the GPU's name.
 ///
 /// # Errors
 ///
 /// If there is no GPU it can draw on.
-pub(crate) fn use_gpu(machine: &ps2_ee::Machine, scale: u32) -> anyhow::Result<String> {
-    let gpu =
-        ps2_gs_wgpu::GpuGs::with_scale(scale).map_err(|e| anyhow::anyhow!("the GPU GS: {e}"))?;
+pub(crate) fn use_gpu(
+    machine: &ps2_ee::Machine,
+    scale: u32,
+    shared: Option<(&ps2_gs_wgpu::Gpu, ps2_gs_wgpu::Pictures)>,
+) -> anyhow::Result<String> {
+    let gpu = match shared {
+        Some((gpu, pictures)) => ps2_gs_wgpu::GpuGs::with_device(gpu, scale, Some(pictures)),
+        None => ps2_gs_wgpu::GpuGs::with_scale(scale),
+    }
+    .map_err(|e| anyhow::anyhow!("the GPU GS: {e}"))?;
     let name = gpu.name.clone();
     machine
         .hw

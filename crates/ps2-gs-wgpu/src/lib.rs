@@ -155,6 +155,77 @@ fn bytes(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
+/// A GPU opened for the GS: one with 64-bit integers in shaders.
+#[derive(Clone)]
+pub struct Gpu {
+    /// The adapter, which a window may draw with too.
+    pub adapter: wgpu::Adapter,
+    /// Its device, which a window may share.
+    pub device: wgpu::Device,
+    /// The device's queue.
+    pub queue: wgpu::Queue,
+    /// Its name and backend.
+    pub name: String,
+}
+
+impl Gpu {
+    /// Opens the high-performance GPU of `instance` (unless
+    /// `WGPU_POWER_PREF` says otherwise) for the GS.
+    ///
+    /// # Errors
+    ///
+    /// If there is no GPU, or it has no 64-bit integers in shaders.
+    pub fn open(instance: &wgpu::Instance) -> Result<Self, String> {
+        let adapter =
+            pollster::block_on(
+                instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::from_env()
+                        .unwrap_or(wgpu::PowerPreference::HighPerformance),
+                    ..Default::default()
+                }),
+            )
+            .map_err(|e| format!("finding a GPU: {e}"))?;
+        let info = adapter.get_info();
+        if !adapter.features().contains(wgpu::Features::SHADER_INT64) {
+            return Err(format!(
+                "{} has no 64-bit integers in shaders, which the GS needs",
+                info.name
+            ));
+        }
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("gs"),
+            required_features: wgpu::Features::SHADER_INT64,
+            // Sixteen planes of local memory (64 MB) fit the defaults.
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        }))
+        .map_err(|e| format!("opening {}: {e}", info.name))?;
+        Ok(Self {
+            adapter,
+            device,
+            queue,
+            name: format!("{} ({:?})", info.name, info.backend),
+        })
+    }
+}
+
+/// Pictures presented ([`export::Tap::present`]): a ring of [`PICTURES`]
+/// textures, shared with whoever shows them. A slot is written again
+/// [`PICTURES`] pictures later.
+#[derive(Clone, Default)]
+pub struct Pictures(Arc<Mutex<Vec<Option<wgpu::Texture>>>>);
+
+/// Slots in [`Pictures`].
+pub const PICTURES: usize = 6;
+
+impl Pictures {
+    /// The texture in `slot`.
+    #[must_use]
+    pub fn get(&self, slot: u32) -> Option<wgpu::Texture> {
+        self.0.lock().ok()?.get(slot as usize).cloned().flatten()
+    }
+}
+
 /// The GS's local memory and pixel pipeline on a GPU.
 pub struct GpuGs {
     device: wgpu::Device,
@@ -166,6 +237,11 @@ pub struct GpuGs {
     write: wgpu::ComputePipeline,
     clut: wgpu::ComputePipeline,
     display: wgpu::ComputePipeline,
+    present: wgpu::ComputePipeline,
+    /// Where presented pictures go, if anywhere; and the slot the next one
+    /// takes.
+    pictures: Option<Pictures>,
+    next_picture: u32,
     /// The CLUT's versions, [`CLUT_SLOTS`] of them.
     cluts: wgpu::Buffer,
     prims: Grown,
@@ -205,36 +281,23 @@ impl GpuGs {
     /// If there is no GPU, or it has no 64-bit integers in shaders, or
     /// `scale` is not 1 to 4.
     pub fn with_scale(scale: u32) -> Result<Self, String> {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        Self::with_device(&Gpu::open(&instance)?, scale, None)
+    }
+
+    /// The GS on `gpu`'s device, drawing at `scale` times the GS's
+    /// resolution (1 to 4); presented pictures go to `pictures`.
+    ///
+    /// # Errors
+    ///
+    /// If `scale` is not 1 to 4.
+    pub fn with_device(gpu: &Gpu, scale: u32, pictures: Option<Pictures>) -> Result<Self, String> {
         if !(1..=4).contains(&scale) {
             return Err(format!("an internal resolution of {scale}: 1 to 4"));
         }
         let planes = u64::from(scale * scale);
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter =
-            pollster::block_on(
-                instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::from_env()
-                        .unwrap_or(wgpu::PowerPreference::HighPerformance),
-                    ..Default::default()
-                }),
-            )
-            .map_err(|e| format!("finding a GPU: {e}"))?;
-        let info = adapter.get_info();
-        if !adapter.features().contains(wgpu::Features::SHADER_INT64) {
-            return Err(format!(
-                "{} has no 64-bit integers in shaders, which the GS needs",
-                info.name
-            ));
-        }
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("gs"),
-            required_features: wgpu::Features::SHADER_INT64,
-            // Sixteen planes of local memory (64 MB) fit the defaults.
-            required_limits: wgpu::Limits::default(),
-            ..Default::default()
-        }))
-        .map_err(|e| format!("opening {}: {e}", info.name))?;
+        let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
         let storage = |label, size| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -274,6 +337,7 @@ impl GpuGs {
             "load",
         );
         let display = pipeline(constants(scale) + include_str!("display.wgsl"), "display");
+        let present = pipeline(constants(scale) + include_str!("display.wgsl"), "present");
         let cluts = storage("cluts", u64::from(CLUT_SLOTS) * 256 * 4);
         Ok(Self {
             device,
@@ -285,6 +349,9 @@ impl GpuGs {
             write,
             clut,
             display,
+            present,
+            pictures,
+            next_picture: 0,
             cluts,
             prims: Grown::new("primitives"),
             loads: Grown::new("clut loads"),
@@ -294,7 +361,7 @@ impl GpuGs {
             frags: Grown::new("fragments"),
             writes: Grown::new("writes"),
             lists: vec![Vec::new(); TILES * TILES],
-            name: format!("{} ({:?})", info.name, info.backend),
+            name: gpu.name.clone(),
             scale,
             batches: 0,
         })
@@ -500,6 +567,58 @@ impl export::Tap for GpuGs {
         self.scale
     }
 
+    fn present(&mut self, regs: &Privileged) -> Option<export::Presented> {
+        let pictures = self.pictures.clone()?;
+        let params = ps2_gs::display::gpu_display(regs)?;
+        let (width, height) = (params[0] * self.scale, params[1] * self.scale);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let slot = self.next_picture;
+        self.next_picture = (slot + 1) % PICTURES as u32;
+        let texture = self.picture_texture(&pictures, slot, width, height)?;
+        let params = self.params.fill(&self.device, &self.queue, &params).clone();
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("present"),
+            layout: &self.present.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.mem.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.tables.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&self.present);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        Some(export::Presented {
+            slot,
+            width,
+            height,
+            scale: self.scale,
+        })
+    }
+
     fn batch(&mut self, batch: &export::Batch) {
         self.batches += 1;
         let count = batch.prims.len() / PRIM_WORDS;
@@ -609,6 +728,108 @@ impl export::Tap for GpuGs {
     }
 }
 
+impl GpuGs {
+    /// A presented picture, read back (for comparing with
+    /// [`export::Tap::display`]'s).
+    ///
+    /// # Panics
+    ///
+    /// If the GPU cannot be read.
+    #[must_use]
+    pub fn read_presented(&self, presented: export::Presented) -> Frame {
+        let Some(texture) = self.pictures.as_ref().and_then(|p| p.get(presented.slot)) else {
+            return Frame::default();
+        };
+        let (width, height) = (presented.width, presented.height);
+        let stride = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("presented, read back"),
+            size: u64::from(stride * height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: None,
+                },
+            },
+            texture.size(),
+        );
+        self.queue.submit([encoder.finish()]);
+        let (sent, received) = std::sync::mpsc::channel();
+        staging.map_async(wgpu::MapMode::Read, .., move |r| {
+            let _ = sent.send(r);
+        });
+        let polled = self.device.poll(wgpu::PollType::wait_indefinitely());
+        assert!(
+            polled.is_ok() && matches!(received.recv(), Ok(Ok(()))),
+            "reading back from the GPU"
+        );
+        let rgb = match staging.get_mapped_range(..) {
+            Ok(view) => (0..height as usize)
+                .flat_map(|y| {
+                    view[y * stride as usize..][..width as usize * 4]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .flat_map(|p| [p[0], p[1], p[2]])
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        staging.unmap();
+        Frame {
+            width,
+            height,
+            rgb,
+            scale: presented.scale,
+        }
+    }
+
+    /// The texture in `pictures`' `slot`, made again when it is not
+    /// `width` × `height`.
+    fn picture_texture(
+        &self,
+        pictures: &Pictures,
+        slot: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<wgpu::Texture> {
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let mut ring = pictures.0.lock().ok()?;
+        ring.resize(PICTURES, None);
+        let at = &mut ring[slot as usize];
+        if at.as_ref().is_none_or(|t| t.size() != extent) {
+            *at = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("presented"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            }));
+        }
+        at.clone()
+    }
+}
+
 /// A [`GpuGs`] shared between the GS (as its tap) and whoever reads it.
 #[derive(Clone)]
 pub struct Shared(pub Arc<Mutex<GpuGs>>);
@@ -650,6 +871,13 @@ impl export::Tap for Shared {
             .lock()
             .map(|gpu| gpu.read_memory())
             .unwrap_or_default()
+    }
+
+    fn present(&mut self, regs: &Privileged) -> Option<export::Presented> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|mut gpu| export::Tap::present(&mut *gpu, regs))
     }
 
     fn scale(&self) -> u32 {

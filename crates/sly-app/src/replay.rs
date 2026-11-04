@@ -125,7 +125,7 @@ pub(crate) fn run(
     let script = replay::Script::of(&replay)?;
     let (mut machine, _) = crate::boot(game, recompiled)?;
     if let Some(scale) = frames.gpu {
-        let name = crate::use_gpu(&machine, scale)?;
+        let name = crate::use_gpu(&machine, scale, None)?;
         println!("drawing on the GPU: {name}");
     }
     if let Some(dir) = frames.dir {

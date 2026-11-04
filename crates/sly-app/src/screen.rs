@@ -11,8 +11,11 @@
 use std::sync::Arc;
 
 use ps2_gs::display::Frame;
+use ps2_gs::export::Presented;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
+
+use crate::play::Presenting;
 
 const SHADER: &str = r"
 struct Place {
@@ -128,6 +131,8 @@ struct Slot {
     scale: u32,
     /// The odd field.
     odd: bool,
+    /// The window's own texture (uploaded to), not the GS's.
+    owned: bool,
 }
 
 /// Fields the window keeps: the latest and the two before it.
@@ -139,11 +144,38 @@ pub(crate) struct Screen {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     painter: Painter,
+    /// The GS's presented pictures, when the window shares its GPU.
+    pictures: Option<ps2_gs_wgpu::Pictures>,
 }
 
 impl Screen {
-    /// Opens the GPU for `window`.
-    pub(crate) fn new(event_loop: &ActiveEventLoop, window: Arc<Window>) -> Result<Self, String> {
+    /// Opens the GPU for `window`: `presenting`'s, the GS's, when it can
+    /// draw into the window (the GS's pictures then stay on it), else one
+    /// of its own.
+    pub(crate) fn new(
+        event_loop: &ActiveEventLoop,
+        window: Arc<Window>,
+        presenting: Option<&Presenting>,
+    ) -> Result<Self, String> {
+        if let Some(p) = presenting {
+            let surface = p
+                .instance
+                .create_surface(Arc::clone(&window))
+                .map_err(|e| format!("making the window's surface: {e}"))?;
+            if p.gpu.adapter.is_surface_supported(&surface) {
+                let painter = |format| {
+                    Ok(Painter::with_device(
+                        p.gpu.device.clone(),
+                        p.gpu.queue.clone(),
+                        format,
+                    ))
+                };
+                let mut screen = Self::with_surface(window, surface, &p.gpu.adapter, painter)?;
+                screen.pictures = Some(p.pictures.clone());
+                return Ok(screen);
+            }
+            tracing::warn!("the GS's GPU cannot draw into the window: pictures read back");
+        }
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(
                 Box::new(event_loop.owned_display_handle()),
@@ -152,7 +184,20 @@ impl Screen {
             .create_surface(Arc::clone(&window))
             .map_err(|e| format!("making the window's surface: {e}"))?;
         let adapter = adapter(&instance, Some(&surface))?;
-        let capabilities = surface.get_capabilities(&adapter);
+        Self::with_surface(window, surface, &adapter, |format| {
+            Painter::new(&adapter, format)
+        })
+    }
+
+    /// The window drawing into `surface` with `adapter`, its painter made
+    /// for the surface's format by `painter`.
+    fn with_surface(
+        window: Arc<Window>,
+        surface: wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        painter: impl FnOnce(wgpu::TextureFormat) -> Result<Painter, String>,
+    ) -> Result<Self, String> {
+        let capabilities = surface.get_capabilities(adapter);
         // A format that stores the picture's values as they are: a shader
         // writing to an sRGB one would encode them.
         let format = capabilities
@@ -170,17 +215,31 @@ impl Screen {
             desired_maximum_frame_latency: 2,
             view_formats: Vec::new(),
             ..surface
-                .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+                .get_default_config(adapter, size.width.max(1), size.height.max(1))
                 .ok_or("the GPU cannot draw into the window")?
         };
-        let painter = Painter::new(&adapter, format)?;
+        let painter = painter(format)?;
         surface.configure(&painter.device, &config);
         Ok(Self {
             window,
             surface,
             config,
             painter,
+            pictures: None,
         })
+    }
+
+    /// Whether the window shares the GS's GPU, and shows its presented
+    /// pictures.
+    pub(crate) const fn presenting(&self) -> bool {
+        self.pictures.is_some()
+    }
+
+    /// Keeps a field the GS presented (`odd`: the odd field).
+    pub(crate) fn add_presented(&mut self, presented: Presented, odd: bool) {
+        if let Some(texture) = self.pictures.as_ref().and_then(|p| p.get(presented.slot)) {
+            self.painter.add_texture(texture, presented, odd);
+        }
     }
 
     /// The window.
@@ -266,6 +325,7 @@ struct Painter {
 }
 
 impl Painter {
+    /// A painter on a device of its own on `adapter`.
     fn new(adapter: &wgpu::Adapter, format: wgpu::TextureFormat) -> Result<Self, String> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("sly-rs"),
@@ -274,6 +334,11 @@ impl Painter {
             ..Default::default()
         }))
         .map_err(|e| format!("opening the GPU: {e}"))?;
+        Ok(Self::with_device(device, queue, format))
+    }
+
+    /// A painter on `device`.
+    fn with_device(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("screen"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -328,7 +393,7 @@ impl Painter {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Ok(Self {
+        Self {
             device,
             queue,
             pipeline,
@@ -336,7 +401,7 @@ impl Painter {
             place,
             fields: std::collections::VecDeque::new(),
             rgba: Vec::new(),
-        })
+        }
     }
 
     /// Draws the picture the latest fields make (or black) into `view`,
@@ -446,7 +511,8 @@ impl Painter {
         let (width, height) = (frame.width, frame.height);
         let oldest = (self.fields.len() == KEPT)
             .then(|| self.fields.pop_front())
-            .flatten();
+            .flatten()
+            .filter(|slot| slot.owned);
         let extent = wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
@@ -494,6 +560,24 @@ impl Painter {
             height,
             scale: frame.factor(),
             odd,
+            owned: true,
+        });
+    }
+
+    /// Keeps `texture`, a field the GS presented, as the latest field.
+    fn add_texture(&mut self, texture: wgpu::Texture, presented: Presented, odd: bool) {
+        if self.fields.len() == KEPT {
+            self.fields.pop_front();
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.fields.push_back(Slot {
+            texture,
+            view,
+            width: presented.width,
+            height: presented.height,
+            scale: presented.scale.max(1),
+            odd,
+            owned: false,
         });
     }
 }

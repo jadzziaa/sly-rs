@@ -215,6 +215,11 @@ pub trait Tap: Send {
     /// The display's picture ([`crate::display::gpu_display`] gives its
     /// size and parameters).
     fn display(&mut self, regs: &crate::Privileged) -> crate::Frame;
+    /// The display's picture put where whoever shows it finds it, without
+    /// reading it back; `None` (the default) if the tap cannot.
+    fn present(&mut self, _regs: &crate::Privileged) -> Option<Presented> {
+        None
+    }
     /// Local memory as it is after everything handed over.
     fn read(&mut self) -> Vec<u32>;
     /// The internal resolution it draws at: GS pixels as `scale` × `scale`
@@ -224,4 +229,26 @@ pub trait Tap: Send {
     fn scale(&self) -> u32 {
         1
     }
+}
+
+/// A picture a tap put where it is shown from ([`Tap::present`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Presented {
+    /// Where: the tap's slot.
+    pub slot: u32,
+    /// Its width in pixels.
+    pub width: u32,
+    /// Its height in pixels.
+    pub height: u32,
+    /// Pixels a GS pixel became, along each axis.
+    pub scale: u32,
+}
+
+/// The display's picture: read out, or presented ([`crate::Gs::present`]).
+#[derive(Debug)]
+pub enum Picture {
+    /// Its pixels.
+    Frame(crate::Frame),
+    /// Where the tap put it.
+    Presented(Presented),
 }

@@ -336,12 +336,34 @@ impl Gs {
         regs: &crate::Privileged,
         then: impl FnOnce(crate::Frame) + Send + 'static,
     ) {
+        self.picture_then(regs, false, move |picture| match picture {
+            export::Picture::Frame(frame) => then(frame),
+            export::Picture::Presented(_) => then(crate::Frame::default()),
+        });
+    }
+
+    /// [`Gs::show`], but the tap may present the picture rather than hand
+    /// it back ([`export::Tap::present`]).
+    pub fn present(
+        &mut self,
+        regs: &crate::Privileged,
+        then: impl FnOnce(export::Picture) + Send + 'static,
+    ) {
+        self.picture_then(regs, true, then);
+    }
+
+    fn picture_then(
+        &mut self,
+        regs: &crate::Privileged,
+        present: bool,
+        then: impl FnOnce(export::Picture) + Send + 'static,
+    ) {
         if !self.gpu_only() {
             self.flush();
-            then(self.display(regs));
+            then(export::Picture::Frame(self.display(regs)));
             return;
         }
-        self.batch.push(Op::Show(*regs, Box::new(then)));
+        self.batch.push(Op::Show(*regs, present, Box::new(then)));
         self.batch.send();
     }
 

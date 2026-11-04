@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use ps2_ee::{FIELD_CYCLES, Stop};
-use ps2_gs::display::Frame;
+use ps2_gs::export::Picture;
 use ps2_iop::pad::PadInput;
 use sly_common::Game;
 use sly_common::replay::{self, Checkpoint, Recorder, Replay, Script};
@@ -56,12 +56,25 @@ struct Shared {
     paused: AtomicBool,
     /// The window is closing.
     quit: AtomicBool,
+    /// The window draws with the GS's GPU: pictures stay there.
+    presenting: AtomicBool,
+}
+
+/// The GPU the GS draws on and the window shows from, opened before
+/// either: its pictures stay on it.
+pub(crate) struct Presenting {
+    /// The window system's GPU instance, which the window's surface comes
+    /// from.
+    pub(crate) instance: wgpu::Instance,
+    pub(crate) gpu: ps2_gs_wgpu::Gpu,
+    /// Where the GS puts the pictures it presents.
+    pub(crate) pictures: ps2_gs_wgpu::Pictures,
 }
 
 /// What the machine's thread tells the window.
 enum Event {
     /// A field's picture.
-    Frame(Field),
+    Field(Field),
     /// The machine's thread is done (with an error, if it failed).
     Done(Option<String>),
 }
@@ -78,12 +91,36 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
         options.settings.window,
         options.settings.pause_on_focus_loss,
     );
+    // With the GPU drawing, one GPU for the GS and the window, opened from
+    // the window system's instance; else (or if that fails) each opens
+    // its own and pictures are read back.
+    let presenting = options
+        .settings
+        .gpu
+        .then(|| {
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(
+                    Box::new(event_loop.owned_display_handle()),
+                ));
+            ps2_gs_wgpu::Gpu::open(&instance)
+                .map_err(|e| tracing::warn!("pictures read back: {e}"))
+                .ok()
+                .map(|gpu| Presenting {
+                    instance,
+                    gpu,
+                    pictures: ps2_gs_wgpu::Pictures::default(),
+                })
+        })
+        .flatten();
     let machine = {
         let shared = Arc::clone(&shared);
+        let gpu = presenting
+            .as_ref()
+            .map(|p| (p.gpu.clone(), p.pictures.clone()));
         std::thread::Builder::new()
             .name("machine".to_owned())
             .spawn(move || {
-                let error = emulate(&options, recompiled, &shared, &proxy)
+                let error = emulate(&options, recompiled, &shared, &proxy, gpu.as_ref())
                     .err()
                     .map(|e| format!("{e:#}"));
                 let _ = proxy.send_event(Event::Done(error));
@@ -93,6 +130,7 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
     let mut app = App {
         shared: Arc::clone(&shared),
         screen: None,
+        presenting,
         keys: Vec::new(),
         bindings,
         window_size,
@@ -116,10 +154,12 @@ fn emulate(
     recompiled: Option<&'static Recompiled>,
     shared: &Shared,
     proxy: &EventLoopProxy<Event>,
+    gpu: Option<&(ps2_gs_wgpu::Gpu, ps2_gs_wgpu::Pictures)>,
 ) -> Result<()> {
     let (mut machine, _) = crate::boot(options.game, recompiled)?;
     if options.settings.gpu {
-        let name = crate::use_gpu(&machine, options.settings.scale)?;
+        let shared_gpu = gpu.map(|(g, p)| (g, p.clone()));
+        let name = crate::use_gpu(&machine, options.settings.scale, shared_gpu)?;
         tracing::info!("drawing on the GPU: {name}");
     }
     let (script, ahead) = match &options.replay {
@@ -168,10 +208,18 @@ fn emulate(
             // V-blank handler has just set it up.
             let odd = hw.gs_csr >> 13 & 1 == 1;
             let proxy = proxy.clone();
+            // The window shows it from the GPU when it can, else from its
+            // pixels read back.
+            let present = shared.presenting.load(Ordering::Relaxed);
             hw.gs.post(move |gs| {
-                gs.show(&regs, move |frame| {
-                    let _ = proxy.send_event(Event::Frame(Field { frame, odd }));
-                });
+                let send = move |picture| {
+                    let _ = proxy.send_event(Event::Field(Field { picture, odd }));
+                };
+                if present {
+                    gs.present(&regs, send);
+                } else {
+                    gs.show(&regs, move |frame| send(Picture::Frame(frame)));
+                }
             });
         }
         if live {
@@ -477,6 +525,8 @@ impl Bindings {
 struct App {
     shared: Arc<Shared>,
     screen: Option<Screen>,
+    /// The GPU the GS draws on, for the window to share.
+    presenting: Option<Presenting>,
     /// Keys held.
     keys: Vec<KeyCode>,
     bindings: Bindings,
@@ -501,9 +551,14 @@ impl ApplicationHandler<Event> for App {
             .create_window(attributes)
             .map(Arc::new)
             .map_err(|e| e.to_string())
-            .and_then(|window| Screen::new(event_loop, window));
+            .and_then(|window| Screen::new(event_loop, window, self.presenting.as_ref()));
         match made {
-            Ok(screen) => self.screen = Some(screen),
+            Ok(screen) => {
+                self.shared
+                    .presenting
+                    .store(screen.presenting(), Ordering::Relaxed);
+                self.screen = Some(screen);
+            }
             Err(e) => {
                 self.error = Some(format!("opening the window: {e}"));
                 event_loop.exit();
@@ -513,9 +568,12 @@ impl ApplicationHandler<Event> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
-            Event::Frame(field) => {
+            Event::Field(field) => {
                 if let Some(screen) = &mut self.screen {
-                    screen.add_field(&field.frame, field.odd);
+                    match field.picture {
+                        Picture::Frame(frame) => screen.add_field(&frame, field.odd),
+                        Picture::Presented(p) => screen.add_presented(p, field.odd),
+                    }
                     screen.window().request_redraw();
                 }
             }
@@ -598,7 +656,7 @@ impl App {
 
 /// A field as the display showed it.
 struct Field {
-    frame: Frame,
+    picture: Picture,
     /// The odd field: its lines sit one line lower in the picture.
     odd: bool,
 }

@@ -353,7 +353,11 @@ enum Item {
     Batch(Work, bool),
     Upload(Upload, Arc<Memory>),
     Memory(Vec<u32>),
-    Display(crate::Privileged, Box<dyn FnOnce(crate::Frame) + Send>),
+    Display(
+        crate::Privileged,
+        bool,
+        Box<dyn FnOnce(export::Picture) + Send>,
+    ),
     Read(mpsc::Sender<Vec<u32>>),
 }
 
@@ -423,9 +427,13 @@ impl Drawer {
                             }
                             (None, 2)
                         }
-                        Item::Display(regs, then) => {
+                        Item::Display(regs, present, then) => {
                             if let Some(tap) = &mut tap {
-                                then(tap.display(&regs));
+                                let presented = present.then(|| tap.present(&regs)).flatten();
+                                then(match presented {
+                                    Some(p) => export::Picture::Presented(p),
+                                    None => export::Picture::Frame(tap.display(&regs)),
+                                });
                             }
                             (None, 2)
                         }
@@ -748,8 +756,12 @@ pub(crate) enum Op {
         load: Option<[u32; 16]>,
     },
     /// For a tap: the display's picture, once it has drawn everything
-    /// before.
-    Show(crate::Privileged, Box<dyn FnOnce(crate::Frame) + Send>),
+    /// before; presented when it can be (with `true`), else read out.
+    Show(
+        crate::Privileged,
+        bool,
+        Box<dyn FnOnce(export::Picture) + Send>,
+    ),
     /// For a tap: local memory as it has it.
     Read(mpsc::Sender<Vec<u32>>),
     /// For a tap: all of local memory again.
@@ -780,10 +792,10 @@ impl Batch {
                     self.clut_loaded(export::Clut::Load(words), version);
                 }
             }
-            Op::Show(regs, then) => {
+            Op::Show(regs, present, then) => {
                 self.submit();
                 let uses = self.no_uses();
-                self.hand_over(Item::Display(regs, then), uses);
+                self.hand_over(Item::Display(regs, present, then), uses);
             }
             Op::Read(back) => {
                 self.submit();

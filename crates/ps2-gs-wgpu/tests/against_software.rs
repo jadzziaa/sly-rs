@@ -102,7 +102,17 @@ fn pictures(
     let on_gpu = gpu
         .0
         .lock()
-        .map(|mut g| ps2_gs::export::Tap::display(&mut *g, &regs))
+        .map(|mut g| {
+            let read = ps2_gs::export::Tap::display(&mut *g, &regs);
+            // Presented for a window, the same pixels.
+            if let Some(presented) = ps2_gs::export::Tap::present(&mut *g, &regs) {
+                assert!(
+                    read == g.read_presented(presented),
+                    "the presented picture differs"
+                );
+            }
+            read
+        })
         .unwrap_or_default();
     [gs.display(&regs), on_gpu]
 }
@@ -223,7 +233,11 @@ fn draw(
 /// each compared with the software GS: local memory (the first sample
 /// plane) word for word, and the pictures, from the first plane's pixels.
 fn compare(scale: u32, cases: usize) {
-    let Ok(gpu) = GpuGs::with_scale(scale) else {
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let Ok(gpu) = ps2_gs_wgpu::Gpu::open(&instance)
+        .and_then(|g| GpuGs::with_device(&g, scale, Some(ps2_gs_wgpu::Pictures::default())))
+    else {
         return;
     };
     let gpu = Shared(Arc::new(Mutex::new(gpu)));

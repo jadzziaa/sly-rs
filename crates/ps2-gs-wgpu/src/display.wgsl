@@ -8,6 +8,8 @@
 @group(0) @binding(1) var<storage, read> tables: array<u32>;
 @group(0) @binding(2) var<storage, read> params: array<u32>;
 @group(0) @binding(3) var<storage, read_write> picture: array<u32>;
+// The picture for the window, when it is presented rather than read out.
+@group(0) @binding(4) var shown: texture_storage_2d<rgba8unorm, write>;
 
 var<private> base: u32;
 
@@ -56,12 +58,8 @@ fn circuit(c: u32, x: u32, y: u32) -> Read {
     return Read(true, vec4<u32>(v & 0xFFu, (v >> 8u) & 0xFFu, (v >> 16u) & 0xFFu, v >> 24u));
 }
 
-@compute @workgroup_size(8, 8)
-fn display(@builtin(global_invocation_id) at: vec3<u32>) {
-    let width = params[0] * SCALE;
-    if at.x >= width || at.y >= params[1] * SCALE {
-        return;
-    }
+// The picture's pixel at `at`.
+fn read_out(at: vec2<u32>) -> vec3<u32> {
     base = ((at.y % SCALE) * SCALE + at.x % SCALE) * WORDS;
     let id = at.xy / SCALE;
     let bgcolor = params[2];
@@ -82,5 +80,25 @@ fn display(@builtin(global_invocation_id) at: vec3<u32>) {
         let a = select(min(first.p.w * 2u, 255u), alp, mmod);
         out = (first.p.xyz * a + back * (255u - a)) / 255u;
     }
+    return out;
+}
+
+@compute @workgroup_size(8, 8)
+fn display(@builtin(global_invocation_id) at: vec3<u32>) {
+    let width = params[0] * SCALE;
+    if at.x >= width || at.y >= params[1] * SCALE {
+        return;
+    }
+    let out = read_out(at.xy);
     picture[at.y * width + at.x] = out.x | (out.y << 8u) | (out.z << 16u);
+}
+
+// The same picture into a texture the window shows: each value `v` as
+// `v / 255`, which the texture stores as `v`.
+@compute @workgroup_size(8, 8)
+fn present(@builtin(global_invocation_id) at: vec3<u32>) {
+    if at.x >= params[0] * SCALE || at.y >= params[1] * SCALE {
+        return;
+    }
+    textureStore(shown, at.xy, vec4<f32>(vec3<f32>(read_out(at.xy)) / 255.0, 1.0));
 }

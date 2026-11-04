@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T22:57:53Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T23:44:56Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -282,6 +282,39 @@ replay and the full tests unchanged; the prologue's final hash the same.
 VU1's thread spends about 90% of its time in the translated programs
 now; one program's body is a third of it, and the exponent-255 checks on
 operands the translator cannot prove clean (loaded from memory) about 7%.
+
+**5, presenting on the GPU** (2026-11-04), in two steps.
+
+- The window deinterlaces in its shader: it keeps the latest three fields
+  as textures and does per pixel what the CPU did (the latest field's
+  rows; rows between woven from the field before where the picture is
+  still, else the rows around averaged), deciding on the CPU which
+  fields can be used. The CPU deinterlacer is now the tests' reference:
+  the window's picture equals it for both parities, one to five fields,
+  a change of size and frame mode, and at 3× (filtered) within one step.
+- With the GPU drawing, `play` opens one GPU from the window system's
+  instance before the machine starts; the GS draws on it and the window
+  shares it when its adapter can draw into the window. Each field the
+  display shader writes the picture into one of six textures
+  (`Tap::present`, `Pictures`), and the window shows it from there:
+  nothing is read back. Otherwise (no shared GPU, software drawing) the
+  pictures are read back and uploaded as before. The random GPU test
+  checks that every presented picture equals the one read back.
+
+Asking for the picture every field, as `play` does, on the play dump
+with the GPU alone (three runs each):
+
+| Scale | No pictures | Read back | Presented |
+| --- | --- | --- | --- |
+| 1× | 0.53 s | 0.60 s | 0.52 s |
+| 3× | 0.82-0.91 s | 1.10-1.12 s | 0.82-0.91 s |
+| 4× | 1.24-1.28 s | 1.47-1.52 s | 1.18-1.28 s |
+
+So the read back cost the drawer thread about 1.2 ms a field at 1× and
+3.7 ms at 3× and 4×, and presenting costs nothing measurable; the window
+thread no longer deinterlaces (3.8 ms a field at 3×). Replays never ask
+for pictures, so their timings do not change. Not yet checked: play in
+the window on the reference machine.
 
 ## Recommendation
 
