@@ -16,6 +16,11 @@ const SLY1_JOY_STATE: u32 = 0x0026_2C70 + 0x14;
 /// fields 0x18 and 0xC.
 const SLY1_SAVE: u32 = 0x0026_4A40;
 
+/// `g_clock`: the game's clock (`CLOCK`, updated by `MarkClockTick` from
+/// COP0 Count); real time in seconds at 0x10, each frame's step clamped
+/// to 1/60 to 1/30 s.
+const SLY1_CLOCK: u32 = 0x0026_1858;
+
 /// `g_pgsCur`: the game state (`GS`): current world and level at 0x19D8 and
 /// 0x19DC, lives at 0x19E0.
 const SLY1_GAME_STATE: u32 = 0x0026_23C0;
@@ -55,6 +60,8 @@ pub struct Sly1State {
     /// The game state's world, level and lives (`gameworldCur`,
     /// `worldlevelCur`, `clife`).
     pub world: (i32, i32, i32),
+    /// The game clock's real time, in seconds (`f32` bits).
+    pub clock: u32,
 }
 
 impl Sly1State {
@@ -79,6 +86,7 @@ impl Sly1State {
                 mem.read32(SLY1_SAVE + 0x18).cast_signed(),
                 mem.read32(SLY1_SAVE + 0xC).cast_signed(),
             ),
+            clock: mem.read32(SLY1_CLOCK + 0x10),
         }
     }
 
@@ -90,6 +98,12 @@ impl Sly1State {
             .and_then(|i| UI_STATES.get(i))
             .copied()
             .unwrap_or("?")
+    }
+
+    /// The game clock's real time, in seconds.
+    #[must_use]
+    pub const fn clock(&self) -> f32 {
+        f32::from_bits(self.clock)
     }
 
     /// The joypad state's name.
@@ -107,7 +121,7 @@ impl std::fmt::Display for Sly1State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "interface {} ({}), joypad {} ({}) {}, save {}/{}, world {} level {} lives {}",
+            "interface {} ({}), joypad {} ({}) {}, save {}/{}, world {} level {} lives {}, clock {:.2} s",
             self.ui_name(),
             self.ui,
             self.joy_name(),
@@ -121,7 +135,8 @@ impl std::fmt::Display for Sly1State {
             self.save.1,
             self.world.0,
             self.world.1,
-            self.world.2
+            self.world.2,
+            self.clock()
         )
     }
 }

@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T01:31:05Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T02:06:35Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -401,6 +401,29 @@ instructions).
   recording from 127.0 to 119.1 s (two runs, within 0.3 s): 112% of
   console speed. The machine now waits for the GS 3.2% of the run; VIF1
   with VU1 (64% without the waits) and the EE (32%) set the pace again.
+- **The whole prologue, re-recorded** by the user after these changes
+  (21,981 fields, to level 4; the recording reproduces, state hash
+  included): headless in 304.6 s against 366.7 s of fields, 120% of NTSC
+  overall. `replay --timing --every 300` shows each 5-second stretch:
+  16 of 73 run below NTSC, the slowest at 88% (fields 17,400-17,700,
+  most likely the chase with Carmelita, where the user saw a slowdown in
+  the window). The GS thread is busy 94-99% almost everywhere. In some
+  slow stretches the machine hardly waits for the GS (fields 9,600-9,900:
+  92%, waiting 1%; 5,400-5,700: 93%, 3%; 4,200-4,500: 98%, 0%): VU1 and
+  the EE set the pace there, and a faster GS would not help. In others
+  the waits matter (13,800-14,400: 96-97%, waiting 21%; the chase: 88%,
+  waiting 10%).
+- **The game clock** (`g_clock`, 0x261858: `MarkClockTick` turns COP0
+  Count deltas into seconds, each frame's step clamped to 1/60-1/30 s),
+  now in the game state's report, matches the fields exactly in play
+  (5.00 s for every 5.005 s of fields from field 1,800 on). In the
+  opening cutscene (fields 600-1,800) it runs about 10% ahead (5.5 s per
+  5 s): the game then finishes some frames in less than a field, each
+  counted as at least 1/60 s. Our EE and GS finish work sooner in
+  emulated time than the console's (no cache stalls, the GS's events
+  raised as packets are sent), so frames the console would hold to a
+  field come early here. Play in the window paces fields to 59.94 a
+  second.
 - **What `unsafe` would buy** (measured with a throwaway change, not
   kept): unchecked indexing for local memory's words, the page tables and
   the CLUT took the play dump from 3.44 to 3.37 s on one thread and

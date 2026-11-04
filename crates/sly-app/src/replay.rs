@@ -23,25 +23,61 @@ pub(crate) struct Frames<'a> {
     pub(crate) beyond: u64,
     /// A GS dump of the last fields: the file and how many.
     pub(crate) gs_dump: Option<(&'a Path, u64)>,
+    /// Print how fast every `every` fields ran, and the game's clock.
+    pub(crate) timing: bool,
 }
 
 /// Runs `fields` fields of `script`, saving pictures on the way.
+#[allow(clippy::cast_precision_loss, reason = "a report")]
 fn advance(
     machine: &mut ps2_ee::Machine,
     fields: u64,
     script: &replay::Script,
     frames: &Frames<'_>,
 ) -> Result<ps2_ee::Stop> {
-    let Some(dir) = frames.dir else {
+    if frames.dir.is_none() && !frames.timing {
         return Ok(replay::run(machine, fields, script));
+    }
+    let mut started = std::time::Instant::now();
+    // The GS's time so far: the machine waiting for it, its thread busy.
+    let gs_times = |machine: &ps2_ee::Machine| {
+        let mut hw = machine.hw.borrow_mut();
+        let busy = hw.gs.with(|gs| gs.busy);
+        (hw.gs.waited, busy)
     };
+    let mut before = gs_times(machine);
     for _ in 0..fields {
         let stop = replay::run(machine, 1, script);
         if stop != ps2_ee::Stop::Budget {
             return Ok(stop);
         }
         let field = machine.cpu.cycles / ps2_ee::FIELD_CYCLES;
-        if field.is_multiple_of(frames.every.max(1)) {
+        let every = frames.every.max(1);
+        if frames.timing && field.is_multiple_of(every) {
+            // The GS's thread included: `gs_times` waits for it.
+            let now = gs_times(machine);
+            let took = started.elapsed().as_secs_f64();
+            started = std::time::Instant::now();
+            let (waited, busy) = (
+                now.0.saturating_sub(before.0).as_secs_f64() / took * 100.0,
+                now.1.saturating_sub(before.1).as_secs_f64() / took * 100.0,
+            );
+            before = now;
+            let state = Sly1State::read(&mut machine.mem);
+            let (real, at) = (every as f64 / 59.94, field as f64 / 59.94);
+            println!(
+                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC, waiting for the GS {waited:.0}%, GS thread busy {busy:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
+                field - every,
+                took * 1000.0 / every as f64,
+                real * 100.0 / took,
+                state.clock(),
+                state.world.0,
+                state.world.1,
+            );
+        }
+        if let Some(dir) = frames.dir
+            && field.is_multiple_of(frames.every.max(1))
+        {
             let mut hw = machine.hw.borrow_mut();
             let regs = hw.gs_display();
             let frame = hw.gs.with(move |gs| gs.display(&regs));

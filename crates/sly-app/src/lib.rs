@@ -265,6 +265,10 @@ enum Command {
         /// Fields the GS dump covers.
         #[arg(long, default_value_t = 2)]
         gs_dump_fields: u64,
+        /// Print how fast every --every fields ran (against NTSC's 59.94
+        /// fields a second) and the game's clock.
+        #[arg(long)]
+        timing: bool,
     },
     /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
     /// as PCSX2 keeps them), or check an existing one with --check.
@@ -358,6 +362,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             beyond,
             gs_dump,
             gs_dump_fields,
+            timing,
         } => replay::run(
             &path,
             record,
@@ -366,6 +371,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 every,
                 beyond,
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
+                timing,
             },
             recompiled.filter(|_| !interpret),
         ),
