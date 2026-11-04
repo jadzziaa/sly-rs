@@ -543,8 +543,7 @@ impl Raster<'_> {
                 let z = if flat_z {
                     f[0].z
                 } else {
-                    let sum: i128 = (0..3).map(|k| i128::from(w[k]) * i128::from(f[k].z)).sum();
-                    (sum / i128::from(area)) as u32
+                    weighted_depth(w, f.map(|v| v.z), area)
                 };
                 let rgba = if p.iip {
                     std::array::from_fn(|k| {
@@ -1076,6 +1075,22 @@ fn attrs(p: &Pipe, v: &Vertex) -> Frag {
 /// from the edge equations (an edge owned or not needs a value of at least
 /// 0 or 1), one pixel wider on each side; the per-pixel test decides
 /// exactly.
+/// Depth from the exact integer weights `w` (summing to `area`) of the
+/// vertices' depths `z`: in 64 bits when the sum fits (depths of 24 bits or
+/// less always do), else in 128.
+fn weighted_depth(w: [i64; 3], z: [u32; 3], area: i64) -> u32 {
+    let sum64 = (0..3).try_fold(0i64, |sum, k| {
+        w[k].checked_mul(i64::from(z[k]))
+            .and_then(|t| sum.checked_add(t))
+    });
+    if let Some(sum) = sum64 {
+        (sum / area) as u32
+    } else {
+        let sum: i128 = (0..3).map(|k| i128::from(w[k]) * i128::from(z[k])).sum();
+        (sum / i128::from(area)) as u32
+    }
+}
+
 fn row_span(e0: [i64; 3], step: [i64; 3], owned: [bool; 3], last: i64) -> Option<(i64, i64)> {
     let (mut from, mut to) = (0, last);
     for k in 0..3 {

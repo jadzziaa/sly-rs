@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:46:17Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T00:12:00Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -320,8 +320,21 @@ instructions are per pixel: `fragment` 66% inclusive, `texel` 22%,
 `prim` 19% itself. Each triangle pixel computes its depth with a 128-bit
 multiply-add and division and its colour and fog with five 64-bit
 divisions (exact barycentric weights; `__divti3` alone is 5.6% of the
-instructions). The same exact quotients can be stepped along a row with
-a remainder, without a division per pixel, leaving every pixel the same.
+instructions).
+
+- **Depth in 64 bits when it fits** (it always does for depths of 24
+  bits or less), in 128 otherwise: the dump from 4.58 to 4.26 s on one
+  thread, 1.26 to 1.20 s on eight, local memory the same.
+- **Tried and dropped: no division per pixel.** Stepping each quotient
+  and its remainder exactly along the row (one division per row, then
+  per triangle with rows carried from the row above) gave the same
+  pixels but was slower: 5.2 to 6.7 s on one thread. The game's
+  triangles are small, rows a few pixels long, so the bookkeeping cost
+  more than the divisions. Callgrind counts instructions: a 64-bit
+  division is one, and `__divti3` many, so they looked dearer than they
+  are. What costs is the rest of `fragment` and `texel`: pipelines
+  specialised to a primitive's state, as PCSX2's renderer generates,
+  are the step that remains.
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals
