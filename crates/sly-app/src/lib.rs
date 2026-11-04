@@ -12,6 +12,7 @@ mod lockstep;
 mod play;
 mod replay;
 mod run;
+mod screen;
 mod vu_bench;
 
 use std::path::PathBuf;

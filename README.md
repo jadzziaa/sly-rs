@@ -60,7 +60,9 @@ Commands so far:
   window's size can be changed under `[play]` in `sly-rs.toml` (see
   `sly-rs.example.toml`); `play` says whether SDL's controller database
   knows your gamepad, and if it does not, its face buttons may need
-  `[play.gamepad]`. The
+  `[play.gamepad]`. The window draws with wgpu (Vulkan, Metal, DirectX 12
+  or OpenGL) on the high-performance GPU; `WGPU_POWER_PREF=low` picks the
+  integrated one and `WGPU_BACKEND=gl` forces OpenGL. The
   recompiled binary below plays faster in busy scenes.
 - `sly-rs format-card card.ps2` writes a freshly formatted 8 MB memory
   card image as PCSX2 keeps them (`--check` reads one and reports on it).

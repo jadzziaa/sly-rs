@@ -30,6 +30,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::Recompiled;
+use crate::screen::Screen;
 
 /// A field: 1001/60000 s (NTSC).
 const FIELD: Duration = Duration::from_nanos(16_683_333);
@@ -91,8 +92,7 @@ pub(crate) fn run(options: Options, recompiled: Option<&'static Recompiled>) -> 
     };
     let mut app = App {
         shared: Arc::clone(&shared),
-        window: None,
-        surface: None,
+        screen: None,
         fields: Vec::new(),
         frame: None,
         keys: Vec::new(),
@@ -473,8 +473,7 @@ impl Bindings {
 /// The window.
 struct App {
     shared: Arc<Shared>,
-    window: Option<Arc<Window>>,
-    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    screen: Option<Screen>,
     /// The latest fields, newest last (at most three).
     fields: Vec<Field>,
     /// The picture they make.
@@ -490,7 +489,7 @@ struct App {
 
 impl ApplicationHandler<Event> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.screen.is_some() {
             return;
         }
         let attributes = Window::default_attributes()
@@ -503,18 +502,9 @@ impl ApplicationHandler<Event> for App {
             .create_window(attributes)
             .map(Arc::new)
             .map_err(|e| e.to_string())
-            .and_then(|window| {
-                let context =
-                    softbuffer::Context::new(Arc::clone(&window)).map_err(|e| e.to_string())?;
-                let surface = softbuffer::Surface::new(&context, Arc::clone(&window))
-                    .map_err(|e| e.to_string())?;
-                Ok((window, surface))
-            });
+            .and_then(|window| Screen::new(event_loop, window));
         match made {
-            Ok((window, surface)) => {
-                self.window = Some(window);
-                self.surface = Some(surface);
-            }
+            Ok(screen) => self.screen = Some(screen),
             Err(e) => {
                 self.error = Some(format!("opening the window: {e}"));
                 event_loop.exit();
@@ -530,8 +520,8 @@ impl ApplicationHandler<Event> for App {
                 }
                 self.fields.push(field);
                 self.frame = Some(deinterlace(&self.fields));
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                if let Some(screen) = &self.screen {
+                    screen.window().request_redraw();
                 }
             }
             Event::Done(error) => {
@@ -604,23 +594,10 @@ impl App {
 
     /// Shows the latest picture at 4:3 in the window, black around it.
     fn draw(&mut self) -> Result<(), String> {
-        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
-            return Ok(());
-        };
-        let size = window.inner_size();
-        let (Some(w), Some(h)) = (
-            std::num::NonZeroU32::new(size.width),
-            std::num::NonZeroU32::new(size.height),
-        ) else {
-            return Ok(());
-        };
-        surface.resize(w, h).map_err(|e| e.to_string())?;
-        let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
-        buffer.fill(0);
-        if let Some(frame) = &self.frame {
-            paint(&mut buffer, (size.width, size.height), frame);
+        match &mut self.screen {
+            Some(screen) => screen.draw(self.frame.as_ref()),
+            None => Ok(()),
         }
-        buffer.present().map_err(|e| e.to_string())
     }
 }
 
@@ -718,36 +695,6 @@ fn deinterlace(fields: &[Field]) -> Frame {
         width: latest.frame.width,
         height: latest.frame.height * 2,
         rgb,
-    }
-}
-
-/// Paints `frame` into `buffer` (`width` × `height`, 0RGB) at 4:3,
-/// centred; a field's lines are doubled.
-fn paint(buffer: &mut [u32], (width, height): (u32, u32), frame: &Frame) {
-    let (fw, fh) = (frame.width as usize, frame.height as usize);
-    if fw == 0 || fh == 0 {
-        return;
-    }
-    let (width, height) = (width as usize, height as usize);
-    // A field is half the picture's lines; a frame-mode picture is whole.
-    let lines = if fh <= 256 { fh * 2 } else { fh };
-    let (tw, th) = if width * 3 >= height * 4 {
-        (height * 4 / 3, height)
-    } else {
-        (width, width * 3 / 4)
-    };
-    let (ox, oy) = ((width - tw) / 2, (height - th) / 2);
-    for y in 0..th {
-        let line = y * lines / th;
-        let row = (line * fh / lines).min(fh - 1);
-        let source = &frame.rgb[row * fw * 3..(row + 1) * fw * 3];
-        let target = &mut buffer[(oy + y) * width + ox..(oy + y) * width + ox + tw];
-        for (x, pixel) in target.iter_mut().enumerate() {
-            let s = (x * fw / tw) * 3;
-            *pixel = u32::from(source[s]) << 16
-                | u32::from(source[s + 1]) << 8
-                | u32::from(source[s + 2]);
-        }
     }
 }
 
@@ -855,20 +802,5 @@ mod tests {
         // With no history, the same.
         let alone = deinterlace(&[field(&[0, 100, 200], true)]);
         assert_eq!(rows(&alone), [0, 0, 50, 100, 150, 200]);
-    }
-
-    #[test]
-    fn fields_are_line_doubled_at_four_by_three() {
-        let frame = Frame {
-            width: 2,
-            height: 2,
-            rgb: vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
-        };
-        let mut buffer = vec![0u32; 8 * 4];
-        paint(&mut buffer, (8, 4), &frame);
-        // 4:3 in 8 × 4 is 5 × 4 (rounded down), starting at column 1.
-        assert_eq!(buffer[1], 0xFF_0000);
-        assert_eq!(buffer[4 * 8 - 1 - 2], 0xFF_FFFF);
-        assert_eq!(buffer[0], 0);
     }
 }

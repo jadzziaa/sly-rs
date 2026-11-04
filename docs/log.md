@@ -1,5 +1,8 @@
 # Update log
 
+## 2026-11-04
+* **Update**: M0 of the [GPU GS](research/gpu-gs.md): `play` draws with wgpu instead of softbuffer, pixel for pixel the same picture (checked offscreen on both GPUs, Vulkan and OpenGL); [plan.md](plan.md) phase 7 status updated.
+
 ## 2026-11-03
 * **Update**: M1 of the [GPU GS](research/gpu-gs.md): triangles' texture coordinates on a shared integer arithmetic (crates/ps2-gs/src/fixed.rs); every other per-pixel value was integer already and is unchanged. PCSX2 parity as good or slightly better (title 3D 86.4% identical, was 85.1%); dump hashes re-recorded.
 * **Creation**: [A GPU GS on wgpu compute shaders](research/gpu-gs.md): the GPU renderer's design (compute, after paraLLEl-GS; one arithmetic shared with the software GS), milestones M0-M5; plan phase 9 updated. gs-replay counts transfers by direction: Sly never reads GS memory back.

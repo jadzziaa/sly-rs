@@ -4,7 +4,7 @@ title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T02:55:11Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:08:03Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -105,6 +105,15 @@ as good or slightly better: the title's 3D 86.40% identical (was
 checkpoints do not move: the state hash covers RAM, the scratchpad and
 both VUs, not GS memory.
 
+**M0, checked** (2026-11-04): `play` draws with wgpu 30
+(`crates/sly-app/src/screen.rs`). The picture is uploaded as a texture
+and a fragment shader maps window pixels to picture pixels with the CPU
+painter's integer arithmetic; a test renders offscreen and compares with
+that painter (kept in the test as the reference) over four picture sizes
+and five window sizes: identical on the RX 9070 XT and the integrated
+Radeon, through Vulkan and OpenGL. A session played through the short
+recording in the window wrote a recording that replays to its checkpoint.
+
 ## Facts checked
 
 - **Sly never reads GS memory back.** On six dumps (ours and PCSX2's, the
@@ -137,7 +146,7 @@ both VUs, not GS memory.
 
 | | What | Gate |
 | --- | --- | --- |
-| M0 | wgpu in `play`: device, surface, presentation (softbuffer goes); the software GS still draws | the window shows the same frames; `play` still records and replays |
+| M0 | wgpu in `play`: device, surface, presentation (softbuffer goes); the software GS still draws (**done**, 2026-11-04) | the window shows the same frames; `play` still records and replays |
 | M1 | the shared integer arithmetic in the software GS (**done**, 2026-11-03: only triangles' texture coordinates changed) | PCSX2 parity re-run; twelve dumps re-baselined |
 | M2 | compute rasteriser for triangles and sprites, the full `fragment` pipeline (not just the hot state: mixing CPU and GPU drawing would need constant syncs) | GPU memory hash equals the software's on the dumps that use only those, twice in a row |
 | M3 | hazards as dispatch boundaries, uploads, CLUT loads, AA1, lines, points | all twelve dumps |

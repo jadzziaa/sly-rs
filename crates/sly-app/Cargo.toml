@@ -19,6 +19,7 @@ anyhow.workspace = true
 clap.workspace = true
 gilrs.workspace = true
 object.workspace = true
+pollster.workspace = true
 ps2-analysis.workspace = true
 ps2-core.workspace = true
 ps2-disc.workspace = true
@@ -29,9 +30,9 @@ ps2-isa.workspace = true
 ps2-memcard.workspace = true
 ps2-vu.workspace = true
 sly-common.workspace = true
-softbuffer.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+wgpu.workspace = true
 winit.workspace = true
 
 [lints]
