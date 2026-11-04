@@ -508,9 +508,11 @@ impl export::Tap for GpuGs {
         }
         let mut used = Vec::new();
         let mut snapshot = false;
-        // Fragments, each primitive's grouped by tile (in order within one).
+        // Fragments, each primitive's grouped by tile, and within a tile by
+        // plane and pixel (a pixel's in order), for the shader to find its
+        // own by binary search.
         let mut binned: Vec<u32> = Vec::with_capacity(batch.frags.len());
-        let mut by_tile: Vec<(usize, usize)> = Vec::new();
+        let mut by_tile: Vec<(usize, u64, usize)> = Vec::new();
         for (i, prim) in batch.prims.as_chunks::<PRIM_WORDS>().0.iter().enumerate() {
             snapshot |= prim[word::KIND] & flag::SNAPSHOT != 0;
             let tile_of = |x: u32, y: u32| (y / TILE) as usize * TILES + (x / TILE) as usize;
@@ -526,11 +528,14 @@ impl export::Tap for GpuGs {
             by_tile.clear();
             for f in first..first + count {
                 let xy = batch.frags[f * FRAG_WORDS];
-                by_tile.push((tile_of(xy & 0xFFFF, xy >> 16), f));
+                let plane = batch.frags[f * FRAG_WORDS + 7];
+                let key =
+                    u64::from(plane) << 32 | u64::from(xy >> 16) << 16 | u64::from(xy & 0xFFFF);
+                by_tile.push((tile_of(xy & 0xFFFF, xy >> 16), key, f));
             }
-            by_tile.sort_by_key(|&(t, _)| t);
+            by_tile.sort_by_key(|&(t, key, _)| (t, key));
             let mut runs: Vec<(usize, usize, usize)> = Vec::new();
-            for &(t, f) in &by_tile {
+            for &(t, _, f) in &by_tile {
                 let at = binned.len() / FRAG_WORDS;
                 binned.extend_from_slice(&batch.frags[f * FRAG_WORDS..(f + 1) * FRAG_WORDS]);
                 match runs.last_mut() {

@@ -3,7 +3,7 @@ type: Proposal
 title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T08:34:28Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T23:17:56Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -242,6 +242,43 @@ scaled picture (bilinear) instead of taking its pixels.
   GS does: all thirteen dumps are the same as the software GS at 1× and
   2×. 60 fields of play: 0.81 s at 2×, 0.91 s at 3×, 1.40 s at 4×. A
   session played at 3× wrote a recording that replays to its checkpoint.
+
+**Cheaper planes** (2026-11-04). At 4× the drawer thread spent 1.23 of
+its 1.36 s submitting, that is waiting for the GPU. Turning parts of the
+work off in planes other than the first, on the play dump at 4×: sprites
+there cost about 0.08 s of the GPU's 1.1, CPU-walked fragments about
+0.05, triangles' inside tests about 0.16, and the rest, about 0.9 s, was
+triangles' exact interpolation in 64-bit integers (depth about 0.38 s,
+colour, fog and texture coordinates about 0.54); shading the fragments
+cost little. So paraLLEl-GS's single-sample path, which shades sprites
+and flat primitives once per pixel, would gain little on Sly, whose cost
+is its 3D triangles. Two changes instead:
+
+- Planes other than the first interpolate colour, fog and texture
+  coordinates in floats (`near`, `scaled` in `draw.wgsl`: the barycentric
+  weights' dot product, held within the vertices' range; STQ as S/Q
+  scaled as the exact quotient is). Depth stays exact in every plane, so
+  that surfaces drawn at the same depth (decals, shadows) still meet.
+  Plane 0 is unchanged, so no hash can move.
+- A tile's CPU-walked fragments are ordered by plane, row and column (a
+  pixel's keeping their order), and each invocation finds its own by
+  binary search instead of reading every plane's.
+
+Checked: all thirteen dumps the same as the software GS after every field
+at 2× (memory and pictures); the random GPU test at 2× and 3×; at 3×
+the pictures of the play dump and the title differ from before in 0.01%
+and 0.00% of pixels, by at most 3 and 1. The play dump, 60 fields with
+the GPU alone, five runs each in turn (another program was using the GPU
+and three cores meanwhile, the same for both):
+
+| Scale | Before | After |
+| --- | --- | --- |
+| 2× | 0.76 s | 0.645 s |
+| 3× | 1.13 s | 0.92 s |
+| 4× | 1.675 s | 1.29 s (21.5 ms a field) |
+
+4× still takes longer than a field per field; the exact depth is now the
+largest part of the planes' cost.
 
 ## Facts checked
 

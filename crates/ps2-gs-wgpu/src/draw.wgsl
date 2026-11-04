@@ -574,6 +574,20 @@ fn edge(ax: i32, ay: i32, bx: i32, by: i32, x: i64, y: i64) -> i64 {
     return i64(bx - ax) * (y - i64(ay)) - i64(by - ay) * (x - i64(ax));
 }
 
+// `Σ wₖ·aₖ / area` from the barycentric weights in floats, rounded down
+// and held within the values' range: for planes other than the first.
+fn near(b: vec3<f32>, a: vec3<i64>) -> i32 {
+    let lo = i32(min(min(a.x, a.y), a.z));
+    let hi = i32(max(max(a.x, a.y), a.z));
+    return clamp(i32(floor(dot(b, vec3<f32>(a)))), lo, hi);
+}
+
+// `ratio`'s result in floats: `t · 2^k` rounded down, within its limits.
+fn scaled(t: f32, k: i32) -> i32 {
+    let m = 1073741824.0; // RATIO_MAX
+    return i32(clamp(floor(t * exp2(f32(k))), -m, m));
+}
+
 // The exact quotient `floor(Σ wₖ·aₖ / area)`, estimated from the
 // barycentric weights `b` (`wₖ / area` in floats; the values `aₖ` are
 // within 2^24) and settled exactly.
@@ -621,24 +635,55 @@ fn triangle(pb: u32, x: u32, y: u32) {
         let n = (hi - q * area) * 65536li + lo;
         z = u32(q * 65536li + settle(n, area, i64(floor(f32(n) * inv))));
     }
+    // Planes other than the first make only the picture at a higher
+    // resolution: they interpolate colour, fog and texture coordinates in
+    // floats, which costs a fraction of the exact integers (depth stays
+    // exact, so that surfaces still meet where the GS has them meet).
+    let close = base != 0u;
     var rgba: vec4<i32>;
     if has(pb, F_IIP) {
         let c0 = rgba_at(pb, 0u);
         let c1 = rgba_at(pb, 1u);
         let c2 = rgba_at(pb, 2u);
         for (var k = 0u; k < 4u; k++) {
-            rgba[k] = i32(exact(w, b, vec3<i64>(c0[k], c1[k], c2[k]), area));
+            let c = vec3<i64>(c0[k], c1[k], c2[k]);
+            if close {
+                rgba[k] = near(b, c);
+            } else {
+                rgba[k] = i32(exact(w, b, c, area));
+            }
         }
     } else {
         rgba = channels(word(pb, W_FLAT_RGBA));
     }
     var fog = 0;
     if has(pb, F_FGE) {
-        fog = i32(exact(w, b, vec3<i64>(i64(word(pb, W_FOG)), i64(word(pb, W_FOG + 1u)), i64(word(pb, W_FOG + 2u))), area));
+        let f = vec3<i64>(i64(word(pb, W_FOG)), i64(word(pb, W_FOG + 1u)), i64(word(pb, W_FOG + 2u)));
+        if close {
+            fog = near(b, f);
+        } else {
+            fog = i32(exact(w, b, f, area));
+        }
     }
     var tex = vec2<i32>(0);
     if has(pb, F_TME) {
-        if has(pb, F_STQ) {
+        if close {
+            let u = vec3<f32>(f32(sword(pb, W_U)), f32(sword(pb, W_U + 1u)), f32(sword(pb, W_U + 2u)));
+            let v = vec3<f32>(f32(sword(pb, W_V)), f32(sword(pb, W_V + 1u)), f32(sword(pb, W_V + 2u)));
+            if has(pb, F_STQ) {
+                let q = vec3<f32>(f32(sword(pb, W_Q)), f32(sword(pb, W_Q + 1u)), f32(sword(pb, W_Q + 2u)));
+                var d = dot(b, q);
+                if d == 0.0 {
+                    d = 1.0;
+                }
+                tex = vec2<i32>(
+                    scaled(dot(b, u) / d, sword(pb, W_SHIFT_U)),
+                    scaled(dot(b, v) / d, sword(pb, W_SHIFT_V)),
+                );
+            } else {
+                tex = vec2<i32>(i32(floor(dot(b, u))), i32(floor(dot(b, v))));
+            }
+        } else if has(pb, F_STQ) {
             let q = reciprocal(weighted(pb, W_Q, w));
             tex = vec2<i32>(
                 ratio(q, weighted(pb, W_U, w), sword(pb, W_SHIFT_U)),
@@ -692,6 +737,13 @@ fn bounds(pb: u32) -> vec4<u32> {
     return b;
 }
 
+// A fragment's place in its tile's order: plane, row, column.
+fn frag_key(f: u32) -> u64 {
+    let at = f * W_FRAG_WORDS;
+    let xy = frags[at];
+    return (u64(frags[at + 7u]) << 32u) | (u64(xy >> 16u) << 16u) | u64(xy & 0xFFFFu);
+}
+
 @compute @workgroup_size(16, 16)
 fn draw(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
     base = group.z * WORDS;
@@ -717,12 +769,24 @@ fn draw(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
         }
         // Fragments walked on the CPU: an antialiased triangle's edges
         // after its inside, or all of a point's, line's or STQ sprite's.
-        let here = x | (y << 16u);
-        for (var f = first; f < first + count; f++) {
-            let at = f * W_FRAG_WORDS;
-            if frags[at] != here || frags[at + 7u] != group.z {
-                continue;
+        // The tile's are ordered by plane, row and column (a pixel's in
+        // order): this pixel's are found by binary search.
+        let wanted = (u64(group.z) << 32u) | (u64(y) << 16u) | u64(x);
+        var lo = first;
+        var hi = first + count;
+        while lo < hi {
+            let mid = (lo + hi) / 2u;
+            if frag_key(mid) < wanted {
+                lo = mid + 1u;
+            } else {
+                hi = mid;
             }
+        }
+        for (var f = lo; f < first + count; f++) {
+            if frag_key(f) != wanted {
+                break;
+            }
+            let at = f * W_FRAG_WORDS;
             fragment(
                 pb,
                 x,

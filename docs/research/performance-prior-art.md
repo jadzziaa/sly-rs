@@ -3,7 +3,7 @@ type: Research Note
 title: Performance techniques in rac-rs and paraLLEl-GS
 description: Which performance techniques rac-rs (Ratchet & Clank recompiled) and paraLLEl-GS (a Vulkan compute GS) use that sly-rs does not yet, what each would buy here, and whether it could keep replays bit-exact.
 tags: [research, prior-art, performance, rac-rs, parallel-gs, gpu, gs, ee, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:11:37Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T23:17:56Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: rac-rs
@@ -55,7 +55,7 @@ Neither project has anything for VU1's thread, sly-rs's limit today.
 | Technique | From | What it buys | Fit, and determinism |
 | --- | --- | --- | --- |
 | Triangle setup on the GPU (`gs/shaders/triangle_setup.comp`), then binning (`binning.comp`) | paraLLEl-GS | Primitive setup off the CPU | **Low.** In sly-rs setup runs on the drawer thread, not the GS thread, and is 1.5% of the drawer's instructions on the play dump (callgrind);[^profile] the drawer's large costs are transfers' pixels turned into word writes (43%) and binning with buffer copies (33%). paraLLEl-GS's author still finds it bound by geometry processing on the CPU.[^pgs-blog] |
-| Single-sample paths when supersampling: sprites at 1×, flat primitives shaded once at the pixel centre (`single_sample_heuristic.comp`) | paraLLEl-GS | Most of the cost of 3× and 4× (4× is 23 ms a field now) | Good: plane 0, the GS's own memory, is unchanged; only the other planes, the picture, change |
+| Single-sample paths when supersampling: sprites at 1×, flat primitives shaded once at the pixel centre (`single_sample_heuristic.comp`) | paraLLEl-GS | The cost of 3× and 4× in 2D-heavy games | **Measured not to fit:** in Sly sprites are under a tenth of the extra planes' cost, which is triangles' exact interpolation; adapted instead as float interpolation in planes other than the first (2026-11-04, [gpu-gs.md](gpu-gs.md)): 4× 23% faster, plane 0 unchanged |
 | Deinterlacing and scan-out in shaders, no read back (`weave.frag`) | paraLLEl-GS | The window thread's deinterlacing and the per-field read back | Good, pictures only (option 5) |
 | Fine binning with subgroup ballots, shading only the primitives that cover a tile (`ubershader.comp`) | paraLLEl-GS | GPU time on weak GPUs | Good, deterministic; needs wgpu's subgroup feature, not yet checked on the two GPUs here (option 6) |
 | Lazy shading: an opaque pixel replaces the pending one, early depth tests turned late when needed | paraLLEl-GS | GPU fill | Medium: must leave the same words; gain on Sly unmeasured |
@@ -86,7 +86,8 @@ vertex handling (11%), IMAGE transfers (9%), primitive bounds (6%), and
 timers and allocation (about 7%);[^profile] speeding those up is sly-rs's
 own work. Of the two projects' techniques:
 
-1. Single-sample paths when supersampling: cheap, and no hash can move.
+1. Single-sample paths when supersampling: done in an adapted form, see
+   the table.
 2. Presenting on the GPU (option 5).
 3. Fine binning and lazy shading for weak GPUs (option 6).
 4. Polling-loop skipping on the EE, once a profile shows a loop worth it.
