@@ -34,13 +34,19 @@
 //! order, coalesced; a CLUT load, a read back, a copy or a look at local
 //! memory waits for what it depends on.
 //!
+//! When only a tap (the GPU) draws, this batching runs on a thread of its
+//! own between the GS thread and the drawer ([`stage`]).
+//!
 //! Footprints are conservative: on each page row a rectangle covers, the
 //! pages from its first column's to its last's. A texture's rectangle is
 //! the texels the primitive can read ([`Prim::texels`]); a depth buffer
 //! counts only where the depth test compares or depth is written.
 
+mod stage;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use rayon::prelude::*;
 
@@ -50,7 +56,9 @@ use crate::mem::Pixel;
 use crate::mem::page_shape;
 use crate::regs::{Tex0, bits};
 use crate::transfer::Upload;
-use crate::{Gs, Memory, Psm};
+use crate::{Memory, Psm};
+
+pub(crate) use stage::Batcher;
 
 /// Blocks of local memory.
 const BLOCKS: u32 = 16384;
@@ -304,11 +312,10 @@ pub(crate) struct Batch {
     /// Buffers of drawn batches, for the next.
     spare_work: Vec<Work>,
     spare_uses: Vec<Uses>,
-    /// The drawer's time on batches drawn on the pool, batches drawn one
-    /// primitive after another, and uploads (for reports).
-    pub(crate) times: [std::time::Duration; 3],
-    /// Time the GS waited for the drawer (for reports).
-    pub(crate) waited: std::time::Duration,
+    /// Local memory, where the CPU draws.
+    mem: Arc<Memory>,
+    /// What has been done so far (for reports).
+    stats: Stats,
     /// A tap is set (it lives on the drawer's thread).
     tapped: bool,
     /// Only the tap draws (not the CPU).
@@ -319,6 +326,24 @@ pub(crate) struct Batch {
     first_clut: Option<u32>,
     /// With a tap: blocks drawn into since a transfer last wrote them.
     frames: Blocks,
+}
+
+/// What batching has done so far (for reports).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Stats {
+    /// Primitives drawn alone, batches, and batches drawn on the pool.
+    pub(crate) alone: u64,
+    pub(crate) batches: u64,
+    pub(crate) parallel_batches: u64,
+    /// The drawer's time on batches drawn on the pool, batches drawn one
+    /// primitive after another, and everything else (uploads, the tap's
+    /// other work).
+    pub(crate) times: [Duration; 3],
+    /// Time spent waiting for the drawer.
+    pub(crate) waited: Duration,
+    /// On a batching thread of its own: its time on what the GS handed it,
+    /// waits for the drawer included.
+    pub(crate) busy: Duration,
 }
 
 /// What the drawer does, in order: draw a batch (on the pool or not),
@@ -341,7 +366,7 @@ struct Drawer {
     batches: mpsc::SyncSender<(Vec<export::Clut>, Item)>,
     /// Each item's end, with a batch's buffers for the next, what kind of
     /// item it was (see [`Batch::times`]) and how long it took.
-    done: mpsc::Receiver<(Option<Work>, usize, std::time::Duration)>,
+    done: mpsc::Receiver<(Option<Work>, usize, Duration)>,
     /// The thread, which gives the tap back when it ends.
     thread: Option<std::thread::JoinHandle<Tap>>,
 }
@@ -435,14 +460,14 @@ impl Batch {
             };
             let started = std::time::Instant::now();
             let received = drawer.done.recv();
-            self.waited += started.elapsed();
+            self.stats.waited += started.elapsed();
             let Ok((back, kind, took)) = received else {
                 // The drawer panicked: memory is not what it should be.
                 assert!(std::thread::panicking(), "the GS's drawer has stopped");
                 return;
             };
             self.drawn += 1;
-            self.times[kind] += took;
+            self.stats.times[kind] += took;
             if let Some(mut work) = back {
                 work.prims.clear();
                 work.serial = false;
@@ -458,9 +483,9 @@ impl Batch {
     }
 
     /// Gives the drawer the transfers' pixels not yet handed over.
-    fn hand_over_upload(&mut self, mem: &Arc<Memory>) {
+    fn hand_over_upload(&mut self) {
         if let Some((upload, uses)) = self.upload.take() {
-            self.hand_over(Item::Upload(upload, Arc::clone(mem)), uses);
+            self.hand_over(Item::Upload(upload, Arc::clone(&self.mem)), uses);
         }
     }
 
@@ -688,158 +713,118 @@ pub(crate) fn word_writes<'a>(
     })
 }
 
-impl Gs {
-    /// Hands the GS's work to `tap` from now on (or to nothing), starting
-    /// with local memory and the CLUT as they are. With `software` false
-    /// the CPU no longer draws (or writes transfers' pixels): local memory
-    /// here goes stale, and pictures, dumps and transfers that read it ask
-    /// the tap ([`Gs::picture`], [`Gs::sync_memory`]); so does the CLUT,
-    /// which the tap loads (going back to drawing on the CPU, it is right
-    /// again from the next CLUT load).
-    pub fn set_tap(&mut self, tap: Option<Box<dyn export::Tap>>, software: bool) {
-        self.sync_memory();
-        self.flush();
-        let _ = self.batch.stop();
-        self.batch.tapped = tap.is_some();
-        self.batch.gpu_only = !software && tap.is_some();
-        self.start_drawer(tap);
-        if self.batch.tapped {
-            self.batch.cluts.push(export::Clut::Set {
-                version: self.clut_version,
-                halves: Box::new(self.clut),
-            });
-            let uses = self.batch.no_uses();
-            self.batch
-                .hand_over(Item::Memory(self.mem.to_words()), uses);
+/// The blocks a CLUT load reads, by TEX0 and TEXCLUT.
+pub(crate) fn clut_region(t: Tex0, texclut: u64) -> Region {
+    if t.csm {
+        let (cbw, cou, cov) = (
+            bits(texclut, 0, 6),
+            bits(texclut, 6, 6) as i32,
+            bits(texclut, 12, 10) as i32,
+        );
+        Region::of(Psm::Ct16, t.cbp, cbw, [cou * 16, cou * 16 + 255, cov, cov])
+    } else {
+        let psm = if t.cpsm < 2 { Psm::Ct32 } else { Psm::Ct16 };
+        Region::of(psm, t.cbp, 1, [0, 15, 0, 15])
+    }
+}
+
+/// What the GS hands its batching, in order.
+pub(crate) enum Op {
+    Prim(Prim),
+    /// A transfer's pixels into a `psm` buffer at `bp`, `bw` wide, all
+    /// inside `region`.
+    Upload {
+        psm: Psm,
+        bp: u32,
+        bw: u32,
+        writes: Vec<(u32, u32, u32)>,
+        region: Region,
+    },
+    /// The CLUT is loaded from `region`: for a tap, `load`, which makes
+    /// it version `version`.
+    Clut {
+        region: Region,
+        version: u32,
+        load: Option<[u32; 16]>,
+    },
+    /// For a tap: the display's picture, once it has drawn everything
+    /// before.
+    Show(crate::Privileged, Box<dyn FnOnce(crate::Frame) + Send>),
+    /// For a tap: local memory as it has it.
+    Read(mpsc::Sender<Vec<u32>>),
+    /// For a tap: all of local memory again.
+    Memory(Vec<u32>),
+    /// Everything before drawn; then what has been done.
+    Flush(mpsc::SyncSender<Stats>),
+}
+
+impl Batch {
+    /// Does `op`.
+    fn apply(&mut self, op: Op) {
+        match op {
+            Op::Prim(prim) => self.queue(prim),
+            Op::Upload {
+                psm,
+                bp,
+                bw,
+                writes,
+                region,
+            } => self.upload(psm, bp, bw, writes, region),
+            Op::Clut {
+                region,
+                version,
+                load,
+            } => {
+                self.before_clut_load(region);
+                if let Some(words) = load {
+                    self.clut_loaded(export::Clut::Load(words), version);
+                }
+            }
+            Op::Show(regs, then) => {
+                self.submit();
+                let uses = self.no_uses();
+                self.hand_over(Item::Display(regs, then), uses);
+            }
+            Op::Read(back) => {
+                self.submit();
+                let uses = self.no_uses();
+                self.hand_over(Item::Read(back), uses);
+            }
+            Op::Memory(words) => {
+                let uses = self.no_uses();
+                self.hand_over(Item::Memory(words), uses);
+            }
+            Op::Flush(reply) => {
+                self.flush();
+                let _ = reply.send(self.stats);
+            }
         }
     }
 
     /// Starts the drawer, if there is a pool or a tap.
     fn start_drawer(&mut self, tap: Tap) {
-        if self.batch.pool.is_some() || tap.is_some() {
-            self.batch.drawer = Drawer::start(self.batch.pool.clone(), tap, !self.batch.gpu_only);
-            assert!(
-                self.batch.drawer.is_some(),
-                "starting the GS's drawer thread"
-            );
+        if self.pool.is_some() || tap.is_some() {
+            self.drawer = Drawer::start(self.pool.clone(), tap, !self.gpu_only);
+            assert!(self.drawer.is_some(), "starting the GS's drawer thread");
         }
-    }
-
-    pub(crate) const fn tapped(&self) -> bool {
-        self.batch.tapped
     }
 
     /// A CLUT load, for the tap: handed over before the next item. A batch
     /// whose CLUTs the loads since its first primitive could overwrite is
     /// drawn first.
-    pub(crate) fn clut_loaded(&mut self, load: export::Clut) {
+    fn clut_loaded(&mut self, load: export::Clut, version: u32) {
         if self
-            .batch
             .first_clut
-            .is_some_and(|v| self.clut_version.wrapping_sub(v) >= export::CLUT_SLOTS - 1)
+            .is_some_and(|v| version.wrapping_sub(v) >= export::CLUT_SLOTS - 1)
         {
             self.submit();
         }
-        self.batch.cluts.push(load);
-    }
-
-    /// Hands `then` the display's picture: at once from local memory when
-    /// the CPU draws, else once the tap has drawn everything before it.
-    pub fn show(
-        &mut self,
-        regs: &crate::Privileged,
-        then: impl FnOnce(crate::Frame) + Send + 'static,
-    ) {
-        if !self.batch.gpu_only {
-            self.flush();
-            then(self.display(regs));
-            return;
-        }
-        self.submit();
-        let uses = self.batch.no_uses();
-        self.batch
-            .hand_over(Item::Display(*regs, Box::new(then)), uses);
-    }
-
-    /// The display's picture, waiting for it (see [`Gs::show`]).
-    pub fn picture(&mut self, regs: &crate::Privileged) -> crate::Frame {
-        let (sent, received) = mpsc::channel();
-        self.show(regs, move |frame| {
-            let _ = sent.send(frame);
-        });
-        self.flush();
-        received.recv().unwrap_or_default()
-    }
-
-    /// When only the tap draws: brings local memory here up to date from
-    /// it (for whatever reads local memory here).
-    pub fn sync_memory(&mut self) {
-        if !self.batch.gpu_only {
-            return;
-        }
-        self.submit();
-        let (sent, received) = mpsc::channel();
-        let uses = self.batch.no_uses();
-        self.batch.hand_over(Item::Read(sent), uses);
-        self.flush();
-        if let Ok(words) = received.recv() {
-            self.mem.load_words(&words);
-        }
-    }
-
-    /// After local memory here changed otherwise than by drawing or
-    /// transfers (a local-to-local copy): hands it to the tap again.
-    pub(crate) fn resync_tap(&mut self) {
-        if self.batch.tapped {
-            self.tap_resyncs += 1;
-            let uses = self.batch.no_uses();
-            self.batch
-                .hand_over(Item::Memory(self.mem.to_words()), uses);
-        }
-    }
-
-    /// Draws with `threads` threads (1: one primitive after another, as it
-    /// comes). The result is the same either way.
-    ///
-    /// # Panics
-    ///
-    /// If the threads cannot be started.
-    pub fn set_threads(&mut self, threads: usize) {
-        self.flush();
-        let tap = self.batch.stop();
-        self.batch.pool = (threads > 1).then(|| {
-            match rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .thread_name(|i| format!("gs-draw-{i}"))
-                .build()
-            {
-                Ok(pool) => Arc::new(pool),
-                Err(e) => panic!("starting the GS's drawing threads: {e}"),
-            }
-        });
-        self.start_drawer(tap);
-    }
-
-    /// The drawer's time on batches drawn on the pool, batches drawn one
-    /// primitive after another, and uploads, so far (for reports).
-    #[must_use]
-    pub const fn drawer_times(&self) -> [std::time::Duration; 3] {
-        self.batch.times
-    }
-
-    /// Time the GS has waited for its drawer (for reports).
-    #[must_use]
-    pub const fn drawer_waits(&self) -> std::time::Duration {
-        self.batch.waited
-    }
-
-    pub(crate) const fn batching(&self) -> bool {
-        self.batch.drawer.is_some()
+        self.cluts.push(load);
     }
 
     /// Queues a primitive, handing the batch to the drawing threads first
     /// when it must.
-    pub(crate) fn queue(&mut self, mut prim: Prim) {
+    fn queue(&mut self, mut prim: Prim) {
         let f = footprint(&prim);
         let p = &prim.pipe;
         let (_, _, fbw) = p.frame;
@@ -848,164 +833,131 @@ impl Gs {
             || f.depth.is_some_and(|d| d.overlaps(f.frame))
             || f.texture.is_some_and(|t| reads_own_writes(&f, t));
         let target = (p.frame, p.zbuf);
-        let b = &self.batch;
-        let again = b.marked == Some(f);
+        let again = self.marked == Some(f);
         if alone
-            || b.target.is_some_and(|t| t != target)
-            || (!again && b.uses.conflict(&f))
-            || b.work.prims.len() >= MAX_PRIMS
+            || self.target.is_some_and(|t| t != target)
+            || (!again && self.uses.conflict(&f))
+            || self.work.prims.len() >= MAX_PRIMS
         {
             self.submit();
         }
-        let b = &mut self.batch;
-        b.target = Some(target);
-        b.first_clut.get_or_insert(prim.pipe.clut_version);
-        if b.tapped {
-            prim.rendered = f.texture.is_some_and(|t| b.frames.hits(t));
+        self.target = Some(target);
+        self.first_clut.get_or_insert(prim.pipe.clut_version);
+        if self.tapped {
+            prim.rendered = f.texture.is_some_and(|t| self.frames.hits(t));
         }
-        if b.marked != Some(f) {
-            b.uses.mark(&f);
-            b.marked = Some(f);
-            if b.tapped {
-                b.frames.mark(f.frame);
+        if self.marked != Some(f) {
+            self.uses.mark(&f);
+            self.marked = Some(f);
+            if self.tapped {
+                self.frames.mark(f.frame);
                 if let (Some(d), true) = (f.depth, f.depth_written) {
-                    b.frames.mark(d);
+                    self.frames.mark(d);
                 }
             }
         }
         let [x0, x1, y0, y1] = prim.bbox;
-        b.work.pixels += ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
-        b.work.prims.push(prim);
+        self.work.pixels += ((x1 - x0 + 1) * (y1 - y0 + 1)) as u64;
+        self.work.prims.push(prim);
         if alone {
             // A batch of its own, drawn as one primitive after another.
-            self.alone += 1;
-            self.batch.work.serial = true;
-            self.batch.work.snapshot = f.texture.filter(|&t| reads_own_writes(&f, t));
+            self.stats.alone += 1;
+            self.work.serial = true;
+            self.work.snapshot = f.texture.filter(|&t| reads_own_writes(&f, t));
             self.submit();
         }
     }
 
     /// Draws everything queued: when it returns, local memory holds it.
-    pub fn flush(&mut self) {
+    fn flush(&mut self) {
         self.submit();
-        self.batch.wait();
+        self.wait();
     }
 
     /// Hands the queued primitives to the drawer and returns without
     /// waiting for them (unless the drawer already holds [`DEPTH`]
     /// batches).
     fn submit(&mut self) {
-        let b = &mut self.batch;
-        b.hand_over_upload(&self.mem);
-        if b.work.prims.is_empty() {
+        self.hand_over_upload();
+        if self.work.prims.is_empty() || self.drawer.is_none() {
             return;
         }
-        if b.drawer.is_none() {
-            return;
-        }
-        let parallel = b.pool.is_some() && !b.work.serial && b.work.pixels >= PARALLEL_MIN;
-        let mut work = std::mem::replace(&mut b.work, b.spare_work.pop().unwrap_or_default());
+        let parallel = self.pool.is_some() && !self.work.serial && self.work.pixels >= PARALLEL_MIN;
+        let spare = self.spare_work.pop().unwrap_or_default();
+        let mut work = std::mem::replace(&mut self.work, spare);
         work.memory = Some(Arc::clone(&self.mem));
-        b.first_clut = None;
-        let uses = std::mem::replace(&mut b.uses, b.spare_uses.pop().unwrap_or_default());
-        b.marked = None;
-        b.target = None;
-        b.hand_over(Item::Batch(work, parallel), uses);
-        self.batches += 1;
-        self.parallel_batches += u64::from(parallel);
+        self.first_clut = None;
+        let spare = self.spare_uses.pop().unwrap_or_default();
+        let uses = std::mem::replace(&mut self.uses, spare);
+        self.marked = None;
+        self.target = None;
+        self.hand_over(Item::Batch(work, parallel), uses);
+        self.stats.batches += 1;
+        self.stats.parallel_batches += u64::from(parallel);
     }
 
-    /// Writes a transfer's pixels, into `region`: at once, or after what
-    /// is queued that uses those blocks, in the drawer's order.
-    pub(crate) fn upload(
-        &mut self,
-        psm: Psm,
-        bp: u32,
-        bw: u32,
-        writes: &[(u32, u32, u32)],
-        region: Region,
-    ) {
-        if !self.batching() {
-            for &(x, y, value) in writes {
-                self.mem.write(psm, bp, bw, x, y, value);
-            }
-            return;
-        }
-        if self.batch.uses.uploads_conflict(region) {
+    /// Writes a transfer's pixels, into `region`, after what is queued
+    /// that uses those blocks, in the drawer's order.
+    fn upload(&mut self, psm: Psm, bp: u32, bw: u32, writes: Vec<(u32, u32, u32)>, region: Region) {
+        if self.uses.uploads_conflict(region) {
             // After the primitives queued, which use those blocks.
             self.submit();
         }
-        let b = &mut self.batch;
-        let (upload, uses) = b
-            .upload
-            .get_or_insert_with(|| (Upload::default(), b.spare_uses.pop().unwrap_or_default()));
-        upload.add(psm, bp, bw, writes);
-        // Written, for a CLUT load from it.
-        uses.frame.mark(region);
-        if b.tapped {
+        if self.tapped {
             // No longer a frame: the blocks the pixels land in.
             let layout = crate::Layout::new(psm, bp, bw);
             let mut last = u32::MAX;
-            for &(x, y, _) in writes {
+            for &(x, y, _) in &writes {
                 let block = (layout.locate(x, y).word() / 64) as u32;
                 if block != last {
-                    b.frames.unmark(block);
+                    self.frames.unmark(block);
                     last = block;
                 }
             }
         }
+        let spare = &mut self.spare_uses;
+        let (upload, uses) = self
+            .upload
+            .get_or_insert_with(|| (Upload::default(), spare.pop().unwrap_or_default()));
+        upload.add(psm, bp, bw, writes);
+        // Written, for a CLUT load from it.
+        uses.frame.mark(region);
         if upload.pixels >= UPLOAD_MAX {
-            self.batch.hand_over_upload(&self.mem);
+            self.hand_over_upload();
         }
     }
 
-    /// Before the CLUT is loaded: the batch is drawn first if it writes
-    /// what the CLUT is read from. When only the tap draws, only the order
-    /// matters (the tap loads the CLUT after what is handed over before
-    /// it): the batch is handed over, not waited for.
-    pub(crate) fn before_clut_load(&mut self, t: Tex0) {
-        let region = if t.csm {
-            let (cbw, cou, cov) = (
-                bits(self.texclut, 0, 6),
-                bits(self.texclut, 6, 6) as i32,
-                bits(self.texclut, 12, 10) as i32,
-            );
-            Region::of(Psm::Ct16, t.cbp, cbw, [cou * 16, cou * 16 + 255, cov, cov])
-        } else {
-            let psm = if t.cpsm < 2 { Psm::Ct32 } else { Psm::Ct16 };
-            Region::of(psm, t.cbp, 1, [0, 15, 0, 15])
-        };
-        let b = &mut self.batch;
-        if b.uses.reads_conflict(region) {
-            if b.gpu_only {
+    /// Before the CLUT is loaded from `region`: the batch is drawn first
+    /// if it writes there. When only the tap draws, only the order matters
+    /// (the tap loads the CLUT after what is handed over before it): the
+    /// batch is handed over, not waited for.
+    fn before_clut_load(&mut self, region: Region) {
+        if self.uses.reads_conflict(region) {
+            if self.gpu_only {
                 self.submit();
             } else {
                 self.flush();
             }
             return;
         }
-        if b.upload
+        if self
+            .upload
             .as_ref()
             .is_some_and(|(_, uses)| uses.reads_conflict(region))
         {
             // It comes before the primitives queued: it can go alone.
-            b.hand_over_upload(&self.mem);
+            self.hand_over_upload();
         }
-        if !b.gpu_only {
-            b.wait_if(|uses| uses.reads_conflict(region));
+        if !self.gpu_only {
+            self.wait_if(|uses| uses.reads_conflict(region));
         }
-    }
-
-    /// Only the tap draws: local memory here is stale, and the CLUT is
-    /// loaded by the tap.
-    pub(crate) const fn gpu_only(&self) -> bool {
-        self.batch.gpu_only
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Gs;
     use crate::regs::addr;
 
     #[test]

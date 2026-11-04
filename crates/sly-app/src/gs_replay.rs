@@ -81,20 +81,7 @@ pub(crate) fn run(
         if let Some(states) = gs.states.take() {
             report_states(&mut out, states)?;
         }
-        let [pool, serial, uploads] = gs.drawer_times();
-        writeln!(
-            out,
-            "  {} primitives drawn alone; {} batches, {} on the pool; the drawer: {:.3} s on the pool, \
-             {:.3} s one primitive after another, {:.3} s uploading; the GS thread queueing and drawing {:.3} s, waiting for the drawer {:.3} s",
-            gs.alone,
-            gs.batches,
-            gs.parallel_batches,
-            pool.as_secs_f64(),
-            serial.as_secs_f64(),
-            uploads.as_secs_f64(),
-            gs.draw_time.as_secs_f64(),
-            gs.drawer_waits().as_secs_f64()
-        )?;
+        report_batching(&mut out, &gs)?;
         let hash = gs
             .mem
             .to_bytes()
@@ -282,5 +269,33 @@ fn report_states(
         )?;
     }
     writeln!(out, "  {} states, {total} pixels", states.len())?;
+    Ok(())
+}
+
+/// How the dump's primitives were batched and drawn, and the threads' times.
+fn report_batching(out: &mut impl io::Write, gs: &ps2_gs::Gs) -> Result<()> {
+    let [pool, serial, uploads] = gs.drawer_times();
+    writeln!(
+        out,
+        "  {} primitives drawn alone; {} batches, {} on the pool; the drawer: {:.3} s on the pool, \
+         {:.3} s one primitive after another, {:.3} s uploading; the GS thread queueing and drawing {:.3} s; batching waiting for the drawer {:.3} s",
+        gs.alone,
+        gs.batches,
+        gs.parallel_batches,
+        pool.as_secs_f64(),
+        serial.as_secs_f64(),
+        uploads.as_secs_f64(),
+        gs.draw_time.as_secs_f64(),
+        gs.drawer_waits().as_secs_f64()
+    )?;
+    let (batching, waited) = gs.batching_times();
+    if !batching.is_zero() {
+        writeln!(
+            out,
+            "  the batching thread busy {:.3} s; the GS thread waiting for it {:.3} s",
+            batching.as_secs_f64(),
+            waited.as_secs_f64()
+        )?;
+    }
     Ok(())
 }

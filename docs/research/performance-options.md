@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T11:07:59Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:03:30Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -106,6 +106,44 @@ drawing) takes 171.8 s instead of 203.1 s, its slowest stretches 129%
 then 137-149% of NTSC instead of 119-121%. The GS thread is now the limit
 (90-97% busy in the slowest stretches), VU1's thread next (78-88%): the
 rest of 2 (batching on the drawer thread) pays now, then 4.
+
+**2, the rest** (2026-11-04): with the GPU alone drawing, batching
+(footprints, conflicts, the order of uploads and CLUT loads) runs on a
+thread of its own between the GS thread and the drawer, rather than on
+the drawer thread, which would have lost the overlap with drawing when
+the CPU draws. The GS thread hands it primitives, transfers' pixels, CLUT
+loads and requests for pictures in order, 256 at a time; nothing the GS
+thread does then reads local memory, so it waits only for read backs,
+copies, dumps and reports. Two more changes came with it: IMAGE data
+reaches the transfer in runs instead of one quadword at a time (the play
+dump made 791,000 upload operations of 478 transfers), and a call the
+machine posts to the GS (the window's picture each field) no longer
+waits for everything queued to be drawn first. When the CPU draws,
+batching stays on the GS thread: its CLUT loads read local memory there,
+and moving them would mean resolving each primitive's CLUT on the
+batching thread.
+
+Checked: the thirteen dumps' GS and GPU memory with the GPU alone, at 1×
+and 2× and with one drawing thread, equal to the software GS's from
+before; `gs-replay --gpu` the same in memory and pictures; the random
+GPU test now draws every case a second time with the GPU alone; lockstep
+equal for 300 fields; the new-game replay's three hashes with and
+without the GPU; the prologue's final hash the same.[^prologue]
+
+| | Batching on the GS thread | On its own thread |
+| --- | --- | --- |
+| Play dump, GPU alone, 60 fields | 0.66 s | 0.50 s (the drawer thread the limit) |
+| Whole prologue (PGO, GPU drawing) | 171.8 s | 157.1 s |
+| Slowest stretch | 129% of NTSC | 133% |
+| The next slowest | 137-151% | 163-170% |
+| Their threads | GS thread 90-97%, VU1's 78-88% | GS thread 68-82%, batching 33-52%, VU1's 78-86% |
+| VU1's thread waiting for the GS | 12.4 s | 0.35 s |
+
+VU1's programs now take 3.20 ns a pair (3.64 before): the figure counts
+VU1's thread's waits for the GS, which were most of the difference from
+the machine thread's 3.1. The machine waits for VU1's thread 38-58% of
+the slowest stretches: VU1 is the limit now, so 4 comes next, with the
+shadow VIF1 (12% of the machine thread) after it.
 
 ## Recommendation
 

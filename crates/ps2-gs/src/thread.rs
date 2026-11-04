@@ -150,10 +150,12 @@ fn drawing_threads() -> usize {
 /// Packets the machine may be ahead of the GS by.
 const QUEUE: usize = 4096;
 
-/// Work for the GS's thread.
+/// Work for the GS's thread: packets, a call once everything before is
+/// drawn, a call in turn.
 enum Job {
     Gif(usize, Vec<u128>),
     Call(Box<dyn FnOnce(&mut Gs) + Send>),
+    Post(Box<dyn FnOnce(&mut Gs) + Send>),
 }
 
 /// A GS on its own thread.
@@ -176,7 +178,20 @@ impl Default for Threaded {
             .spawn(move || {
                 let mut gs = Gs::default();
                 gs.set_threads(drawing_threads());
-                for job in queue {
+                loop {
+                    let job = match queue.try_recv() {
+                        Ok(job) => job,
+                        Err(mpsc::TryRecvError::Empty) => {
+                            // Nothing to do: the batching thread gets what
+                            // is queued for it.
+                            gs.hand_over_queued();
+                            match queue.recv() {
+                                Ok(job) => job,
+                                Err(_) => break,
+                            }
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    };
                     let started = std::time::Instant::now();
                     match job {
                         Job::Gif(path, data) => gs.gif(path, data),
@@ -185,6 +200,7 @@ impl Default for Threaded {
                             gs.flush();
                             f(&mut gs);
                         }
+                        Job::Post(f) => f(&mut gs),
                     }
                     gs.busy += started.elapsed();
                 }
@@ -235,9 +251,11 @@ impl Threaded {
         r
     }
 
-    /// Runs `f` on the GS in turn with the packets, without waiting.
+    /// Runs `f` on the GS in turn with the packets, without waiting. What
+    /// they queued may not be drawn yet when it runs: `f` flushes if it
+    /// reads local memory (as [`Gs::show`] does when the CPU draws).
     pub fn post(&mut self, f: impl FnOnce(&mut Gs) + Send + 'static) {
-        self.send(Job::Call(Box::new(f)));
+        self.send(Job::Post(Box::new(f)));
     }
 
     /// Starts a PCSX2 dump (see [`crate::dump`]).

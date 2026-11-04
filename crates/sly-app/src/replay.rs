@@ -43,13 +43,23 @@ fn advance(
     let mut started = std::time::Instant::now();
     // Host time so far: the machine waiting for VU1's thread, the GS
     // thread busy, VU1's thread busy and in VU1 programs, VIF1's shadow, VU
-    // calls from the EE, the IOP. Reading the GS waits for both threads.
+    // calls from the EE, the IOP, the GS's batching thread busy. Reading
+    // the GS waits for all three threads.
     let times = |machine: &ps2_ee::Machine| {
         let mut hw = machine.hw.borrow_mut();
-        let busy = hw.gs.with(|gs| gs.busy);
+        let (busy, (batching, _)) = hw.gs.with(|gs| (gs.busy, gs.batching_times()));
         let (vu1, programs, ..) = hw.gs.thread_times();
         let t = &hw.timing;
-        [hw.gs.waited, busy, vu1, programs, t.vif1, t.vu_calls, t.iop]
+        [
+            hw.gs.waited,
+            busy,
+            vu1,
+            programs,
+            t.vif1,
+            t.vu_calls,
+            t.iop,
+            batching,
+        ]
     };
     let mut before = times(machine);
     for _ in 0..fields {
@@ -70,13 +80,13 @@ fn advance(
                 .map(|(n, b)| n.saturating_sub(*b).as_secs_f64() / took * 100.0)
                 .collect();
             before = now;
-            let (waited, busy, vu1, programs, shadow, calls, iop) =
-                (d[0], d[1], d[2], d[3], d[4], d[5], d[6]);
+            let (waited, busy, vu1, programs, shadow, calls, iop, batching) =
+                (d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
             let ee = 100.0 - shadow - calls - iop - waited;
             let state = Sly1State::read(&mut machine.mem);
             let (real, at) = (every as f64 / 59.94, field as f64 / 59.94);
             println!(
-                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC; VU1 thread busy {vu1:.0}% (programs {programs:.0}%), GS thread busy {busy:.0}%; the machine: waiting for VU1's thread {waited:.0}%, VIF1's shadow {shadow:.0}%, VU calls {calls:.0}%, IOP {iop:.0}%, the EE and the rest {ee:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
+                "fields {}-{field}: {:.1} ms a field, {:.0}% of NTSC; VU1 thread busy {vu1:.0}% (programs {programs:.0}%), GS thread busy {busy:.0}%, its batching thread {batching:.0}%; the machine: waiting for VU1's thread {waited:.0}%, VIF1's shadow {shadow:.0}%, VU calls {calls:.0}%, IOP {iop:.0}%, the EE and the rest {ee:.0}%; clock {:.2} s at {at:.2} s of fields; world {} level {}",
                 field - every,
                 took * 1000.0 / every as f64,
                 real * 100.0 / took,
@@ -177,7 +187,9 @@ pub(crate) fn run(
     let machine_time = started.elapsed();
     {
         let mut hw = machine.hw.borrow_mut();
-        let draw = hw.gs.with(|gs| (gs.draw_time, gs.busy));
+        let draw = hw
+            .gs
+            .with(|gs| (gs.draw_time, gs.busy, gs.batching_times()));
         let elapsed = started.elapsed();
         crate::run::host_time(&mut out, &hw, draw, machine_time, elapsed)?;
     }

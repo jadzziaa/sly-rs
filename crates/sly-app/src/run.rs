@@ -147,8 +147,14 @@ pub(crate) fn run(
         )
     });
     writeln!(out, "  GS memory hash {memory_hash:016x}")?;
-    let busy = hw.gs.with(|gs| gs.busy);
-    host_time(&mut out, &hw, (d, busy), machine_time, elapsed)?;
+    let (busy, batch_thread) = hw.gs.with(|gs| (gs.busy, gs.batching_times()));
+    host_time(
+        &mut out,
+        &hw,
+        (d, busy, batch_thread),
+        machine_time,
+        elapsed,
+    )?;
     writeln!(
         out,
         "  GS: {} primitives drawn, {} of them alone; {} batches, {} on several threads; display {:x?}",
@@ -316,7 +322,11 @@ pub(crate) fn run(
 pub(crate) fn host_time(
     out: &mut impl Write,
     hw: &ps2_ee::hw::Hardware,
-    (draw, busy): (std::time::Duration, std::time::Duration),
+    (draw, busy, (batching, batching_waits)): (
+        std::time::Duration,
+        std::time::Duration,
+        (std::time::Duration, std::time::Duration),
+    ),
     machine_time: std::time::Duration,
     elapsed: std::time::Duration,
 ) -> Result<()> {
@@ -364,5 +374,13 @@ pub(crate) fn host_time(
         pct(busy),
         pct(draw),
     )?;
+    if !batching.is_zero() {
+        writeln!(
+            out,
+            "  the GS's batching thread busy {:.1}%; the GS thread waited for it {:.1}%",
+            pct(batching),
+            pct(batching_waits)
+        )?;
+    }
     Ok(())
 }

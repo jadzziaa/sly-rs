@@ -3,7 +3,7 @@ type: Finding
 title: VIF1 and VU1 on a thread of their own
 description: How sly-rs runs VIF1, VU1 and the GS's feed on their own thread while keeping replays exact - a shadow VIF1 on the EE's side, every GS-bound packet through one ordered queue, the few points where the EE waits - with the rule it changes (PATH1's GS events raised at the next V-blank), the checks and the measured gain.
 tags: [finding, performance, threads, vif, vu1, gs, determinism, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T11:10:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T12:03:30Z }
 sources:
   - id: counts
     resource: counters on generated/sly1 replay of an 8,000-field cut of the user's prologue (gameplay from field 3,644), 2026-11-04
@@ -78,8 +78,11 @@ On the prologue with the GPU drawing, PGO builds:[^prologue]
 | Slowest stretches' threads | machine thread the limit, GS thread 81-83% | GS thread 90-97%, VU1's thread 78-88%, the machine thread waiting for VU1's thread about half the time |
 
 The GS thread is the limit again, VU1's thread next; the shadow VIF1 costs
-the machine thread 11%. VU1's programs take 3.6 ns a pair on their
-thread, against 3.1 on the machine thread: why is not measured yet.[^user]
+the machine thread 11%. VU1's programs took 3.6 ns a pair on their
+thread, against 3.1 on the machine thread; the figure counts the thread's
+waits for the GS (12.4 s of the prologue), and with batching on a thread
+of its own ([performance-options.md](performance-options.md)) those fell
+to 0.35 s and the figure to 3.20 ns.[^user]
 
 [^counts]: How the EE and VIF1/VU1 interact in Sly 1
 [^prologue]: The prologue with and without VU1's thread

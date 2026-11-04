@@ -6,7 +6,8 @@
 //! blend, fog, scan mask, FBMSK, PABE, COLCLAMP and FBA, UV and STQ (Q of
 //! either sign), with CLUTs loaded from memory and transfers into the
 //! blocks drawn among the primitives; and the display read-out of what
-//! they drew.
+//! they drew. Each case is drawn twice: with the CPU drawing too, and with
+//! the GPU alone (batching on a thread of its own).
 //!
 //! Skipped on a machine with no GPU that has 64-bit integers in shaders.
 
@@ -107,13 +108,18 @@ fn pictures(
 }
 
 /// One case: registers, then primitives, through a GS drawing on two
-/// threads with the GPU as its tap, with transfers among them.
-fn draw(gpu: &Shared, r: &mut Random) -> (Vec<u32>, Vec<u32>, String, usize, [ps2_gs::Frame; 2]) {
+/// threads with the GPU as its tap (and the CPU if `software`), with
+/// transfers among them.
+fn draw(
+    gpu: &Shared,
+    r: &mut Random,
+    software: bool,
+) -> (Vec<u32>, Vec<u32>, String, usize, [ps2_gs::Frame; 2]) {
     let mut gs = Gs::default();
     let random: Vec<u8> = (0..ps2_gs::mem::SIZE).map(|_| r.next() as u8).collect();
     gs.mem.load_bytes(&random);
     gs.set_threads(2);
-    gs.set_tap(Some(Box::new(gpu.clone())), true);
+    gs.set_tap(Some(Box::new(gpu.clone())), software);
     let frame_psm = r.pick(&[0x00u64, 0x01, 0x02, 0x0A]);
     let zpsm = r.pick(&[0u64, 1, 2, 0xA]);
     let tex_psm = r.pick(&[0x00u64, 0x01, 0x02, 0x0A, 0x13, 0x14, 0x1B, 0x24, 0x2C]);
@@ -224,13 +230,25 @@ fn compare(scale: u32, cases: usize) {
     let mut r = Random(0x2545_F491_4F6C_DD1D);
     let (mut drew, mut words) = (0, 0);
     for case in 0..cases {
-        let (cpu, gpu_words, what, changed, [cpu_picture, gpu_picture]) = draw(&gpu, &mut r);
+        let mut again = Random(r.0);
+        let (cpu, gpu_words, what, changed, [cpu_picture, gpu_picture]) = draw(&gpu, &mut r, true);
         let differ = (0..cpu.len()).filter(|&i| cpu[i] != gpu_words[i]).count();
         assert_eq!(differ, 0, "case {case} ({what}): {differ} words differ");
         assert_eq!(gpu_picture.factor(), scale);
         assert!(
             cpu_picture == plane_zero(&gpu_picture),
             "case {case} ({what}): the pictures differ"
+        );
+        // The GPU alone: the same words, the same picture.
+        let (_, alone, _, _, [_, alone_picture]) = draw(&gpu, &mut again, false);
+        let differ = (0..cpu.len()).filter(|&i| cpu[i] != alone[i]).count();
+        assert_eq!(
+            differ, 0,
+            "case {case} ({what}), the GPU alone: {differ} words differ"
+        );
+        assert!(
+            cpu_picture == plane_zero(&alone_picture),
+            "case {case} ({what}), the GPU alone: the pictures differ"
         );
         drew += usize::from(changed > 0);
         words += changed;

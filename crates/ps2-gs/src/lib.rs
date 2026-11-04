@@ -138,8 +138,9 @@ pub struct Gs {
     pub batches: u64,
     /// See `alone`.
     pub parallel_batches: u64,
-    /// Primitives waiting to be drawn, when drawing on several threads.
-    batch: batch::Batch,
+    /// Primitives waiting to be drawn, when drawing on several threads or
+    /// for a tap.
+    batch: batch::Batcher,
     /// Times the tap was handed all of local memory again (after a
     /// local-to-local copy).
     pub tap_resyncs: u64,
@@ -149,8 +150,9 @@ pub struct Gs {
 
 impl Default for Gs {
     fn default() -> Self {
+        let mem = std::sync::Arc::<Memory>::default();
         Self {
-            mem: std::sync::Arc::default(),
+            mem: std::sync::Arc::clone(&mem),
             ctx: [Context::default(); 2],
             prim: 0,
             prmode: 0,
@@ -190,7 +192,7 @@ impl Default for Gs {
             alone: 0,
             batches: 0,
             parallel_batches: 0,
-            batch: batch::Batch::default(),
+            batch: batch::Batcher::new(mem),
             tap_resyncs: 0,
             clut_version: 0,
         }
@@ -393,9 +395,6 @@ impl Gs {
         if !load {
             return;
         }
-        // Primitives waiting to be drawn may write what the CLUT is read
-        // from.
-        self.before_clut_load(t);
         self.clut_version = self.clut_version.wrapping_add(1);
         self.clut_shared = None;
         self.pipe_cache = None;
@@ -404,6 +403,31 @@ impl Gs {
             0xA => Psm::Ct16s,
             _ => Psm::Ct16,
         };
+        // For a tap, the load as it does it.
+        let load = self.tapped().then(|| {
+            let (wide, bw) = (cpsm == Psm::Ct32 && !t.csm, bits(self.texclut, 0, 6));
+            let layout = if wide {
+                Layout::new(Psm::Ct32, t.cbp, 1)
+            } else if t.csm {
+                Layout::new(Psm::Ct16, t.cbp, bw)
+            } else {
+                Layout::new(cpsm, t.cbp, 1)
+            };
+            let mut words = [0u32; 16];
+            words[..6].copy_from_slice(&[
+                self.clut_version,
+                entries,
+                t.csa,
+                u32::from(wide) | u32::from(t.csm) << 1,
+                bits(self.texclut, 6, 6),
+                bits(self.texclut, 12, 10),
+            ]);
+            words[8..15].copy_from_slice(&layout.gpu());
+            words
+        });
+        // What is queued that writes where the CLUT is read from is drawn
+        // first (when the CPU draws), and the tap gets the load in turn.
+        self.clut_load(batch::clut_region(t, self.texclut), load);
         // When only the tap draws, local memory here is stale and the tap
         // loads the CLUT itself.
         if !self.gpu_only() {
@@ -436,27 +460,6 @@ impl Gs {
                     self.clut[((t.csa * 16 + i) & 0x1FF) as usize] = c as u16;
                 }
             }
-        }
-        if self.tapped() {
-            let (wide, bw) = (cpsm == Psm::Ct32 && !t.csm, bits(self.texclut, 0, 6));
-            let layout = if wide {
-                Layout::new(Psm::Ct32, t.cbp, 1)
-            } else if t.csm {
-                Layout::new(Psm::Ct16, t.cbp, bw)
-            } else {
-                Layout::new(cpsm, t.cbp, 1)
-            };
-            let mut words = [0u32; 16];
-            words[..6].copy_from_slice(&[
-                self.clut_version,
-                entries,
-                t.csa,
-                u32::from(wide) | u32::from(t.csm) << 1,
-                bits(self.texclut, 6, 6),
-                bits(self.texclut, 12, 10),
-            ]);
-            words[8..15].copy_from_slice(&layout.gpu());
-            self.clut_loaded(export::Clut::Load(words));
         }
     }
 }

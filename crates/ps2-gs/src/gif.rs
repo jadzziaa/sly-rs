@@ -49,6 +49,8 @@ impl Gs {
         // The path's tag in a local while its quadwords go by (nothing
         // else reads it), stored back at the end.
         let mut current = self.paths[path].tag.take();
+        // IMAGE data, gathered until its tag ends (or the data does).
+        let mut image = Vec::new();
         for q in data {
             let Some(tag) = current.as_mut() else {
                 current = self.gif_tag(q);
@@ -80,7 +82,7 @@ impl Gs {
                     }
                 }
                 _ => {
-                    self.image(&q.to_le_bytes());
+                    image.extend_from_slice(&q.to_le_bytes());
                     tag.reg = tag.nreg;
                 }
             }
@@ -90,7 +92,14 @@ impl Gs {
             }
             if tag.nloop == 0 {
                 current = None;
+                if !image.is_empty() {
+                    self.image(&image);
+                    image.clear();
+                }
             }
+        }
+        if !image.is_empty() {
+            self.image(&image);
         }
         self.paths[path].tag = current;
     }

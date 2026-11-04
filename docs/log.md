@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: GS batching on a thread of its own when the GPU alone draws: the prologue 157.1 s instead of 171.8 s, VU1's thread now the limit ([performance-options.md](research/performance-options.md), [vu1-thread.md](research/vu1-thread.md)).
 * **Creation**: [VIF1 and VU1 on a thread of their own](research/vu1-thread.md): the shadow VIF1, the ordered queue to the GS, where the EE waits, the PATH1 events rule; the prologue 171.8 s instead of 203.1 s with the same hash.
 * **Update**: [Performance after the GPU GS](research/performance-options.md): with the GPU alone drawing, CLUT loads no longer read local memory on the CPU; the GS thread drops to 81-83% busy in the prologue's slowest stretches, and the machine thread is the limit, so the full GS thread split waits.
 * **Update**: [Performance after the GPU GS](research/performance-options.md): profile-guided optimisation done (`cargo xtask recomp sly1 --pgo REPLAY`); with the GPU drawing the prologue's slowest stretches go from 106-110% to 120% of NTSC.

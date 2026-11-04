@@ -43,11 +43,11 @@ pub(crate) struct Upload {
 
 impl Upload {
     /// Adds `writes` into a `psm` buffer at `bp`, `bw` wide.
-    pub(crate) fn add(&mut self, psm: Psm, bp: u32, bw: u32, writes: &[(u32, u32, u32)]) {
+    pub(crate) fn add(&mut self, psm: Psm, bp: u32, bw: u32, writes: Vec<(u32, u32, u32)>) {
         self.pixels += writes.len();
         match self.runs.last_mut() {
-            Some((p, b, w, run)) if (*p, *b, *w) == (psm, bp, bw) => run.extend_from_slice(writes),
-            _ => self.runs.push((psm, bp, bw, writes.to_vec())),
+            Some((p, b, w, run)) if (*p, *b, *w) == (psm, bp, bw) => run.extend_from_slice(&writes),
+            _ => self.runs.push((psm, bp, bw, writes)),
         }
     }
 
@@ -165,7 +165,7 @@ impl Gs {
             }
             t.pending = bytes[whole..].to_vec();
         }
-        self.upload(t.psm, t.bp, t.bw, &writes, t.region);
+        self.upload(t.psm, t.bp, t.bw, writes, t.region);
         if t.y < t.h {
             self.transfer = Some(t);
         }
