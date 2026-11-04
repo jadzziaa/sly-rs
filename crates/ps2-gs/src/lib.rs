@@ -114,6 +114,9 @@ pub struct Gs {
     dump: Option<dump::Dump>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
+    /// Transfers started by direction (TRXDIR: host to local, local to
+    /// host, local to local, off), for reports.
+    pub transfers: [u64; 4],
     /// Whether primitives in the specialised state take its pipeline
     /// (tests turn it off to compare).
     pub(crate) specialise: bool,
@@ -172,6 +175,7 @@ impl Default for Gs {
             events: Events::default(),
             dump: None,
             drawn: 0,
+            transfers: [0; 4],
             specialise: true,
             states: None,
             draw_time: std::time::Duration::ZERO,

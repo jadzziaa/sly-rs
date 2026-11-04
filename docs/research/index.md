@@ -11,6 +11,7 @@
 
 # Proposal
 
+* [A GPU GS on wgpu compute shaders](gpu-gs.md) - The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs. (draft)
 * [A specialising VU1 translator](vu-specialising-translator.md) - Why VU1 still costs 7.8 ns a pair after the float switch, and the design of a translator that emits per-pair code with registers in locals and flag timing resolved at generation time (as rac-rs does), with its budget, steps and checks. (deprecated)
 
 # Research Note

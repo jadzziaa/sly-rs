@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:07:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T02:39:52Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -826,8 +826,13 @@ given: the gates are the schedule.
 - Whole-game replays (recorded once, then regression tests with hash
   checkpoints); profiling (Tracy through `tracing`); hot functions replaced by
   verified native hooks only when profiles demand it; PGO for release builds.
-- `ps2-gs-wgpu`: a hardware GS renderer with a texture cache and resolution
-  scaling, verified against the software renderer on the same GS dumps.
+- `ps2-gs-wgpu`: a GPU GS with resolution scaling, verified against the
+  software renderer on the same GS dumps. Proposed design (2026-11-03,
+  [research/gpu-gs.md](research/gpu-gs.md)): local memory in a GPU buffer
+  and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing
+  one integer arithmetic with the software GS so the two match bit for
+  bit; super-sampling for resolution. It replaces the texture cache
+  first planned here, which could only be checked by eye.
 - First enhancements behind options (widescreen, internal resolution).
 - Windows build.
 - **Gate**: Sly 1 completed on replay; the §9 budget met; options off leave

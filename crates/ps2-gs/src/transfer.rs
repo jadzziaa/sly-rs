@@ -74,6 +74,7 @@ impl Gs {
     /// TRXDIR was written: starts a transfer in `dir` (0 host to local, 1
     /// local to host, 2 local to local).
     pub(crate) fn start_transfer(&mut self, dir: u32) {
+        self.transfers[dir as usize & 3] += 1;
         let b = self.bitbltbuf;
         let (w, h) = (bits(self.trxreg, 0, 12), bits(self.trxreg, 32, 12));
         self.transfer = None;

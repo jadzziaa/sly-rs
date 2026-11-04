@@ -54,9 +54,12 @@ pub(crate) fn run(
         best = best.min(elapsed);
         writeln!(
             out,
-            "{fields} fields, {} primitives in {:.3} s",
+            "{fields} fields, {} primitives in {:.3} s; transfers host to local {}, local to host {}, local to local {}",
             gs.drawn,
-            elapsed.as_secs_f64()
+            elapsed.as_secs_f64(),
+            gs.transfers[0],
+            gs.transfers[1],
+            gs.transfers[2],
         )?;
         if let Some(states) = gs.states.take() {
             let total: u64 = states.values().map(|s| s.1).sum();
