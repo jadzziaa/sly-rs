@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T00:12:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T00:26:24Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -335,6 +335,11 @@ instructions).
   are. What costs is the rest of `fragment` and `texel`: pipelines
   specialised to a primitive's state, as PCSX2's renderer generates,
   are the step that remains.
+- **Up to 16 drawing threads** (was 8): the first 8,000 fields of the
+  prologue recording from 135.4 to 127.0 s (two runs each, within a
+  second), faster than real time (133.5 s); the GS thread busy 94.5% of
+  the run instead of 98.5%, the machine waiting for it 7.7% instead of
+  about 20%.
 
 Real time is 16.7 ms a field. From the recompiled build at 17 s down,
 per-stretch figures move by 2 to 4 ms a field from run to run (the totals
@@ -425,7 +430,8 @@ build with translated microcode gives the same values.) The changes:
     `unsafe`.
   - The GS dump replay draws in 0.055 s on 8 threads (0.204 s on one).
   - The number of threads is `$SLY_RS_GS_THREADS`, by default all but two
-    of the host's, at most 8. Past 4 it gains nothing in the game.
+    of the host's, at most 16 (8 until gameplay showed more paying; see
+    "Gameplay is now GS-bound").
 
 - **Drawing queued to a drawer.** The GS thread used to hand each batch
   to the drawing threads and wait for it. Now a drawer thread takes

@@ -109,7 +109,8 @@ impl Scanner {
 }
 
 /// Threads to draw with: `$SLY_RS_GS_THREADS`, or all but two of the
-/// host's (the machine's thread and the GS's own), at most 8.
+/// host's (the machine's thread and the GS's own), at most 16 (past that
+/// the GS's own thread and the primitives drawn in order set the pace).
 fn drawing_threads() -> usize {
     std::env::var("SLY_RS_GS_THREADS")
         .ok()
@@ -117,7 +118,7 @@ fn drawing_threads() -> usize {
         .unwrap_or_else(|| {
             std::thread::available_parallelism()
                 .map_or(1, |n| n.get().saturating_sub(2))
-                .clamp(1, 8)
+                .clamp(1, 16)
         })
 }
 
