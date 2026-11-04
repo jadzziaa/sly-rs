@@ -23,6 +23,7 @@ mod batch;
 pub mod display;
 mod draw;
 pub mod dump;
+pub mod export;
 mod fixed;
 pub mod gif;
 pub mod mem;
@@ -139,6 +140,11 @@ pub struct Gs {
     pub parallel_batches: u64,
     /// Primitives waiting to be drawn, when drawing on several threads.
     batch: batch::Batch,
+    /// What is handed the GS's work for a GPU, if anything.
+    tap: Option<Box<dyn export::Tap>>,
+    /// Times the tap was handed all of local memory again (after a
+    /// local-to-local copy).
+    pub tap_resyncs: u64,
 }
 
 impl Default for Gs {
@@ -185,6 +191,8 @@ impl Default for Gs {
             batches: 0,
             parallel_batches: 0,
             batch: batch::Batch::default(),
+            tap: None,
+            tap_resyncs: 0,
         }
     }
 }

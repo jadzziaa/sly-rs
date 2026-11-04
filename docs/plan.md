@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:08:03Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:47:10Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -201,7 +201,7 @@ sly-rs/
 │  ├─ ps2-dma         DMAC channels, VIF0/VIF1, GIF path arbitration
 │  ├─ ps2-vu          VU0 micro mode and VU1: interpreter, runtime for translated programs
 │  ├─ ps2-gs          GS registers, local memory and swizzling, CRTC, software rasteriser
-│  ├─ ps2-gs-wgpu     hardware GS renderer on wgpu (phase 9)
+│  ├─ ps2-gs-wgpu     GPU GS on wgpu compute shaders, matching ps2-gs bit for bit (phase 9)
 │  ├─ ps2-spu2        SPU2 voices: ADPCM, ADSR, interpolation, reverb, mixer
 │  ├─ ps2-mpeg        PSS demultiplexer, MPEG-2 video decoder, ADPCM audio
 │  ├─ ps2-analysis    ELF loading, function discovery, CFG, switch recovery, SDK signatures

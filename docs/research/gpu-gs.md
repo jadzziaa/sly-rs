@@ -4,7 +4,7 @@ title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:31:10Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T06:47:10Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -126,6 +126,24 @@ and five window sizes: identical on the RX 9070 XT and the integrated
 Radeon, through Vulkan and OpenGL. A session played through the short
 recording in the window wrote a recording that replays to its checkpoint.
 
+**M2, checked** (2026-11-04): `crates/ps2-gs-wgpu`. The software GS
+hands a tap (`ps2_gs::export`) what it hands its drawer, in order:
+each batch as primitives of 72 words (state, layouts, vertices set up as
+the rasteriser sets them up, CLUTs), each transfer's pixels as word
+writes. The GPU bins a batch into 16 × 16 tiles on the CPU and draws it
+in one dispatch, a workgroup per tile, an invocation per pixel, each
+pixel's primitives in order (`draw.wgsl`, the `fragment` pipeline line
+for line); sub-word writes (16-bit frames, CLUT formats) use atomic and
+and or. Lines, points, antialiased triangles and STQ sprites are left
+out (M3). `gs-replay --gpu` compares the two memories after every field:
+the title's 3D, the trial, our Paris dump and the two probes are the
+same after every field, twice on the RX 9070 XT and once on the
+integrated Radeon; breaking one line of the shader is caught at the
+first field. The dumps with lines, points or antialiasing differ from
+their first such primitive. A test draws 160 random cases (every format,
+filter, function, test, blend and wrap mode, UV and STQ with Q of either
+sign) through both and compares every word.
+
 ## Facts checked
 
 - **Sly never reads GS memory back.** On six dumps (ours and PCSX2's, the
@@ -160,7 +178,7 @@ recording in the window wrote a recording that replays to its checkpoint.
 | --- | --- | --- |
 | M0 | wgpu in `play`: device, surface, presentation (softbuffer goes); the software GS still draws (**done**, 2026-11-04) | the window shows the same frames; `play` still records and replays |
 | M1 | the shared integer arithmetic in the software GS (**done**, 2026-11-03: only triangles' texture coordinates changed) | PCSX2 parity re-run; twelve dumps re-baselined |
-| M2 | compute rasteriser for triangles and sprites, the full `fragment` pipeline (not just the hot state: mixing CPU and GPU drawing would need constant syncs) | GPU memory hash equals the software's on the dumps that use only those, twice in a row |
+| M2 | compute rasteriser for triangles and sprites, the full `fragment` pipeline (not just the hot state: mixing CPU and GPU drawing would need constant syncs) (**done**, 2026-11-04) | GPU memory hash equals the software's on the dumps that use only those, twice in a row |
 | M3 | hazards as dispatch boundaries, uploads, CLUT loads, AA1, lines, points | all twelve dumps |
 | M4 | play on the GPU, the display read on the GPU | the prologue replays with its state hashes; `replay --timing` shows the GS off the critical path; runs on the integrated GPU |
 | M5 | super-sampling, behind an option | options off leave the hashes as they are |

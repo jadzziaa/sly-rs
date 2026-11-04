@@ -45,6 +45,7 @@ use std::sync::{Arc, mpsc};
 use rayon::prelude::*;
 
 use crate::draw::{Prim, Raster};
+use crate::export;
 use crate::mem::Pixel;
 use crate::mem::page_shape;
 use crate::regs::{Tex0, bits};
@@ -577,7 +578,37 @@ fn draw(mem: &Memory, work: &mut Work, parallel: bool) {
     }
 }
 
+/// A transfer's pixels as writes to words of local memory, each word once
+/// (the last write to a pixel wins, as in memory).
+fn word_writes(psm: Psm, bp: u32, bw: u32, writes: &[(u32, u32, u32)]) -> Vec<export::Write> {
+    let layout = crate::Layout::new(psm, bp, bw);
+    let mut words: std::collections::HashMap<u32, (u32, u32)> =
+        std::collections::HashMap::with_capacity(writes.len());
+    for &(x, y, value) in writes {
+        let at = layout.locate(x, y);
+        let (bits, new) = at.bits(value);
+        let entry = words.entry(at.word() as u32).or_default();
+        entry.0 |= bits;
+        entry.1 = (entry.1 & !bits) | new;
+    }
+    words
+        .into_iter()
+        .map(|(word, (bits, value))| [word, bits, value])
+        .collect()
+}
+
 impl Gs {
+    /// Hands the GS's work to `tap` from now on (or to nothing), starting
+    /// with local memory as it is. Only work done when drawing on several
+    /// threads is handed on.
+    pub fn set_tap(&mut self, tap: Option<Box<dyn export::Tap>>) {
+        self.flush();
+        self.tap = tap;
+        if let Some(tap) = &mut self.tap {
+            tap.memory(&self.mem.to_words());
+        }
+    }
+
     /// Draws with `threads` threads (1: one primitive after another, as it
     /// comes). The result is the same either way.
     ///
@@ -681,6 +712,12 @@ impl Gs {
         }
         let parallel = !b.work.serial && b.work.pixels >= PARALLEL_MIN;
         let mut work = std::mem::replace(&mut b.work, b.spare_work.pop().unwrap_or_default());
+        if let Some(tap) = &mut self.tap {
+            tap.batch(&crate::draw::encode::batch(
+                &work.prims,
+                work.snapshot.is_some(),
+            ));
+        }
         work.memory = Some(Arc::clone(&self.mem));
         let uses = std::mem::replace(&mut b.uses, b.spare_uses.pop().unwrap_or_default());
         b.marked = None;
@@ -700,6 +737,9 @@ impl Gs {
         writes: &[(u32, u32, u32)],
         region: Region,
     ) {
+        if let Some(tap) = &mut self.tap {
+            tap.writes(&word_writes(psm, bp, bw, writes));
+        }
         if !self.batching() {
             for &(x, y, value) in writes {
                 self.mem.write(psm, bp, bw, x, y, value);

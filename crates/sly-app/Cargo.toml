@@ -25,6 +25,7 @@ ps2-core.workspace = true
 ps2-disc.workspace = true
 ps2-ee.workspace = true
 ps2-gs.workspace = true
+ps2-gs-wgpu.workspace = true
 ps2-iop.workspace = true
 ps2-isa.workspace = true
 ps2-memcard.workspace = true

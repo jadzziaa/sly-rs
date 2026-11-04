@@ -235,6 +235,10 @@ enum Command {
         /// first.
         #[arg(long, hide = true)]
         states: bool,
+        /// Draw on the GPU as well and compare its local memory with the
+        /// software GS's after every field (the GPU GS's check).
+        #[arg(long)]
+        gpu: bool,
     },
     /// Run a replay (scripted presses) and check its checkpoints: the game's
     /// world and level, and the machine's state hash.
@@ -431,6 +435,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             screenshot,
             frames,
             states,
+            gpu,
         } => gs_replay::run(
             &path,
             repeat,
@@ -438,6 +443,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             screenshot.as_deref(),
             frames.as_deref(),
             states,
+            gpu,
         ),
     };
     match result {

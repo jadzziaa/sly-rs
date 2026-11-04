@@ -68,6 +68,26 @@ impl Psm {
         })
     }
 
+    /// The register field that names it (inverse of [`Psm::from_bits`]).
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Ct32 => 0x00,
+            Self::Ct24 => 0x01,
+            Self::Ct16 => 0x02,
+            Self::Ct16s => 0x0A,
+            Self::T8 => 0x13,
+            Self::T4 => 0x14,
+            Self::T8h => 0x1B,
+            Self::T4hl => 0x24,
+            Self::T4hh => 0x2C,
+            Self::Z32 => 0x30,
+            Self::Z24 => 0x31,
+            Self::Z16 => 0x32,
+            Self::Z16s => 0x3A,
+        }
+    }
+
     /// Bits a pixel takes in local memory's own layout (PSMT8H, 4HL and
     /// 4HH live in 32-bit words; transfers move them as 8 or 4 bits).
     #[must_use]
@@ -106,6 +126,11 @@ impl Pixel {
     /// The pixel's value in `word`, the word it lies in.
     pub(crate) const fn of(self, word: u32) -> u32 {
         (word >> self.shift) & self.mask
+    }
+
+    /// The bits of its word `value` takes, and its value there.
+    pub(crate) const fn bits(self, value: u32) -> (u32, u32) {
+        (self.mask << self.shift, (value & self.mask) << self.shift)
     }
 
     /// The block of local memory it lies in.
@@ -236,11 +261,32 @@ fn page_tables() -> &'static PageTables {
     })
 }
 
+/// The page tables one after another, as [`page_tables_flat`] gives them:
+/// each format's start.
+const TABLE_AT: [u32; 8] = [0, 2048, 4096, 8192, 12288, 16384, 20480, 28672];
+
+/// Every format's page table, one after another (CT32, Z32, CT16, CT16S,
+/// Z16, Z16S, T8, T4), each entry a word (11 bits) and a shift (5) within
+/// a page: for a GPU, which addresses pixels as [`Layout::locate`] does
+/// from [`Layout::gpu`].
+#[must_use]
+pub fn page_tables_flat() -> Vec<u32> {
+    let t = page_tables();
+    [
+        &t.ct32, &t.z32, &t.ct16, &t.ct16s, &t.z16, &t.z16s, &t.t8, &t.t4,
+    ]
+    .into_iter()
+    .flat_map(|table| table.iter().map(|&e| u32::from(e)))
+    .collect()
+}
+
 /// A buffer's addressing, worked out once: its format's page table and
 /// shape, its base and its width.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     table: &'static [u16],
+    /// The table's start in [`page_tables_flat`].
+    table_at: u32,
     /// The format's bits in a word, and where they start beyond the
     /// table's shift (the formats in a word's top byte).
     mask: u32,
@@ -256,16 +302,17 @@ impl Layout {
     #[must_use]
     pub fn new(psm: Psm, bp: u32, bw: u32) -> Self {
         let t = page_tables();
-        let (table, w_shift, h_shift, pages_per_row): (&'static [u16], u32, u32, u32) = match psm {
-            Psm::Ct32 | Psm::Ct24 | Psm::T8h | Psm::T4hl | Psm::T4hh => (&t.ct32, 6, 5, bw),
-            Psm::Z32 | Psm::Z24 => (&t.z32, 6, 5, bw),
-            Psm::Ct16 => (&t.ct16, 6, 6, bw),
-            Psm::Ct16s => (&t.ct16s, 6, 6, bw),
-            Psm::Z16 => (&t.z16, 6, 6, bw),
-            Psm::Z16s => (&t.z16s, 6, 6, bw),
-            Psm::T8 => (&t.t8, 7, 6, bw >> 1),
-            Psm::T4 => (&t.t4, 7, 7, bw >> 1),
-        };
+        let (table, n, w_shift, h_shift, pages_per_row): (&'static [u16], usize, u32, u32, u32) =
+            match psm {
+                Psm::Ct32 | Psm::Ct24 | Psm::T8h | Psm::T4hl | Psm::T4hh => (&t.ct32, 0, 6, 5, bw),
+                Psm::Z32 | Psm::Z24 => (&t.z32, 1, 6, 5, bw),
+                Psm::Ct16 => (&t.ct16, 2, 6, 6, bw),
+                Psm::Ct16s => (&t.ct16s, 3, 6, 6, bw),
+                Psm::Z16 => (&t.z16, 4, 6, 6, bw),
+                Psm::Z16s => (&t.z16s, 5, 6, 6, bw),
+                Psm::T8 => (&t.t8, 6, 7, 6, bw >> 1),
+                Psm::T4 => (&t.t4, 7, 7, 7, bw >> 1),
+            };
         let (mask, shift) = match psm {
             Psm::Ct32 | Psm::Z32 => (u32::MAX, 0),
             Psm::Ct24 | Psm::Z24 => (0x00FF_FFFF, 0),
@@ -278,6 +325,7 @@ impl Layout {
         };
         Self {
             table,
+            table_at: TABLE_AT[n],
             mask,
             shift,
             w_shift,
@@ -285,6 +333,22 @@ impl Layout {
             pages_per_row,
             bp,
         }
+    }
+
+    /// The layout as seven words for a GPU: the table's start in
+    /// [`page_tables_flat`], the page's width and height as powers of two,
+    /// pages per row, the base block, and the format's mask and shift.
+    #[must_use]
+    pub const fn gpu(&self) -> [u32; 7] {
+        [
+            self.table_at,
+            self.w_shift,
+            self.h_shift,
+            self.pages_per_row,
+            self.bp,
+            self.mask,
+            self.shift,
+        ]
     }
 
     /// Where pixel (`x`, `y`) lives: its page's base, then the page
@@ -385,6 +449,15 @@ impl Memory {
         }
     }
 
+    /// The memory as words.
+    #[must_use]
+    pub fn to_words(&self) -> Vec<u32> {
+        self.words
+            .iter()
+            .map(|w| w.load(Ordering::Relaxed))
+            .collect()
+    }
+
     /// The memory as bytes, little-endian (for dumps).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -478,6 +551,27 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_flat_tables_hold_each_format_at_its_start() {
+        let flat = page_tables_flat();
+        assert_eq!(flat.len(), 45056);
+        for psm in ALL {
+            let layout = Layout::new(psm, 0x40, 2);
+            let at = layout.gpu()[0] as usize;
+            assert_eq!(
+                &flat[at..at + layout.table.len()],
+                layout
+                    .table
+                    .iter()
+                    .map(|&e| u32::from(e))
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                "{psm:?}"
+            );
+            assert_eq!(Psm::from_bits(u64::from(psm.code())), Some(psm));
         }
     }
 

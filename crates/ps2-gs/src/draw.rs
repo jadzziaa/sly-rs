@@ -19,6 +19,8 @@
 
 use std::sync::Arc;
 
+pub(crate) mod encode;
+
 use crate::batch::{Snapshot, own_texture};
 use crate::fixed;
 use crate::regs::{Tex0, bits};

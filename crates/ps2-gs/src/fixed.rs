@@ -85,6 +85,17 @@ impl Stq {
         }
     }
 
+    /// S, T and Q at the vertices as scaled (each fits 25 bits with its
+    /// sign), and the shifts for U and V: what a GPU needs to do as
+    /// [`Stq::at`] does.
+    #[must_use]
+    pub(crate) fn parts(&self) -> ([[i64; 3]; 3], [i32; 2]) {
+        (
+            [self.s.values, self.t.values, self.q.values],
+            [self.shift_u, self.shift_v],
+        )
+    }
+
     /// The texture coordinates at a pixel with weights `w`, in 1/16 texel.
     #[must_use]
     pub(crate) fn at(&self, w: [i64; 3]) -> (i32, i32) {

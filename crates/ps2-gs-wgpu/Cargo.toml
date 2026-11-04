@@ -1,0 +1,16 @@
+[package]
+name = "ps2-gs-wgpu"
+description = "The GS on a GPU: local memory in a GPU buffer, the pixel pipeline in wgpu compute shaders, matching the software GS bit for bit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pollster.workspace = true
+ps2-gs.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

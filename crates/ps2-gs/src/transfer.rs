@@ -113,6 +113,10 @@ impl Gs {
             2 => {
                 self.flush();
                 self.copy(w, h);
+                if let Some(tap) = &mut self.tap {
+                    tap.memory(&self.mem.to_words());
+                    self.tap_resyncs += 1;
+                }
             }
             _ => {}
         }

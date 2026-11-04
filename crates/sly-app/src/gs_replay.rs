@@ -16,6 +16,7 @@ pub(crate) fn run(
     screenshot: Option<&Path>,
     frames: Option<&Path>,
     states: bool,
+    gpu: bool,
 ) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if let Some(dir) = frames {
@@ -26,10 +27,23 @@ pub(crate) fn run(
     for _ in 0..repeat.max(1) {
         let (mut gs, mut privileged, packets) =
             dump::read(&bytes).map_err(|e| anyhow!("{}: {e}", path.display()))?;
-        gs.set_threads(threads);
+        // The GS hands its work on only when drawing on several threads.
+        gs.set_threads(if gpu { threads.max(2) } else { threads });
         if states {
             gs.states = Some(std::collections::HashMap::new());
         }
+        let mut check = if gpu {
+            let shared = ps2_gs_wgpu::Shared(std::sync::Arc::new(std::sync::Mutex::new(
+                ps2_gs_wgpu::GpuGs::new().map_err(|e| anyhow!(e))?,
+            )));
+            gs.set_tap(Some(Box::new(shared.clone())));
+            Some(GpuCheck {
+                shared,
+                first: None,
+            })
+        } else {
+            None
+        };
         let started = Instant::now();
         let mut fields = 0;
         for packet in packets {
@@ -38,6 +52,9 @@ pub(crate) fn run(
                 Packet::Registers(block) => privileged = block,
                 Packet::VSync(_) => {
                     fields += 1;
+                    if let Some(check) = &mut check {
+                        check.field(&mut gs, fields);
+                    }
                     if let Some(dir) = frames {
                         // Numbered as PCSX2 numbers a dump's frames.
                         gs.flush();
@@ -86,6 +103,9 @@ pub(crate) fn run(
                 (h ^ u64::from(b)).wrapping_mul(0x100_0000_01B3)
             });
         writeln!(out, "GS memory hash {hash:016x}")?;
+        if let Some(check) = &mut check {
+            check.report(&mut out, &mut gs)?;
+        }
         if let Some(png) = screenshot {
             let frame = gs.display(&Privileged::from_block(&privileged[..]));
             std::fs::write(png, frame.png())
@@ -96,6 +116,74 @@ pub(crate) fn run(
         writeln!(out, "best {:.3} s", best.as_secs_f64())?;
     }
     Ok(())
+}
+
+/// `--gpu`: the GPU drawing alongside, compared after every field.
+struct GpuCheck {
+    shared: ps2_gs_wgpu::Shared,
+    /// The first field after which the two memories differed, and in how
+    /// many words.
+    first: Option<(u32, usize)>,
+}
+
+impl GpuCheck {
+    /// Words of the two memories that differ, and the first.
+    fn compare(&self, gs: &mut ps2_gs::Gs) -> (usize, Option<usize>, Vec<u32>) {
+        gs.flush();
+        let cpu = gs.mem.to_words();
+        let gpu = self
+            .shared
+            .0
+            .lock()
+            .map(|g| g.read_memory())
+            .unwrap_or_default();
+        let differ: Vec<usize> = (0..cpu.len())
+            .filter(|&i| gpu.get(i) != Some(&cpu[i]))
+            .collect();
+        (differ.len(), differ.first().copied(), gpu)
+    }
+
+    fn field(&mut self, gs: &mut ps2_gs::Gs, field: u32) {
+        if self.first.is_none() {
+            let (n, _, _) = self.compare(gs);
+            if n > 0 {
+                self.first = Some((field, n));
+            }
+        }
+    }
+
+    fn report(&mut self, out: &mut impl io::Write, gs: &mut ps2_gs::Gs) -> Result<()> {
+        let (n, first, words) = self.compare(gs);
+        let hash = words
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .fold(0xCBF2_9CE4_8422_2325u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x100_0000_01B3)
+            });
+        let (name, batches, skipped) = self
+            .shared
+            .0
+            .lock()
+            .map(|g| (g.name.clone(), g.batches, g.skipped))
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "GPU ({name}): {batches} batches, {skipped} primitives left out, {} copies resynced; GPU memory hash {hash:016x}",
+            gs.tap_resyncs
+        )?;
+        match (self.first, first) {
+            (None, None) => writeln!(out, "  the same as the software GS's after every field")?,
+            (first_field, word) => writeln!(
+                out,
+                "  differs from the software GS's: first after field {:?} ({:?} words), at the end {n} words, the first word {:?} (block {:?})",
+                first_field.map(|f| f.0),
+                first_field.map(|f| f.1),
+                word,
+                word.map(|w| w / 64),
+            )?,
+        }
+        Ok(())
+    }
 }
 
 /// `--states`: facts first (`#` keys), then primitives and pixels by
