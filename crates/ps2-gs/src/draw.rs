@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use crate::fixed;
 use crate::regs::{Tex0, bits};
 use crate::{Gs, Layout, Memory, Psm, Vertex, clut_color, expand16, expand24};
 
@@ -116,7 +117,13 @@ impl Pipe {
             } else {
                 "-".to_owned()
             },
-            if self.tme && self.linear { "lin" } else { "" },
+            match (self.tme, self.linear, self.fst) {
+                (false, _, _) => "",
+                (true, true, true) => "lin uv",
+                (true, true, false) => "lin stq",
+                (true, false, true) => "uv",
+                (true, false, false) => "stq",
+            },
             self.tex.tfx,
             if self.tex.tcc { "a" } else { "" },
             ztst,
@@ -293,8 +300,13 @@ impl Prim {
 struct Frag {
     z: u32,
     rgba: [i32; 4],
-    /// Texture coordinates, in texels.
+    /// Texture coordinates, in texels, as primitives other than
+    /// triangles interpolate them.
     uv: (f32, f32),
+    /// Texture coordinates as sampling takes them: in 1/16 texel, nearest
+    /// sampling at `tex >> 4`, bilinear from `tex - 8` (see [`texcoord`]
+    /// and `fixed`).
+    tex: (i32, i32),
     /// S, T and Q, for perspective interpolation.
     stq: [f32; 3],
     f: i32,
@@ -424,6 +436,46 @@ impl Gs {
                 } else {
                     area
                 };
+                // Facts for the GPU's arithmetic ('#' keys, primitives only):
+                // the depth format, and for STQ texturing Q's sign and
+                // exponent and the spread of S, T, Q exponents.
+                let mut fact = |k: String| states.entry(k).or_default().0 += 1;
+                if let Some((zpsm, _)) = pipe.zbuf {
+                    fact(format!("#zbuf {zpsm:?}"));
+                }
+                if pipe.tme && !pipe.fst {
+                    let n = match kind {
+                        0 => 1,
+                        1 | 2 | 6 => 2,
+                        _ => 3,
+                    };
+                    let exp = |f: f32| ((f.to_bits() >> 23) & 0xFF) as i32 - 127;
+                    for v in &vertices[..n] {
+                        if v.q <= 0.0 || !v.q.is_finite() {
+                            let sign = if v.q == 0.0 {
+                                "zero"
+                            } else if v.q < 0.0 {
+                                "negative"
+                            } else {
+                                "not finite"
+                            };
+                            fact(format!("#q {sign} (kind {kind})"));
+                        } else {
+                            fact(format!("#q exponent {:+03}", exp(v.q)));
+                        }
+                        let e: Vec<i32> = [v.s, v.t, v.q]
+                            .iter()
+                            .filter(|f| **f != 0.0)
+                            .map(|f| exp(*f))
+                            .collect();
+                        if let (Some(lo), Some(hi)) = (e.iter().min(), e.iter().max()) {
+                            fact(format!("#S T Q exponent spread {:02}", hi - lo));
+                        }
+                    }
+                    if kind == 6 {
+                        fact("#STQ sprite".to_owned());
+                    }
+                }
             }
             let prim = Prim {
                 pipe,
@@ -581,11 +633,13 @@ impl Raster<'_> {
         }
         let at = |c0, c1, s0, s1, s| sprite_coord(p.fst, c0, c1, s0, s1, s);
         // U depends on the column alone: once per column, not per pixel.
-        let us: Vec<f32> = (px0..px1).map(|x| at(u0, u1, x0, x1, x * 16)).collect();
+        let us: Vec<i32> = (px0..px1)
+            .map(|x| texcoord(p, (at(u0, u1, x0, x1, x * 16), 0.0)).0)
+            .collect();
         for y in py0..py1 {
-            let v = at(v0, v1, y0, y1, y * 16);
+            let v = texcoord(p, (0.0, at(v0, v1, y0, y1, y * 16))).1;
             for (x, &u) in (px0..px1).zip(&us) {
-                self.fragment::<false>(p, x, y, Frag { uv: (u, v), ..fb });
+                self.fragment::<false>(p, x, y, Frag { tex: (u, v), ..fb });
             }
         }
     }
@@ -630,12 +684,19 @@ impl Raster<'_> {
         };
         let edges = [(pos[1], pos[2]), (pos[2], pos[0]), (pos[0], pos[1])];
         let owned = edges.map(|(a, b)| owns(a, b));
-        let inv = 1.0 / area as f64;
         let flat_z = f[0].z == f[1].z && f[1].z == f[2].z;
-        let (tw, th) = (
-            f64::from(1u16 << p.tex.tw.min(10)),
-            f64::from(1u16 << p.tex.th.min(10)),
-        );
+        // Texture coordinates by the shared integer arithmetic (`fixed`):
+        // UV in 1/16 texel at the vertices, or S, T, Q scaled.
+        let tex = if !(HOT || p.tme) {
+            Tex::None
+        } else if p.fst {
+            Tex::Uv(
+                f.map(|v| (v.uv.0 * 16.0) as i64),
+                f.map(|v| (v.uv.1 * 16.0) as i64),
+            )
+        } else {
+            Tex::Stq(fixed::Stq::new(f.map(|v| v.stq), p.tex.tw, p.tex.th))
+        };
         let (x0, x1) = (left.max(cx0), right.min(cx1));
         for y in top.max(cy0)..=bottom.min(cy1) {
             let sy = i64::from(y) * 16;
@@ -676,10 +737,15 @@ impl Raster<'_> {
                     last.rgba
                 };
                 let fog = exact(f[0].f.into(), f[1].f.into(), f[2].f.into()) as i32;
-                let uv = if HOT || p.tme {
-                    tex_coords(p, &f, w.map(|e| e as f64 * inv), (tw, th))
-                } else {
-                    (0.0, 0.0)
+                let tex = match &tex {
+                    Tex::None => (0, 0),
+                    Tex::Uv(u, v) => {
+                        let at = |c: &[i64; 3]| {
+                            (w[0] * c[0] + w[1] * c[1] + w[2] * c[2]).div_euclid(area) as i32
+                        };
+                        (at(u), at(v))
+                    }
+                    Tex::Stq(stq) => stq.at(w),
                 };
                 self.fragment::<HOT>(
                     p,
@@ -688,7 +754,7 @@ impl Raster<'_> {
                     Frag {
                         z,
                         rgba,
-                        uv,
+                        tex,
                         f: fog,
                         ..last
                     },
@@ -794,6 +860,7 @@ impl Raster<'_> {
                     z,
                     rgba,
                     uv,
+                    tex: texcoord(p, uv),
                     f: mix(fa.f, fb.f),
                     ..fb
                 },
@@ -821,17 +888,17 @@ impl Raster<'_> {
         }
     }
 
-    fn sample<const HOT: bool>(&self, p: &Pipe, (u, v): (f32, f32)) -> [i32; 4] {
+    fn sample<const HOT: bool>(&self, p: &Pipe, (u, v): (i32, i32)) -> [i32; 4] {
         let channels =
             |c: u32| [c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF, c >> 24].map(|x| x as i32);
         let [wu, wv] = &p.wrap;
         if !HOT && !p.linear {
-            let (u, v) = (wu.apply(u.floor() as i32), wv.apply(v.floor() as i32));
+            let (u, v) = (wu.apply(u >> 4), wv.apply(v >> 4));
             return channels(self.texel::<HOT>(p, u, v));
         }
         // Bilinear, with 4-bit weights: across, then down, each step
         // truncated (as PCSX2's software renderer does).
-        let (u, v) = ((u * 16.0) as i32 - 8, (v * 16.0) as i32 - 8);
+        let (u, v) = (u.wrapping_sub(8), v.wrapping_sub(8));
         let (iu, iv, fu, fv) = (u >> 4, v >> 4, u & 15, v & 15);
         // Each column and row wrapped once.
         let (u0, u1, v0, v1) = (
@@ -942,7 +1009,7 @@ impl Raster<'_> {
         }
         let mut c = frag.rgba;
         if HOT || p.tme {
-            let t = self.sample::<HOT>(p, frag.uv);
+            let t = self.sample::<HOT>(p, frag.tex);
             let (tcc, va) = (HOT || p.tex.tcc, c[3]);
             let modulate = |t: i32, v: i32| ((t * v) >> 7).min(255);
             match if HOT { 0 } else { p.tex.tfx } {
@@ -1172,10 +1239,34 @@ fn edge_frag(p: &Pipe, a: &Frag, b: &Frag, t: f32, last: &Frag) -> Frag {
         z,
         rgba,
         uv,
+        tex: texcoord(p, uv),
         f: mix(a.f, b.f),
         coverage: None,
         ..*last
     }
+}
+
+/// Texture coordinates in texels as sampling takes them, in 1/16 texel:
+/// what the float coordinates gave before, for each sampling mode
+/// (nearest: the texel `u` lies in; bilinear: `u·16` truncated).
+fn texcoord(p: &Pipe, (u, v): (f32, f32)) -> (i32, i32) {
+    if p.linear {
+        ((u * 16.0) as i32, (v * 16.0) as i32)
+    } else {
+        (
+            (u.floor() as i32).saturating_mul(16),
+            (v.floor() as i32).saturating_mul(16),
+        )
+    }
+}
+
+/// How a triangle's texture coordinates are interpolated.
+enum Tex {
+    None,
+    /// UV (FST): the vertices' U and V in 1/16 texel.
+    Uv([i64; 3], [i64; 3]),
+    /// STQ.
+    Stq(fixed::Stq),
 }
 
 /// A vertex's attributes as a fragment's.
@@ -1194,6 +1285,7 @@ fn attrs(p: &Pipe, v: &Vertex) -> Frag {
         z: v.z,
         rgba: v.rgba.map(i32::from),
         uv,
+        tex: texcoord(p, uv),
         stq: [v.s, v.t, v.q],
         f: i32::from(v.f),
         coverage: None,
@@ -1300,6 +1392,7 @@ mod tests {
                         z: next() as u32,
                         rgba: [0x12, 0xF0, 0x7F, 0x81],
                         uv: (0.0, 0.0),
+                        tex: (0, 0),
                         stq: [0.0; 3],
                         f: 0,
                         coverage: None,

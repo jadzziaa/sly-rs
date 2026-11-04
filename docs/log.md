@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: M1 of the [GPU GS](research/gpu-gs.md): triangles' texture coordinates on a shared integer arithmetic (crates/ps2-gs/src/fixed.rs); every other per-pixel value was integer already and is unchanged. PCSX2 parity as good or slightly better (title 3D 86.4% identical, was 85.1%); dump hashes re-recorded.
 * **Creation**: [A GPU GS on wgpu compute shaders](research/gpu-gs.md): the GPU renderer's design (compute, after paraLLEl-GS; one arithmetic shared with the software GS), milestones M0-M5; plan phase 9 updated. gs-replay counts transfers by direction: Sly never reads GS memory back.
 * **Update**: The machine thread faster (VIF1 fed whole commands, UNPACK from words, XGKICK and the tag scanner cheaper): the prologue at 124% of NTSC, the machine alone at or above NTSC in every stretch; the dips left are the GS's ([graphics](research/sly1-graphics.md)).
 * **Update**: The re-recorded prologue reproduces and runs at 120% of NTSC overall, 16 of 73 five-second stretches below (slowest 88%), some held by VU1 and the EE, some by the GS; the game clock matches the fields in play and runs 10% ahead in the opening cutscene ([graphics](research/sly1-graphics.md)).

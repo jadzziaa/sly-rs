@@ -62,20 +62,7 @@ pub(crate) fn run(
             gs.transfers[2],
         )?;
         if let Some(states) = gs.states.take() {
-            let total: u64 = states.values().map(|s| s.1).sum();
-            let mut states: Vec<_> = states.into_iter().collect();
-            states.sort_by_key(|(_, (_, pixels))| std::cmp::Reverse(*pixels));
-            let mut running = 0;
-            for (state, (prims, pixels)) in states.iter().take(30) {
-                running += pixels;
-                writeln!(
-                    out,
-                    "  {:5.1}% ({:5.1}% so far) {prims:8} prims  {state}",
-                    *pixels as f64 * 100.0 / total.max(1) as f64,
-                    running as f64 * 100.0 / total.max(1) as f64,
-                )?;
-            }
-            writeln!(out, "  {} states, {total} pixels", states.len())?;
+            report_states(&mut out, states)?;
         }
         let [pool, serial, uploads] = gs.drawer_times();
         writeln!(
@@ -108,5 +95,42 @@ pub(crate) fn run(
     if repeat > 1 {
         writeln!(out, "best {:.3} s", best.as_secs_f64())?;
     }
+    Ok(())
+}
+
+/// `--states`: facts first (`#` keys), then primitives and pixels by
+/// pipeline state, most pixels first.
+#[allow(clippy::cast_precision_loss, reason = "a report")]
+fn report_states(
+    out: &mut impl io::Write,
+    states: std::collections::HashMap<String, (u64, u64)>,
+) -> Result<()> {
+    let mut facts: Vec<_> = states
+        .iter()
+        .filter(|(k, _)| k.starts_with('#'))
+        .map(|(k, v)| (k.clone(), v.0))
+        .collect();
+    facts.sort();
+    for (fact, n) in facts {
+        writeln!(out, "  {fact}: {n}")?;
+    }
+    let states: std::collections::HashMap<_, _> = states
+        .into_iter()
+        .filter(|(k, _)| !k.starts_with('#'))
+        .collect();
+    let total: u64 = states.values().map(|s| s.1).sum();
+    let mut states: Vec<_> = states.into_iter().collect();
+    states.sort_by_key(|(_, (_, pixels))| std::cmp::Reverse(*pixels));
+    let mut running = 0;
+    for (state, (prims, pixels)) in states.iter().take(30) {
+        running += pixels;
+        writeln!(
+            out,
+            "  {:5.1}% ({:5.1}% so far) {prims:8} prims  {state}",
+            *pixels as f64 * 100.0 / total.max(1) as f64,
+            running as f64 * 100.0 / total.max(1) as f64,
+        )?;
+    }
+    writeln!(out, "  {} states, {total} pixels", states.len())?;
     Ok(())
 }

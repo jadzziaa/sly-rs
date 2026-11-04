@@ -4,12 +4,12 @@ title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T03:00:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T02:55:11Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
     resource: https://themaister.net/blog/2024/07/03/playstation-2-gs-emulation-the-final-frontier-of-vulkan-compute-emulation
-    title: "PlayStation 2 GS emulation - the final frontier of Vulkan compute emulation (paraLLEl-GS)"
+    title: PlayStation 2 GS emulation - the final frontier of Vulkan compute emulation (paraLLEl-GS)
   - id: parallel-gs-repo
     resource: https://github.com/Arntzen-Software/parallel-gs
     title: paraLLEl-GS (LGPL-3.0)
@@ -21,7 +21,7 @@ sources:
     title: Measurements on the reference machine
   - id: user
     resource: human:august, 2026-11-03
-    title: The user's direction (start the GPU renderer once software is near NTSC; weaker machines in mind)
+    title: The user's direction (start the GPU renderer once software is near NTSC; weaker machines in mind; shared arithmetic agreed)
 ---
 
 # A GPU GS on wgpu compute shaders
@@ -57,31 +57,53 @@ replaces that.
 
 ## One arithmetic, two implementations
 
-A GPU cannot run the software GS's pixel arithmetic as it is: 64-bit edge
-functions, a 64- and 128-bit division per pixel for depth, colour and fog
-(exact barycentric weights), and `f64` texture coordinates with a true
-division by Q. `f64` is out on GPUs; 64-bit integers exist in wgpu
-(`SHADER_INT64`: Vulkan, DX12, Metal)[^wgpu-int64] and on both GPUs here,
-but not in a per-pixel loop that must be fast on weak ones. And `f32` in the
-per-pixel path would not do either: WGSL allows fused multiply-adds and
-vendors differ, so hashes would differ from one GPU to another.
+`f64` is out on GPUs, and `f32` per pixel would make hashes differ from
+one GPU to another (WGSL allows fused multiply-adds and vendors differ).
+64-bit integers exist in wgpu (`SHADER_INT64`: Vulkan, DX12,
+Metal)[^wgpu-int64] and on both GPUs here. Going through the software GS's
+pixel path (2026-11-03), only one part needs a new definition:
 
-So: one all-integer arithmetic, 32-bit in the per-pixel loop, defined
-once and implemented twice.
+| Per pixel | Software GS | On the GPU |
+| --- | --- | --- |
+| Inside test (edge functions, top-left rule) | 64-bit integers | the same, 64-bit |
+| Depth, colour, fog | the exact quotient `Σ wₖ·aₖ / area` | the same quotient: area is the same for every pixel of a triangle, so multiply by a per-triangle reciprocal and correct by one (exact). Sly draws with 32-bit depth everywhere, so depth's sum can pass 64 bits: split into high and low halves, two quotients |
+| Lines, points, antialiased edges | PCSX2's walks, in `f32` | walked on the CPU, as today; the GPU shades the fragments it is given |
+| Sprites' UV | integer already (fits 32 bits) | the same |
+| **Triangles' texture coordinates** | were `f64` (barycentric, true division by Q) | **new: integer, below** |
 
-- Setup (on the CPU, where 64 bits are free): edge functions relative to
-  the primitive's or tile's origin so that per-pixel values fit in 32
-  bits; plane equations for Z, RGBA and fog in fixed point with a
-  specified rounding; a fixed-point reciprocal for 1/Q (paraLLEl-GS uses
-  about 24 bits, for reproducibility).
-- The software GS changes to that arithmetic first, on the CPU, where
-  the tools to check it exist. Its pixels change slightly; the PCSX2
-  parity gate of phase 6 (within 8 levels on at least 99.9% of pixels on
-  the dialog, title and level dumps) is run again, then the twelve dump
-  hashes are re-recorded. The replay checkpoints do not move: the state
-  hash covers RAM, the scratchpad and both VUs, not GS memory.
-- The shaders then translate that arithmetic, gated on the GPU's memory
-  hash equal to the software GS's on every dump.
+**Texture coordinates, normative** (`crates/ps2-gs/src/fixed.rs`; the
+shaders translate it):
+
+- Coordinates are integers in 1/16 texel, rounded down. Nearest sampling
+  takes `c >> 4`, bilinear `c - 8` then shifts. Primitives other than
+  triangles convert their float coordinates for the sampling mode as
+  sampling did (nearest: the texel the value lies in; bilinear: `u·16`
+  truncated), so their pixels are unchanged.
+- UV triangles: `floor(Σ wₖ·Uₖ / area)`, `Uₖ` the vertices' UV in 1/16
+  texel (exact; the same reciprocal trick on the GPU).
+- STQ triangles: at setup, each of S, T, Q is scaled by a power of two
+  per triangle so that its largest magnitude lies in `[2^23, 2^24)`,
+  rounded to nearest (non-finite values count as 0). Per pixel,
+  `Σ wₖ·Sₖ` and `Σ wₖ·Qₖ` are exact 64-bit integers (at most
+  3·2^35·2^24). Their ratio: normalise both by their leading zeros; take
+  `2^62 / Q's top 32 bits` once (one exact division, rounded down and up;
+  shared by u and v); multiply by S's top 32 bits; shift by
+  `62 − k + zeros(S) − zeros(Q)` with `k = scale(Q) − scale(S) + log2(TW)
+  + 4`. A positive quotient uses the reciprocal rounded up and drops the
+  fraction, a negative one the reciprocal rounded down and rounds its
+  magnitude up, so an exact quotient comes out exactly (a texture
+  coordinate constant over a triangle stays the same texel). Magnitudes
+  are held to 2^30. Q = 0 counts as 1.
+
+**Checked** (2026-11-03): with the old `f64` path selected, all twelve
+dumps hashed as before (the refactor itself is exact); with the new one,
+the dumps with sprites and lines only are unchanged, and PCSX2 parity is
+as good or slightly better: the title's 3D 86.40% identical (was
+85.08%), 99.9708% within 8 (was 99.9703%), largest 17; the level intro
+98.11% (was 98.109%), 100% within 8, largest 6; the dialog unchanged
+(99.928%, 99.987%, 79). The dump hashes are re-recorded. The replay
+checkpoints do not move: the state hash covers RAM, the scratchpad and
+both VUs, not GS memory.
 
 ## Facts checked
 
@@ -93,6 +115,9 @@ once and implemented twice.
   integrated Radeon, a stand-in for weak machines. Both have 64-bit and
   16-bit shader integers, 16-bit storage, subgroups of 64, 1,024
   invocations a workgroup, storage buffers far over 4 MB.
+- **Sly draws with 32-bit depth everywhere**; Q at STQ vertices ranges
+  over about 2^-16 to 1 and is sometimes negative (about 12,000 vertices
+  in 60 fields of play); no sprite uses STQ in any dump.
 - **The GS's work as the GPU would see it**, on 60 fields of play: 44,000
   primitives and 2.15 million fragments a field; 90% of the pixels in one
   state (a CLUT texture, bilinear, blending, fog); 795 primitives drawn
@@ -113,7 +138,7 @@ once and implemented twice.
 | | What | Gate |
 | --- | --- | --- |
 | M0 | wgpu in `play`: device, surface, presentation (softbuffer goes); the software GS still draws | the window shows the same frames; `play` still records and replays |
-| M1 | the shared integer arithmetic in the software GS | PCSX2 parity re-run; twelve dumps re-baselined |
+| M1 | the shared integer arithmetic in the software GS (**done**, 2026-11-03: only triangles' texture coordinates changed) | PCSX2 parity re-run; twelve dumps re-baselined |
 | M2 | compute rasteriser for triangles and sprites, the full `fragment` pipeline (not just the hot state: mixing CPU and GPU drawing would need constant syncs) | GPU memory hash equals the software's on the dumps that use only those, twice in a row |
 | M3 | hazards as dispatch boundaries, uploads, CLUT loads, AA1, lines, points | all twelve dumps |
 | M4 | play on the GPU, the display read on the GPU | the prologue replays with its state hashes; `replay --timing` shows the GS off the critical path; runs on the integrated GPU |
@@ -134,11 +159,11 @@ once and implemented twice.
   bottleneck at high SSAA. Here the GS thread's parsing and setup stays,
   about 10.6 ms a field on the reference CPU.
 
-## Decision needed
+## Decided
 
-M1 changes the reference renderer's pixels (slightly) so that the GPU can
-match it exactly. It is a decision about the reference, not an
-implementation detail: the alternative is a GPU renderer checked by eye.
+The user agreed (2026-11-03) that the reference renderer's pixels may
+change so that the GPU can match it exactly; in the event only triangles'
+texture coordinates changed, and PCSX2 parity improved slightly.
 
 [^parallel-gs]: PlayStation 2 GS emulation - the final frontier of Vulkan compute emulation (paraLLEl-GS)
 [^parallel-gs-repo]: paraLLEl-GS (LGPL-3.0)

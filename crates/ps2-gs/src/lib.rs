@@ -23,6 +23,7 @@ mod batch;
 pub mod display;
 mod draw;
 pub mod dump;
+mod fixed;
 pub mod gif;
 pub mod mem;
 pub mod regs;
