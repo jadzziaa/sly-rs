@@ -17,7 +17,7 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T01:26:53Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T01:31:05Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
 ---
@@ -401,6 +401,20 @@ instructions).
   recording from 127.0 to 119.1 s (two runs, within 0.3 s): 112% of
   console speed. The machine now waits for the GS 3.2% of the run; VIF1
   with VU1 (64% without the waits) and the EE (32%) set the pace again.
+- **What `unsafe` would buy** (measured with a throwaway change, not
+  kept): unchecked indexing for local memory's words, the page tables and
+  the CLUT took the play dump from 3.44 to 3.37 s on one thread and
+  nothing measurable on four or sixteen; bounds checks are not the cost.
+  rac-rs's software GS is scalar too: its `unsafe` there is raw pointers
+  into VRAM shared between threads, not SIMD (its intrinsics are in its
+  VU and EE code). The large step left in drawing is SIMD, several
+  pixels at once as PCSX2's renderer does, and that needs no `unsafe` of
+  our own (a safe SIMD crate, or `std::arch` in functions compiled for
+  the features, as the native build is). Fewer cores, same machine:
+  1 thread 3.44 s, 2 2.21 s, 4 1.34 s, 6 (the default on four cores and
+  eight threads) 1.07 s, 8 0.96 s, for 1.0 s of play. The GS thread's
+  own work (parsing, setup) is about 10.6 ms a field here and does not
+  spread over threads.
 - **CLAMP's region mode with MIN above MAX** panics (`i32::clamp`); the
   test above keeps its bounds in order. What the GS does then is not yet
   known; games are not seen to do it.

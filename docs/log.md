@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-03
+* **Update**: Measured what unsafe would buy the GS (unchecked indexing: 2% on one thread, nothing on more) and how it scales on fewer threads ([graphics](research/sly1-graphics.md)).
 * **Update**: GS: a pipeline specialised to the hot state, the decoded state shared across primitives, repeated footprints neither checked nor marked: 60 fields of play in 0.92 s on sixteen threads (was 1.10), the prologue's first 8,000 fields at 112% of console speed, local memory the same on twelve dumps ([graphics](research/sly1-graphics.md)).
 * **Update**: GS: page tables give a pixel's word and shift directly (the play dump about 6% faster on one thread, local memory the same on twelve dumps); gs-replay --states counts pixels by pipeline state (90% of play is one shape of textured triangle) ([graphics](research/sly1-graphics.md)).
 * **Update**: GS draws on up to 16 threads (was 8): the prologue's first 8,000 fields from 135.4 to 127.0 s, faster than real time ([graphics](research/sly1-graphics.md)).
