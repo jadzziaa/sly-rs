@@ -100,6 +100,14 @@ impl Sink for Paths<'_> {
             self.0.gif_unscanned(path, data);
         }
     }
+
+    fn gif_slice(&mut self, path: usize, data: &[u128]) {
+        if path == 1 {
+            Sink::gif_slice(self.0, path, data);
+        } else {
+            self.0.gif_unscanned(path, data.to_vec());
+        }
+    }
 }
 
 /// A GS that takes nothing: for VIF0, which sends nothing to the GS.

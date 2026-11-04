@@ -16,6 +16,9 @@ use ps2_gs::thread::Sink;
 
 use crate::{Memories, Regs, micro};
 
+/// Programs per program timed for [`Vif::run_time`].
+pub const SAMPLED: u64 = 16;
+
 /// `VIF_STAT` bits.
 pub mod stat {
     /// MARK was written by a MARK code.
@@ -80,7 +83,8 @@ pub struct Vif {
     pub programs: u64,
     /// Instruction pairs those programs ran, for reports.
     pub pairs: u64,
-    /// Host time those programs took, for reports.
+    /// Host time those programs took, for reports: estimated from one
+    /// program in [`SAMPLED`].
     pub run_time: std::time::Duration,
     /// The VU's decoded pairs.
     pub cache: micro::Cache,
@@ -423,7 +427,12 @@ impl Vif {
             top: self.top,
             gs,
         });
-        let started = std::time::Instant::now();
+        // One program in `SAMPLED` is timed (a clock read costs about as
+        // much as a short program), its time counted that many times.
+        let started = self
+            .programs
+            .is_multiple_of(SAMPLED)
+            .then(std::time::Instant::now);
         let run = micro::run(
             &mut micro::Unit {
                 regs,
@@ -436,7 +445,9 @@ impl Vif {
             },
             pc,
         );
-        self.run_time += started.elapsed();
+        if let Some(started) = started {
+            self.run_time += started.elapsed() * SAMPLED as u32;
+        }
         self.programs += 1;
         self.pairs += run.pairs;
         if run.runaway {
@@ -496,19 +507,46 @@ impl Vif {
                 num,
                 at,
                 mem_mask,
-                size,
                 wl,
                 skip,
             };
+            // Each vector's words taken at once; where the data runs short
+            // (a V3's W past the end), element by element.
+            let half = |h: u32, u: bool| {
+                if u {
+                    h & 0xFFFF
+                } else {
+                    i32::from(h as u16 as i16) as u32
+                }
+            };
+            let byte = |b: u32, u: bool| {
+                if u {
+                    b & 0xFF
+                } else {
+                    i32::from(b as u8 as i8) as u32
+                }
+            };
             let done = match (vn, vl, usn) {
-                (2 | 3, 0, _) => plain.run(mem, |o| {
-                    std::array::from_fn(|k| source::<4>(data, o + 4 * k, false))
+                (2, 0, _) => plain.run(mem, |i| match data.get(3 * i..3 * i + 4) {
+                    Some(&[x, y, z, w]) => [x, y, z, w],
+                    _ => std::array::from_fn(|k| source::<4>(data, 12 * i + 4 * k, false)),
                 }),
-                (3, 1, u) => plain.run(mem, |o| {
-                    std::array::from_fn(|k| source::<2>(data, o + 2 * k, u))
+                (3, 0, _) => plain.run(mem, |i| match data.get(4 * i..4 * i + 4) {
+                    Some(&[x, y, z, w]) => [x, y, z, w],
+                    _ => std::array::from_fn(|k| source::<4>(data, 16 * i + 4 * k, false)),
                 }),
-                (3, 2, u) => plain.run(mem, |o| {
-                    std::array::from_fn(|k| source::<1>(data, o + k, u))
+                (3, 1, u) => plain.run(mem, |i| match data.get(2 * i..2 * i + 2) {
+                    Some(&[a, b]) => [half(a, u), half(a >> 16, u), half(b, u), half(b >> 16, u)],
+                    _ => std::array::from_fn(|k| source::<2>(data, 8 * i + 2 * k, u)),
+                }),
+                (3, 2, u) => plain.run(mem, |i| match data.get(i) {
+                    Some(&w) => [
+                        byte(w, u),
+                        byte(w >> 8, u),
+                        byte(w >> 16, u),
+                        byte(w >> 24, u),
+                    ],
+                    None => std::array::from_fn(|k| source::<1>(data, 4 * i + k, u)),
                 }),
                 _ => false,
             };
@@ -619,13 +657,12 @@ struct Plain {
     num: u32,
     at: u32,
     mem_mask: u32,
-    size: usize,
     wl: u32,
     skip: u32,
 }
 
 impl Plain {
-    /// Writes the vectors `vector` makes of the data at each byte offset;
+    /// Writes the vectors `vector` makes of the data, by their number;
     /// false (writing nothing) if the memory is too small to take them so.
     #[inline]
     fn run(&self, mem: &mut Memories<'_>, vector: impl Fn(usize) -> [u32; 4]) -> bool {
@@ -633,16 +670,15 @@ impl Plain {
         if !len.is_power_of_two() || len < 16 {
             return false;
         }
-        let (mut at, mut cl, mut offset) = (self.at, 0, 0);
-        for _ in 0..self.num {
+        let (mut at, mut cl) = (self.at, 0);
+        for i in 0..self.num as usize {
             let base = (at & self.mem_mask) as usize & (len - 1);
-            let fields = vector(offset);
-            for (k, value) in fields.iter().enumerate() {
-                mem.data[base + 4 * k..base + 4 * k + 4].copy_from_slice(&value.to_le_bytes());
-            }
+            let [x, y, z, w] = vector(i);
+            let value =
+                u128::from(x) | u128::from(y) << 32 | u128::from(z) << 64 | u128::from(w) << 96;
+            mem.data[base..base + 16].copy_from_slice(&value.to_le_bytes());
             at += 16;
             cl += 1;
-            offset += self.size;
             if cl >= self.wl {
                 at += self.skip;
                 cl = 0;

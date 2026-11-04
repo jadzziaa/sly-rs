@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T21:58:51Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T22:57:53Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -246,9 +246,42 @@ unchanged; the prologue's final hash the same.
 | VU1's programs, PGO | 3.29 ns a pair (waits included) | 2.73 ns |
 
 VU1's thread (92% busy) is now the one limit; the machine waits for it
-25% of the time, mostly at V-blanks. VU1's thread still reads the clock
-twice for every program (61 million in the prologue, about 2.8 s), for
-the programs' share in the reports.
+25% of the time, mostly at V-blanks.
+
+**VU1's thread around its programs** (2026-11-04). Callgrind on the
+new-game replay (an AVX2 build, since valgrind cannot run AVX-512; it
+also ignores the rounding mode VU arithmetic sets, so the game diverges
+under it from field 1,500, while the AVX2 build run natively reaches all
+three hashes) put 14% of VU1's thread in VIF1's `run`, most of it the
+direct unpacks element by element, and 10% in XGKICK, whose packet grew
+a fresh vector (9.7 million reallocations) before being copied into the
+GS's gathered job. Now:
+
+- the direct unpacks take each vector's source words as one slice, with
+  one bounds check, and write it as one 16-byte store (element by element
+  only where the data runs short, a V3's W past the end);
+- XGKICK reads its packet into a buffer kept between kicks and hands it
+  over as a slice (`Sink::gif_slice`), which the GS's handle appends to
+  the gathered job;
+- one VU program in 16 is timed for the reports (`SAMPLED`), its time
+  counted sixteen times, instead of two clock reads for each of the 61
+  million programs.
+
+Checked: all eight VU recordings give the interpreter's results; a GS
+dump written by the game byte for byte the same; lockstep, the new-game
+replay and the full tests unchanged; the prologue's final hash the same.
+
+| | Before | After |
+| --- | --- | --- |
+| Prologue, without PGO (two pairs, in turn, load 4-6) | 130.2, 130.0 s | 126.4, 126.3 s |
+| VU1's thread busy, without PGO | 117.8, 117.4 s | 110.6, 111.0 s |
+| Prologue, PGO | 113.5 s | 108.8 s |
+| VU1's thread busy, PGO | 104.5 s | 98.9 s |
+| Slowest and median stretch, PGO | 187%, 307% of NTSC | 195%, 323% |
+
+VU1's thread spends about 90% of its time in the translated programs
+now; one program's body is a third of it, and the exponent-255 checks on
+operands the translator cannot prove clean (loaded from memory) about 7%.
 
 ## Recommendation
 

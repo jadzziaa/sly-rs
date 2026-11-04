@@ -18,6 +18,12 @@ use crate::{Events, Gs};
 pub trait Sink {
     /// Sends quadwords of GIF packets on `path` (1 to 3).
     fn gif(&mut self, path: usize, data: Vec<u128>);
+
+    /// [`Sink::gif`] for packets the sender keeps: a sink that copies them
+    /// anyway takes them without the sender allocating.
+    fn gif_slice(&mut self, path: usize, data: &[u128]) {
+        self.gif(path, data.to_vec());
+    }
 }
 
 impl Sink for Gs {
@@ -258,6 +264,22 @@ impl Threaded {
                 self.gathered = Some((path, data));
             }
         }
+        self.hand_over_full();
+    }
+
+    /// [`Threaded::packets`] for packets the sender keeps.
+    fn packets_slice(&mut self, path: usize, data: &[u128]) {
+        match &mut self.gathered {
+            Some((p, gathered)) if *p == path && !self.dumping => {
+                gathered.extend_from_slice(data);
+                self.hand_over_full();
+            }
+            _ => self.packets(path, data.to_vec()),
+        }
+    }
+
+    /// Sends the packets gathered once they are [`GATHER`] quadwords.
+    fn hand_over_full(&mut self) {
         if self
             .gathered
             .as_ref()
@@ -340,6 +362,11 @@ impl Sink for Threaded {
     fn gif(&mut self, path: usize, data: Vec<u128>) {
         self.scanner.scan(path, &data);
         self.packets(path, data);
+    }
+
+    fn gif_slice(&mut self, path: usize, data: &[u128]) {
+        self.scanner.scan(path, data);
+        self.packets_slice(path, data);
     }
 }
 

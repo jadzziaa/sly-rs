@@ -1248,8 +1248,20 @@ pub fn xgkick(data: &[u8], address: u32, gs: &mut dyn Sink) {
         raw.copy_from_slice(&data[at..at + 16]);
         u128::from_le_bytes(raw)
     };
+    thread_local! {
+        /// The packet being read, a buffer kept between kicks.
+        static PACKET: std::cell::RefCell<Vec<u128>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    PACKET.with_borrow_mut(|packet| {
+        packet.clear();
+        read_packet(address, mask, read, packet);
+        gs.gif_slice(1, packet);
+    });
+}
+
+/// The quadwords of the packet at quadword `address`, appended to `packet`.
+fn read_packet(address: u32, mask: u32, read: impl Fn(u32) -> u128, packet: &mut Vec<u128>) {
     let mut q = address;
-    let mut packet = Vec::new();
     // A guard: a packet never exceeds data memory.
     for _ in 0..=mask {
         let tag = read(q);
@@ -1277,7 +1289,6 @@ pub fn xgkick(data: &[u8], address: u32, gs: &mut dyn Sink) {
             break;
         }
     }
-    gs.gif(1, packet);
 }
 
 #[cfg(test)]

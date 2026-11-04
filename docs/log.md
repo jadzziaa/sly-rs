@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: VU1's thread around its programs: unpacks take a vector's words at once, XGKICK hands its packet over from a kept buffer, one program in 16 timed; the prologue 108.8 s (PGO) ([performance-options.md](research/performance-options.md)).
 * **Update**: The GS thread's own work cut by about a third: no clock reads per primitive queued, the pipeline state kept across PRIM writes that change no attributes, PACKED vertex registers set directly, VU1's packets gathered into one job; the prologue 113.5 s (PGO), VU1's thread now the one limit ([performance-options.md](research/performance-options.md)).
 * **Update**: [Performance techniques in rac-rs and paraLLEl-GS](research/performance-prior-art.md) corrected: triangle setup runs on the drawer thread and is 1.5% of it (callgrind on the play dump), not a quarter of the GS thread; it drops to last.
 * **Creation**: [Performance techniques in rac-rs and paraLLEl-GS](research/performance-prior-art.md): what the two use that sly-rs does not yet, ranked; triangle setup on the GPU first.
