@@ -15,6 +15,7 @@
 
 * [A GPU GS on wgpu compute shaders](gpu-gs.md) - The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 * [Performance after the GPU GS](performance-options.md) - Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism. (draft)
+* [Sound and movies (phase 8)](sound-and-movies.md) - The design for phase 8 - an SPU2 under Sony's own 989snd, run on the IOP's clock so that everything the game reads stays exact, its output carried to the host through a resampling buffer, and movies decoded by an emulated IPU under the game's own libmpeg - with what Sly 1 asks of the SPU2 today, the milestones and their checks, and the four decisions it needs. (draft)
 * [A specialising VU1 translator](vu-specialising-translator.md) - Why VU1 still costs 7.8 ns a pair after the float switch, and the design of a translator that emits per-pair code with registers in locals and flag timing resolved at generation time (as rac-rs does), with its budget, steps and checks. (deprecated)
 
 # Research Note

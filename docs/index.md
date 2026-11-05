@@ -12,4 +12,4 @@ Documents of sly-rs, a Rust static recompilation of the PS2 Sly Cooper trilogy (
 
 # Subdirectories
 
-* [research](research/index.md) - 8 Finding, 4 Research Note, 3 Proposal
+* [research](research/index.md) - 8 Finding, 4 Research Note, 4 Proposal

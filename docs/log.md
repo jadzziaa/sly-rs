@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Creation**: [Sound and movies](research/sound-and-movies.md), phase 8's proposal: an SPU2 under Sly's own 989snd, exact on the IOP's clock (989snd reads its voices' envelopes thousands of times); cpal output through a resampling buffer; movies through an emulated IPU; four decisions for the user.
 * **Update**: Phase 7's open items settled: the pad record carries the button mask the disc's libpad reads, so Sly 1 enters pressure mode (0x79, Shock2) as on a console ([sly1-boot.md](research/sly1-boot.md)); Sly's shadow in the opening cutscene matches PCSX2, in the real game and drawn from our GS dump ([sly1-graphics.md](research/sly1-graphics.md)). New-game replay hashes re-recorded.
 * **Creation**: [Memory card saves](research/memory-card.md): the card manager's file system over a PCSX2-compatible image and the card server's calls as Sly 1 makes them; play saves to a card file, recordings keep the card they started from, replays use one only when asked. PCSX2 reads sly-rs's save and sly-rs reads PCSX2's, the same layout byte for byte. Plan phase 7 updated.
 * **Update**: [Performance after the GPU GS](research/performance-options.md): VU1's operand checks are already vectorised in the native build; an integer clamp was slower, and at most about 7% is left there. Left as is.
