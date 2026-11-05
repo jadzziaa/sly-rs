@@ -675,6 +675,7 @@ impl Machine {
                 let effect = self.kernel.syscall(&mut self.cpu, &mut self.mem, &mut hw);
                 drop(hw);
                 while let Some(t) = self.kernel.sif_dma.pop_front() {
+                    self.iop.set_now(self.cpu.cycles / IOP_DIVIDER);
                     let transfer = Transfer {
                         src: t.src,
                         dest: t.dest,

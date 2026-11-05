@@ -20,6 +20,8 @@ pub(crate) struct Pictures<'a> {
     pub(crate) movies: bool,
     /// Draw widescreen (16:9).
     pub(crate) widescreen: bool,
+    /// Sound by the disc's driver (classic) or the Rust one.
+    pub(crate) classic: bool,
 }
 
 #[allow(
@@ -47,6 +49,7 @@ pub(crate) fn run(
     if pictures.widescreen && !sly_common::hooks::use_widescreen(&mut machine, game) {
         anyhow::bail!("{} has no widescreen patch", game.key());
     }
+    sly_common::machine::use_sound(&mut machine, pictures.classic);
     if recompiled.is_none() {
         machine.samples = Some(std::collections::BTreeMap::new());
     }

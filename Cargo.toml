@@ -27,6 +27,7 @@ ps2-iop = { path = "crates/ps2-iop" }
 ps2-ipu = { path = "crates/ps2-ipu" }
 ps2-isa = { path = "crates/ps2-isa" }
 ps2-memcard = { path = "crates/ps2-memcard" }
+ps2-snd989 = { path = "crates/ps2-snd989" }
 ps2-spu2 = { path = "crates/ps2-spu2" }
 sly-common = { path = "crates/sly-common" }
 

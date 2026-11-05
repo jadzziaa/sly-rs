@@ -252,12 +252,12 @@ impl IopMmio for IopHardware {
         } else {
             self.values.get(&address).copied().unwrap_or(0)
         };
-        tracing::trace!(target: "iop::hw", "read{} {address:#010x} = {value:#x}", bytes * 8);
+        tracing::trace!(target: "iop::hw", "cycle {}: read{} {address:#010x} = {value:#x}", self.now, bytes * 8);
         value
     }
 
     fn write(&mut self, address: u32, bytes: u32, value: u32) {
-        tracing::trace!(target: "iop::hw", "write{} {address:#010x} = {value:#x}", bytes * 8);
+        tracing::trace!(target: "iop::hw", "cycle {}: write{} {address:#010x} = {value:#x}", self.now, bytes * 8);
         if SPU2.contains(&address) {
             self.catch_up(self.now);
             // A 32-bit write is a pair of 16-bit registers.

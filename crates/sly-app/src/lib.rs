@@ -222,6 +222,11 @@ enum Command {
         /// Draw widescreen (16:9; the screenshot keeps the GS's pixels).
         #[arg(long)]
         widescreen: bool,
+        /// Sound by the disc's own driver on the emulated IOP (true) or by
+        /// the Rust one (false). Default: classic, until the Rust driver
+        /// covers Sly 1's sound.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        classic: Option<bool>,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -232,9 +237,13 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         fields: u64,
         /// Drive both machines with a replay: its presses, memory card,
-        /// movies and widescreen.
+        /// movies, widescreen and sound driver.
         #[arg(long)]
         replay: Option<PathBuf>,
+        /// Sound by the disc's own driver (true) or the Rust one (false),
+        /// for both machines. Default: the replay's, else classic.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        classic: Option<bool>,
     },
     /// Run VU1 programs recorded with `$SLY_RS_VU_RECORD=PATH,SKIP,COUNT`
     /// through the interpreter and the translated microcode: time both and
@@ -314,6 +323,11 @@ enum Command {
         /// Draw widescreen, 16:9 (as `widescreen = true` under `[play]`).
         #[arg(long)]
         widescreen: bool,
+        /// Sound by the disc's own driver on the emulated IOP (true) or by
+        /// the Rust one (false), as `classic` under `[play]`. A replay
+        /// played first keeps its own.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        classic: Option<bool>,
     },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
@@ -468,6 +482,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             card,
             movies,
             widescreen,
+            classic,
         } => run::run(
             &game,
             fields,
@@ -478,6 +493,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
                 movies,
                 widescreen,
+                classic: classic.unwrap_or(sly_common::config::CLASSIC),
             },
             &card,
             recompiled.filter(|_| !interpret),
@@ -486,7 +502,8 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             game,
             fields,
             replay,
-        } => lockstep::run(&game, fields, replay.as_deref(), recompiled),
+            classic,
+        } => lockstep::run(&game, fields, replay.as_deref(), classic, recompiled),
         Command::Replay {
             path,
             record,
@@ -554,6 +571,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             card,
             no_card,
             widescreen,
+            classic,
         } => sly_common::Game::from_key(&game)
             .ok_or_else(|| anyhow::anyhow!("unknown game {game:?}"))
             .and_then(|game| {
@@ -562,6 +580,9 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 let card = (!no_card).then(|| card.unwrap_or_else(|| config.card(game)));
                 settings.gpu |= gpu;
                 settings.widescreen |= widescreen;
+                if let Some(classic) = classic {
+                    settings.classic = classic;
+                }
                 if let Some(scale) = scale {
                     settings.scale = scale;
                 }

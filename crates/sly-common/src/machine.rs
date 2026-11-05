@@ -77,6 +77,14 @@ fn executable_from(game: Game, path: &Path) -> Result<(Image, Disc), BootError> 
     Ok((Image::from_elf(&id.elf)?, disc))
 }
 
+/// Chooses the sound driver before the game starts: the disc's own 989snd
+/// on the emulated IOP (`classic`), or the Rust one.
+pub fn use_sound(machine: &mut Machine, classic: bool) {
+    if !classic {
+        machine.iop.use_rust_sound();
+    }
+}
+
 /// Boots `game` from its configured disc, ready to run at the entry point.
 ///
 /// # Errors

@@ -58,6 +58,11 @@ pub enum ConfigError {
     },
 }
 
+/// Whether sound is classic (the disc's 989snd on the emulated IOP) when
+/// nothing says otherwise. The Rust driver becomes the default once it
+/// covers Sly 1's sound.
+pub const CLASSIC: bool = true;
+
 /// The loaded configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
@@ -71,11 +76,11 @@ pub struct Config {
 
 /// How `play` behaves.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, default)]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "independent switches in a settings file"
+    reason = "independent switches of a configuration file"
 )]
+#[serde(deny_unknown_fields, default)]
 pub struct Play {
     /// Pause the game while the window is not focused.
     pub pause_on_focus_loss: bool,
@@ -103,6 +108,9 @@ pub struct Play {
     pub movies: bool,
     /// Draw widescreen (16:9), where the game can.
     pub widescreen: bool,
+    /// Play sound with the disc's own driver (989snd on the emulated IOP)
+    /// instead of the Rust one.
+    pub classic: bool,
 }
 
 impl Default for Play {
@@ -117,6 +125,7 @@ impl Default for Play {
             volume: 100,
             movies: true,
             widescreen: false,
+            classic: CLASSIC,
         }
     }
 }

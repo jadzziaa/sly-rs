@@ -180,8 +180,9 @@ fn emulate(
         mut saving,
         movies,
         widescreen,
+        classic,
     } = start(options)?;
-    let widescreen = features(&mut machine, options.game, movies, widescreen);
+    let widescreen = prepare(&mut machine, options.game, (movies, widescreen), classic);
     shared.wide.store(widescreen, Ordering::Relaxed);
     machine.iop.insert_card(card.clone());
     let speaker = speaker(options.settings.volume);
@@ -270,19 +271,25 @@ fn emulate(
             &mut machine,
             &recorder,
             card.as_ref(),
-            movies,
+            (movies, classic),
             widescreen,
         )?;
     }
     Ok(())
 }
 
-/// Lets the game play its movies and draw widescreen, as asked; returns
-/// whether it draws widescreen.
-fn features(machine: &mut ps2_ee::Machine, game: Game, movies: bool, widescreen: bool) -> bool {
+/// Movies on or off, widescreen and the sound driver, before the game
+/// starts; returns whether the game draws widescreen.
+fn prepare(
+    machine: &mut ps2_ee::Machine,
+    game: Game,
+    (movies, widescreen): (bool, bool),
+    classic: bool,
+) -> bool {
     if movies {
         sly_common::hooks::play_movies(machine, game);
     }
+    sly_common::machine::use_sound(machine, classic);
     widescreen && sly_common::hooks::use_widescreen(machine, game)
 }
 
@@ -298,9 +305,13 @@ struct Start {
     movies: bool,
     /// Whether the game draws widescreen: likewise.
     widescreen: bool,
+    /// Whether sound is classic: as the replay had it, or as `[play]`
+    /// says.
+    classic: bool,
 }
 
-/// What the session starts from: a replay's input, card and movies, or the
+/// What the session starts from: a replay's input, card, movies and sound,
+/// or the
 /// configured card and settings.
 fn start(options: &Options) -> Result<Start> {
     Ok(match &options.replay {
@@ -321,6 +332,7 @@ fn start(options: &Options) -> Result<Start> {
                 saving: None,
                 movies: replay.movies,
                 widescreen: replay.widescreen,
+                classic: replay.classic,
             }
         }
         None => Start {
@@ -330,6 +342,7 @@ fn start(options: &Options) -> Result<Start> {
             saving: options.card.clone().map(CardSaver::new),
             movies: options.settings.movies,
             widescreen: options.settings.widescreen,
+            classic: options.settings.classic,
         },
     })
 }
@@ -417,7 +430,7 @@ fn save(
     machine: &mut ps2_ee::Machine,
     recorder: &Recorder,
     card: Option<&ps2_memcard::Card>,
-    movies: bool,
+    (movies, classic): (bool, bool),
     widescreen: bool,
 ) -> Result<()> {
     let fields = machine.cpu.cycles / FIELD_CYCLES;
@@ -442,6 +455,7 @@ fn save(
         card,
         movies,
         widescreen,
+        classic,
         inputs: recorder.inputs().to_vec(),
         checkpoints: vec![Checkpoint {
             field: fields,

@@ -32,6 +32,7 @@ pub mod kernel;
 pub mod loadfile;
 pub mod mcserv;
 pub mod pad;
+mod snd;
 pub mod spu2;
 
 pub use crate::core::{GuestServer, IopCore, Module, RpcRequest, Started};
@@ -39,6 +40,51 @@ pub use crate::core::{GuestServer, IopCore, Module, RpcRequest, Started};
 /// Modules the IOP side emulates in Rust (their RPC servers): loading one
 /// only records it.
 const RUST_MODULES: &[&str] = &["sio2man", "padman", "mcman", "mcserv"];
+
+/// The sound modules the Rust 989snd replaces, when it plays: `libsd` and
+/// 989snd itself.
+const SOUND_MODULES: &[&str] = &["Sound_Device_Library", "989snd_Library"];
+
+/// IOP cycles the disc's 989snd takes to answer a call (its RPC thread
+/// runs at the IOP's next slice: 2,343 cycles in Sly 1's traces).
+const CALL_LATENCY: u64 = 2343;
+/// IOP cycles it takes to load a bank (the disc read: 222,573 to 276,460
+/// in Sly 1's traces).
+const BANK_LATENCY: u64 = 250_000;
+
+/// Whether `sid` is one of 989snd's servers.
+fn is_989snd(sid: u32) -> bool {
+    sid == ps2_snd989::SERVER || sid == ps2_snd989::LOADER
+}
+
+/// Logs a call to 989snd: the commands of a batch (function 0x4D: a
+/// count, then `{id: u16, bytes: u16, data}` each), or a single call's
+/// words.
+fn trace_989snd(mem: &Memory, buffer: u32, sid: u32, function: u32, size: u32) {
+    if !tracing::enabled!(target: "iop::snd989", tracing::Level::DEBUG) {
+        return;
+    }
+    if function == 0x4D {
+        let mut at = buffer + 4;
+        for _ in 0..iop_word(mem, buffer).min(256) {
+            let head = iop_word(mem, at);
+            let (id, len) = (
+                head & 0xFFFF,
+                u32::try_from((head >> 16) as i16).unwrap_or(0),
+            );
+            let words: Vec<u32> = (0..len.div_ceil(4))
+                .map(|k| iop_word(mem, at + 4 + 4 * k))
+                .collect();
+            tracing::debug!(target: "iop::snd989", "batch: command {id} {words:x?}");
+            at += 4 + len.div_ceil(4) * 4;
+        }
+    } else {
+        let words: Vec<u32> = (0..size.div_ceil(4).min(16))
+            .map(|k| iop_word(mem, buffer + 4 * k))
+            .collect();
+        tracing::debug!(target: "iop::snd989", "server {sid:#x}: command {function} {words:x?}");
+    }
+}
 
 /// Where module files come from: `host:` paths (the folder a test program
 /// runs from) and `cdrom0:` paths (the disc).
@@ -205,6 +251,10 @@ pub struct Iop {
     files: Option<Box<dyn Files>>,
     loads: BTreeMap<u64, PendingLoad>,
     next_load: u64,
+    /// Sound is played by the Rust 989snd, not the disc's driver.
+    rust_sound: bool,
+    /// The machine's time (IOP cycles) as it hands over a transfer.
+    now: u64,
 }
 
 impl Default for Iop {
@@ -230,7 +280,33 @@ impl Iop {
             files: None,
             loads: BTreeMap::new(),
             next_load: 0,
+            rust_sound: false,
+            now: 0,
         }
+    }
+
+    /// Plays sound with the Rust 989snd instead of the disc's driver: the
+    /// sound modules the game loads are only recorded, and the driver's
+    /// servers are answered in Rust. Call before the game loads them.
+    pub fn use_rust_sound(&mut self) {
+        if !self.rust_sound {
+            self.rust_sound = true;
+            for sid in [ps2_snd989::SERVER, ps2_snd989::LOADER] {
+                self.register(&[sid], Box::new(Unknown { sid }));
+            }
+        }
+    }
+
+    /// Whether the Rust 989snd plays sound.
+    #[must_use]
+    pub fn rust_sound(&self) -> bool {
+        self.rust_sound
+    }
+
+    /// The machine's time, in IOP cycles, before it hands over SIF
+    /// transfers: what the Rust driver's calls happen at.
+    pub fn set_now(&mut self, cycles: u64) {
+        self.now = cycles;
     }
 
     /// Registers the pad servers (`padman`) and the memory card server
@@ -293,6 +369,9 @@ impl Iop {
     /// Something the IOP emulation does not support yet.
     pub fn run(&mut self, mem: &mut Memory, until: u64) -> Result<(), String> {
         self.core.run_until(&mut mem.regions, until)?;
+        while let Some((_, packet, extra)) = self.core.sound_ready.pop_front() {
+            self.send(packet, extra);
+        }
         while let Some(done) = self.core.started.pop_front() {
             if let Some(load) = self.loads.remove(&done.token) {
                 self.answer_load(&load, done.id.cast_signed(), done.result);
@@ -301,6 +380,12 @@ impl Iop {
         while let Some((request, data)) = self.core.answered.pop_front() {
             let ([a, b, c, d], recv_buf, recv_size) = request.reply;
             tracing::debug!(target: "iop::rpc", "{:#x} function {:#x} answered at IOP cycle {}: {recv_size} bytes from {data:#x} ({:#x}...) to EE {recv_buf:#x}", request.sid, request.function, self.core.cpu.cycles, iop_word(mem, data));
+            if is_989snd(request.sid) {
+                let words: Vec<u32> = (0..(recv_size / 4).min(40))
+                    .map(|k| iop_word(mem, data + 4 * k))
+                    .collect();
+                tracing::debug!(target: "iop::snd989", "reply to {} {words:x?}", request.function);
+            }
             let extra = (recv_buf != 0 && recv_size > 0 && data != 0).then(|| {
                 let bytes = (0..recv_size).map(|i| iop_byte(mem, data + i)).collect();
                 (recv_buf, bytes)
@@ -398,8 +483,16 @@ impl Iop {
         let Some(bytes) = self.files.as_ref().and_then(|f| f.read(&path)) else {
             return false;
         };
-        let name = irx::Irx::parse(&bytes).map(|m| m.name).unwrap_or_default();
+        let module = irx::Irx::parse(&bytes).ok();
+        let name = module.as_ref().map(|m| m.name.clone()).unwrap_or_default();
         if RUST_MODULES.contains(&name.as_str()) {
+            return false;
+        }
+        if self.rust_sound && SOUND_MODULES.contains(&name.as_str()) {
+            if name == SOUND_MODULES[1] {
+                self.core
+                    .start_sound(module.as_ref().map(|m| m.image.as_slice()));
+            }
             return false;
         }
         let load = PendingLoad {
@@ -543,6 +636,17 @@ impl Iop {
             words[7], words[8], words[9], words[10], words[11], words[13],
         );
         tracing::debug!(target: "iop::rpc", "call {server:#x} function {function:#x} at IOP cycle {}", self.core.cpu.cycles);
+        if is_989snd(server) {
+            let buffer = self
+                .core
+                .servers
+                .get(&server)
+                .map(|g| g.buffer)
+                .or_else(|| self.sids.get(&server).map(|&(_, b)| b));
+            if let Some(buffer) = buffer {
+                trace_989snd(mem, buffer, server, function, send_size);
+            }
+        }
         if self.core.request(RpcRequest {
             sid: server,
             function,
@@ -565,37 +669,59 @@ impl Iop {
         if server == loadfile::LOADFILE && function == 0 && self.load_module(words, &data, mem) {
             return;
         }
-        let reply = self.servers[index].call(
-            &Call {
-                sid: server,
-                function,
-                data: &data,
-                reply_size: recv_size,
-            },
-            mem,
-        );
+        let rust_sound = self.rust_sound && is_989snd(server);
+        let reply = if rust_sound {
+            // The driver's state is brought to the EE's time first: its
+            // ticks due by then run, at their own cycles.
+            let now = self.now.max(self.core.cpu.cycles);
+            if let Err(error) = self.core.run_until(&mut mem.regions, now) {
+                tracing::warn!(target: "iop::snd989", "{error}");
+            }
+            self.core.sound_call(server, function, &data, recv_size)
+        } else {
+            self.servers[index].call(
+                &Call {
+                    sid: server,
+                    function,
+                    data: &data,
+                    reply_size: recv_size,
+                },
+                mem,
+            )
+        };
         let extra = (recv_buf != 0 && recv_size > 0).then(|| {
             let mut bytes = reply;
             bytes.resize(recv_size as usize, 0);
             (recv_buf, bytes)
         });
-        self.send(
-            vec![
-                0,
-                0,
-                cid::RPC_END,
-                0,
-                words[4],
-                words[5],
-                words[6],
-                client,
-                cid::RPC_CALL,
-                server,
-                0,
-                0,
-            ],
-            extra,
-        );
+        let packet = vec![
+            0,
+            0,
+            cid::RPC_END,
+            0,
+            words[4],
+            words[5],
+            words[6],
+            client,
+            cid::RPC_CALL,
+            server,
+            0,
+            0,
+        ];
+        if rust_sound {
+            // The disc's driver answers after its RPC thread has run (a
+            // bank after its disc read): the reply waits as long.
+            let latency = if server == ps2_snd989::LOADER {
+                BANK_LATENCY
+            } else {
+                CALL_LATENCY
+            };
+            self.core
+                .sound_replies
+                .push_back((self.core.cpu.cycles + latency, packet, extra));
+        } else {
+            self.send(packet, extra);
+        }
     }
 
     fn send(&mut self, mut packet: Vec<u32>, extra: Option<(u32, Vec<u8>)>) {

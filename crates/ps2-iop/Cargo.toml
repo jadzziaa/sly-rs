@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 ps2-core.workspace = true
 ps2-memcard.workspace = true
+ps2-snd989.workspace = true
 ps2-spu2.workspace = true
 tracing.workspace = true
 
