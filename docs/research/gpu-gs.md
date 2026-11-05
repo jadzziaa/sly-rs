@@ -3,7 +3,7 @@ type: Proposal
 title: A GPU GS on wgpu compute shaders
 description: The design for sly-rs's GPU renderer - the GS's local memory in a GPU buffer and the pixel pipeline in compute shaders, as paraLLEl-GS does, sharing one integer arithmetic with the software GS so that the two can be compared bit for bit on GS dumps - with the facts checked, the milestones and their gates, and the decision it needs.
 tags: [proposal, gs, gpu, wgpu, compute, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T23:17:56Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T02:43:24Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: parallel-gs
@@ -18,6 +18,9 @@ sources:
   - id: measurements
     resource: sly-rs gs-replay and replay --timing on the user's Sly 1 dumps and prologue recording; vulkaninfo on the reference machine, 2026-11-03
     title: Measurements on the reference machine
+  - id: corridor
+    resource: the user's screen capture of play at 3× and their prologue recording (fields 9,000-9,340, GS dump); gs-replay at 3× with probes, 2026-11-04
+    title: The beige line in the corridor
   - id: user
     resource: human:august, 2026-11-03
     title: The user's direction (start the GPU renderer once software is near NTSC; weaker machines in mind; shared arithmetic agreed)
@@ -280,6 +283,24 @@ and three cores meanwhile, the same for both):
 4× still takes longer than a field per field; the exact depth is now the
 largest part of the planes' cost.
 
+**Known artifact** (2026-11-04): in the first level's corridor (the
+"Also Starring" run), a thin beige line flickers at the top edge of a
+baseboard at 2× and above, in about a quarter of the fields; plane 0, and
+so every picture at 1×, is clean.[^corridor] It is not a drawing error:
+with exact interpolation and textures read from their own plane, the
+GPU's planes equal the software GS drawing the same primitives moved to
+each plane's offset, for all 340 fields. The line is the baseboard's own
+bright texels, which a thin trim strip on top of it hides at 1×,
+carried over by the game's frame blend (the previous field mixed in from
+about one and a half lines lower): leaving out the baseboard or the blend
+removes it, leaving out the strip makes it much worse. Three remedies
+made no difference and were not kept: extra planes taking a heavily
+minified texture's coordinates at the pixel's own sample; triangles
+thinner than a pixel drawn into every plane as into the first
+(paraLLEl-GS's snapped rasterisation); extra planes reading textures
+drawn into from plane 0. Left as is at the user's choice; a per-sample
+trace on the GPU would be the next step.
+
 ## Facts checked
 
 - **Sly never reads GS memory back.** On six dumps (ours and PCSX2's, the
@@ -346,4 +367,5 @@ PCSX2 parity improved both times.
 [^parallel-gs-repo]: paraLLEl-GS (LGPL-3.0)
 [^wgpu-int64]: wgpu 0.20.0 release notes (SHADER_INT64)
 [^measurements]: Measurements on the reference machine
+[^corridor]: The beige line in the corridor
 [^user]: The user's direction
