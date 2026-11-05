@@ -68,8 +68,11 @@ Commands so far:
   or Metal); `replay --gpu` and `gs-replay --gpu-only` do the same, and
   `gs-replay --gpu` draws on both and compares them after every field.
   With the GPU, `--scale 2` (to 4, or `scale` under `[play]`) draws at
-  twice the PS2's resolution or more, for a sharper picture. The
-  recompiled binary below plays faster in busy scenes.
+  twice the PS2's resolution or more, for a sharper picture.
+  `--widescreen` (or `widescreen = true` under `[play]`) widens the game's
+  camera to 16:9 and keeps the interface at its 4:3 proportions, anchored
+  to the screen's edges as on a 4:3 screen. The recompiled binary below
+  plays faster in busy scenes.
 - `sly-rs format-card card.ps2` writes a freshly formatted 8 MB memory
   card image as PCSX2 keeps them (`--check` reads one and reports on it).
 - `cargo xtask recomp sly1 --build` recompiles Sly 1 into Rust and builds
