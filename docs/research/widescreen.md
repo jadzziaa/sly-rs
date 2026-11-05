@@ -3,7 +3,7 @@ type: Finding
 title: Widescreen in Sly 1
 description: 'How sly-rs makes Sly 1 draw at 16:9 behind an option - the camera''s aspect ratio set in one place, changed by an instruction patch the interpreter runs while memory keeps the game''s bytes - and the checks: off leaves replays exact, on stays equal in lockstep, widens the 3D view, and keeps the 2D interface at 4:3 by narrowing its GIF packets.'
 tags: [widescreen, enhancement, patch, camera, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T11:25:35Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T22:11:08Z }
 sources:
   - id: disasm
     resource: sly-rs disasm sly1 over the whole .text section (SCUS-97198), 2026-11-05
@@ -17,6 +17,9 @@ sources:
   - id: runs
     resource: sly-rs replay and lockstep on games/sly1/replays/new-game.toml and a copy with widescreen = true, 2026-11-05
     title: The checks
+  - id: logo-dump
+    resource: a GS dump of the user's widescreen recording game1.toml at fields 19,619-19,620 (the fade to Sly's logo), its flat tags and their vertices; pictures every 60 fields of the whole recording before and after the change, 2026-11-05
+    title: The fade to the logo
   - id: anchors
     resource: human:august, 2026-11-05
     title: 'The user''s choices: the binocucom''s frame stays stretched; the portraits and captions sit as in 4:3 relative to the screen''s edges'
@@ -130,6 +133,29 @@ binocucom's outline and tick band) stays across 16:9, and so does the
 depth-tested 3D world; frames not shown (textures drawn into) are left
 alone.
 
+One kind of full-width 2D has to follow what it surrounds: the fade at the
+end of the prologue, as Sly jumps into the van, closes on his logo. It is
+one triangle strip over the whole frame with a rectangular hole cut to the
+logo's box, followed in the same transfer by the logo itself (a quad and
+its outline's triangles).[^logo-dump] The logo narrowed and the hole did
+not, so two bars of the scene showed beside it (9 pixels each at field
+19,620 of the user's recording; never on hardware). So when a full-width
+tag has vertices on both the left and the right side of a narrowed tag's
+box (within a pixel, within its rows, away from the frame's edges), those
+vertices move with it; its others stay, so it still spans the frame.
+
+- Matched against each tag's own box, not its block's: the logo's block
+  also takes in a piece to its right, and matching the block left the
+  right-hand bar.
+- Both sides, because the binocucom's lower fill has a corner on each
+  portrait frame's inner corner (x 159 and 479, y 157): matched on one
+  side, it moved and poked a dark wedge out above the left portrait.
+- Over the whole recording (a picture every 60 fields, before and after),
+  only the fade's pictures changed. Pictures after the save notice
+  (field 26,220 on) differ by one level in 8 to 20 pixels between runs of
+  the same build, with or without the change; the machine's hash is the
+  same.
+
 - Pictures: captions, dialogue text, portraits (models, frames, static),
   the binocucom's side indicators and the credits keep their 4:3
   proportions; the portraits and captions sit where they sit in 4:3
@@ -146,4 +172,5 @@ alone.
 [^pnach]: pcsx2_patches: the community widescreen patch for Sly 1 and 2 (lui 0x3FA6 to 0x3FDD)
 [^runs]: The checks
 [^hud-dump]: How Sly 1's 2D reaches the GS
+[^logo-dump]: The fade to the logo
 [^anchors]: The user's choices: the binocucom's frame stays stretched; the portraits and captions sit as in 4:3 relative to the screen's edges

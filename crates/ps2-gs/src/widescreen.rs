@@ -20,9 +20,10 @@
 //! else narrows towards the frame's centre (the text box, the credits).
 //!
 //! Depth-tested 3D in the whole frame, and flat things that span it (screen
-//! passes, fades, the binocucom's outline), stay as they are; so does
-//! anything drawn to a frame the display does not show (textures drawn
-//! into, such as shadows).
+//! passes, fades, the binocucom's outline), stay as they are, except for
+//! vertices around a narrowed tag's box (a fade's hole cut to a logo),
+//! which move with it; so does anything drawn to a frame the display does
+//! not show (textures drawn into, such as shadows).
 //!
 //! A tag is judged as a whole, since its vertices may share primitives (a
 //! strip); a tag carried over from an earlier transfer is left alone.
@@ -251,8 +252,10 @@ impl Gs {
         };
         let mut at = self.paths[path].remaining();
         let mut vertices = Vec::new();
-        // The transfer's flat tags, judged together once it is walked.
+        // The transfer's flat tags, judged together once it is walked, and
+        // those that span the frame.
         let mut pieces: Vec<Piece> = Vec::new();
+        let mut fills: Vec<Piece> = Vec::new();
         while at < data.len() {
             let tag = data[at];
             at += 1;
@@ -324,12 +327,15 @@ impl Gs {
             } else if flat && !vertices.is_empty() {
                 let piece = Piece::new(data, &vertices);
                 let spans = piece.bounds[0] <= EDGE && piece.bounds[1] >= vertices[0].width - EDGE;
-                if !spans {
+                if spans {
+                    fills.push(piece);
+                } else {
                     pieces.push(piece);
                 }
             }
         }
-        narrow_pieces(data, &mut pieces);
+        let moved = narrow_pieces(data, &mut pieces);
+        follow_pieces(data, &fills, &moved);
     }
 }
 
@@ -371,8 +377,9 @@ impl Piece {
 
 /// Narrows a transfer's flat pieces by blocks: pieces near each other
 /// (directly or through others) share the anchor of their joint bounds, so
-/// that a caption's lines stay together.
-fn narrow_pieces(data: &mut [u128], pieces: &mut [Piece]) {
+/// that a caption's lines stay together. Returns each piece's bounds as
+/// they were, and the anchor it moved by.
+fn narrow_pieces(data: &mut [u128], pieces: &mut [Piece]) -> Vec<([i64; 4], Anchor)> {
     fn root(pieces: &[Piece], mut k: usize) -> usize {
         while pieces[k].group != k {
             k = pieces[k].group;
@@ -390,6 +397,7 @@ fn narrow_pieces(data: &mut [u128], pieces: &mut [Piece]) {
             }
         }
     }
+    let mut moved = Vec::new();
     for k in 0..pieces.len() {
         let group = root(pieces, k);
         let (x0, x1) = pieces
@@ -400,7 +408,45 @@ fn narrow_pieces(data: &mut [u128], pieces: &mut [Piece]) {
                 (lo.min(p.bounds[0]), hi.max(p.bounds[1]))
             });
         let width = pieces[k].vertices[0].width;
-        narrow_tag(data, &pieces[k].vertices, anchor(x0, x1, width));
+        let anchor = anchor(x0, x1, width);
+        narrow_tag(data, &pieces[k].vertices, anchor);
+        moved.push((pieces[k].bounds, anchor));
+    }
+    moved
+}
+
+/// Moves the vertices of flat tags that span the frame which lie on a
+/// narrowed piece's sides with that piece, when the fill has vertices on
+/// both its left and right sides: a fill drawn around a piece, its hole cut
+/// to the piece's box (Sly 1's fade to its logo), keeps closing on it.
+/// Vertices elsewhere stay, so the fill still spans the frame; a fill that
+/// only meets a piece on one side (the binocucom's, at the portraits' frames)
+/// stays as it is.
+fn follow_pieces(data: &mut [u128], fills: &[Piece], pieces: &[([i64; 4], Anchor)]) {
+    let near = |a: i64, b: i64| (a - b).abs() <= 16;
+    for fill in fills {
+        let width = fill.vertices[0].width;
+        // Vertices at the frame's edges stay there.
+        let inside = |x: i64| x > EDGE && x < width - EDGE;
+        let at: Vec<_> = fill.vertices.iter().map(|v| v.place(data)).collect();
+        let mut moved = vec![false; at.len()];
+        for &(b, anchor) in pieces {
+            let on = |side: i64| -> Vec<bool> {
+                at.iter()
+                    .map(|&[x, y]| inside(x) && near(x, side) && y >= b[2] - 16 && y <= b[3] + 16)
+                    .collect()
+            };
+            let (left, right) = (on(b[0]), on(b[1]));
+            if !left.contains(&true) || !right.contains(&true) {
+                continue;
+            }
+            for (k, v) in fill.vertices.iter().enumerate() {
+                if (left[k] || right[k]) && !moved[k] {
+                    narrow_tag(data, std::slice::from_ref(v), anchor);
+                    moved[k] = true;
+                }
+            }
+        }
     }
 }
 
@@ -429,12 +475,19 @@ mod tests {
 
     /// The same on line `y`.
     fn sprites_at(xs: &[u32], y: u32) -> Vec<u128> {
-        let n = xs.len() as u128;
+        let points: Vec<_> = xs.iter().map(|&x| (x, y)).collect();
+        sprites_through(&points)
+    }
+
+    /// A PACKED tag of XYZ2 vertices at `points` (pixels, offset 0).
+    fn sprites_through(points: &[(u32, u32)]) -> Vec<u128> {
+        let n = points.len() as u128;
         let tag = n | 1 << 15 | 1 << 46 | 6 << 47 | 1 << 60 | 5 << 64;
         let mut data = vec![tag];
         data.extend(
-            xs.iter()
-                .map(|&x| u128::from(x * 16) | u128::from(y * 16) << 32),
+            points
+                .iter()
+                .map(|&(x, y)| u128::from(x * 16) | u128::from(y * 16) << 32),
         );
         data
     }
@@ -511,6 +564,37 @@ mod tests {
         let mut data = sprites_at(&[62, 162], 115);
         gs.narrow(3, &mut data);
         assert_eq!(x(data[1]), narrowed(62 * 16, 640 * 16, Anchor::Left));
+    }
+
+    #[test]
+    fn a_fill_around_a_block_closes_on_it() {
+        let gs = gs();
+        // A frame around a hole at x 280-360, y 90-130 (Sly 1's fade to its
+        // logo), then the logo in the hole.
+        let mut data = sprites_through(&[
+            (0, 0),
+            (280, 90),
+            (640, 0),
+            (360, 90),
+            (640, 224),
+            (360, 130),
+            (0, 224),
+            (280, 130),
+        ]);
+        data.extend(sprites_through(&[(280, 90), (360, 130)]));
+        gs.narrow(3, &mut data);
+        let x = |q: u128| (q & 0xFFFF) as u32 / 16;
+        // The logo narrows to 290-350, and the hole with it.
+        assert_eq!((x(data[10]), x(data[11])), (290, 350));
+        let xs: Vec<_> = data[1..9].iter().map(|&q| x(q)).collect();
+        assert_eq!(xs, [0, 290, 640, 350, 640, 350, 0, 290]);
+        // A fill that meets a piece on one side only (the binocucom's at a
+        // portrait's frame) stays.
+        let mut data = sprites_through(&[(0, 0), (640, 0), (0, 160), (160, 160)]);
+        data.extend(sprites_through(&[(0, 160), (160, 220)]));
+        gs.narrow(3, &mut data);
+        assert_eq!((x(data[3]), x(data[4])), (0, 160));
+        assert_eq!(x(data[7]), 120);
     }
 
     #[test]
