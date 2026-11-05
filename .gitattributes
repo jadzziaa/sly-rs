@@ -1,0 +1,2 @@
+# Sources keep LF line endings on every system (rustfmt checks for them).
+* text=auto eol=lf
