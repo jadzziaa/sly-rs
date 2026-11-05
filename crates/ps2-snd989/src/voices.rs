@@ -596,6 +596,13 @@ impl Voices {
         [self.rec[v].l, self.rec[v].r]
     }
 
+    /// The note a voice plays its tone at (`snd_SetSoundPitch`), in
+    /// semitones and 1/128ths.
+    pub(crate) fn set_note(&mut self, v: usize, note: u8, fine: u8) {
+        self.rec[v].centre = note;
+        self.rec[v].centre_fine = fine;
+    }
+
     /// A voice's bend and pitch modulation changed.
     pub(crate) fn repitch(&mut self, v: usize, bend: i16, pitch_mod: i16, paused: bool) {
         self.rec[v].bend = bend;

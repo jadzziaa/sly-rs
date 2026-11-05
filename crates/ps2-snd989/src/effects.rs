@@ -104,6 +104,13 @@ struct Handler {
     bend_base: i16,
     pmod_off: i16,
     pmod_base: i16,
+    /// The note the tones play at, and its fine tuning (60 and 0 unless
+    /// `snd_SetSoundPitch` says otherwise).
+    note: u8,
+    note_fine: u8,
+    /// A volume fade (`snd_AutoVol`): the target scale, the step per
+    /// tick, and whether the sound stops at the end.
+    fade: Option<(i32, i32, bool)>,
     wait: i16,
     /// The grain to run; -1 when the program has finished.
     idx: i16,
@@ -324,6 +331,9 @@ impl Effects {
             bend_base: a.bend,
             pmod_off: 0,
             pmod_base: a.pitch_mod,
+            note: 60,
+            note_fine: 0,
+            fade: None,
             wait: sb.grains[0].delay as i16,
             idx: 0,
             regs,
@@ -754,8 +764,8 @@ impl Effects {
             lr,
             tone_volume,
             tone_pan,
-            centre: 60,
-            centre_fine: 0,
+            centre: h.note,
+            centre_fine: h.note_fine,
             bend: h.bend,
             pitch_mod: h.pitch_mod,
             tone,
@@ -771,18 +781,26 @@ impl Effects {
         self.reapply_pitch(voices, s);
     }
 
-    fn set_pmod(&mut self, voices: &mut Voices, s: usize, value: i16) {
-        self.slots[s].pmod_base = value;
-        self.reapply_pitch(voices, s);
-    }
-
     fn reapply_pitch(&mut self, voices: &mut Voices, s: usize) {
         let h = &mut self.slots[s];
         h.bend = (i32::from(h.bend_base) + i32::from(h.bend_off)).clamp(-0x8000, 0x7FFF) as i16;
         h.pitch_mod = h.pmod_base.wrapping_add(h.pmod_off);
         let (bend, pm, paused) = (h.bend, h.pitch_mod, h.paused());
+        let (note, fine) = (h.note, h.note_fine);
         for v in mask_voices(h.voices) {
+            voices.set_note(v, note, fine);
             voices.repitch(v, bend, pm, paused);
+        }
+    }
+
+    /// `snd_SetSoundPitch(handle, pitch)`: the note the sound's tones play
+    /// at, `pitch` in 1/128ths of a semitone (60 << 7 is a tone's own
+    /// pitch); its voices change at once.
+    pub(crate) fn set_note(&mut self, voices: &mut Voices, handle: u32, pitch: u32) {
+        if let Some(s) = self.find(handle) {
+            self.slots[s].note = (pitch >> 7) as u8;
+            self.slots[s].note_fine = (pitch & 0x7F) as u8;
+            self.reapply_pitch(voices, s);
         }
     }
 
@@ -824,13 +842,6 @@ impl Effects {
             for c in self.slots[s].children.clone() {
                 self.update_volume(voices, c, vol, pan);
             }
-        }
-    }
-
-    /// `snd_SetSoundPitchModifier` and the like: the pitch modulation.
-    pub(crate) fn set_pitch_mod(&mut self, voices: &mut Voices, handle: u32, value: i16) {
-        if let Some(s) = self.find(handle) {
-            self.set_pmod(voices, s, value);
         }
     }
 
@@ -982,8 +993,43 @@ impl Effects {
         false
     }
 
+    /// `snd_AutoVol(handle, volume, step, mode)`: the sound's volume scale
+    /// moves to `volume` (0..0x400) by `step` a tick; a negative volume
+    /// fades to silence and stops the sound. Sly 1 sends it once in its
+    /// first levels, (-4, 120, 2), and the disc's driver then silences the
+    /// sound within nine ticks and keys it off, which this follows; the
+    /// other modes are not known and are taken the same way.
+    pub(crate) fn auto_volume(&mut self, handle: u32, volume: i32, step: i32) {
+        if let Some(s) = self.find(handle) {
+            self.slots[s].fade = Some((volume.clamp(0, 0x400), step.max(1), volume < 0));
+        }
+    }
+
+    /// The volume fades, a tick on.
+    fn fades(&mut self, voices: &mut Voices, rng: &mut R250) {
+        for s in self.order.clone() {
+            let Some((target, step, stops)) = self.slots[s].fade else {
+                continue;
+            };
+            let scale = i32::from(self.slots[s].scale);
+            let next = if scale > target {
+                (scale - step).max(target)
+            } else {
+                (scale + step).min(target)
+            };
+            self.update_volume(voices, s, next, -2);
+            if next == target {
+                self.slots[s].fade = None;
+                if stops {
+                    self.stop_path(voices, rng, s, false);
+                }
+            }
+        }
+    }
+
     /// Every running handler, in start order (paused ones wait).
     pub(crate) fn tick(&mut self, voices: &mut Voices, rng: &mut R250) {
+        self.fades(voices, rng);
         for s in self.order.clone() {
             if self.slots[s].in_use() && !self.slots[s].paused() && self.run_handler(voices, rng, s)
             {

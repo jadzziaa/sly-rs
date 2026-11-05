@@ -58,9 +58,9 @@ impl PlayVag {
     }
 }
 
-/// A stream playing.
+/// One channel of a stream: a file, its ring and its voice.
 #[derive(Clone, Debug)]
-struct Stream {
+struct Channel {
     /// Where the file starts on the disc, in bytes.
     file: u64,
     /// The file's length: header and data.
@@ -71,21 +71,31 @@ struct Stream {
     ring: u32,
     half: u32,
     voice: usize,
-    group: i8,
-    volume: i32,
+    /// The channel's pan: 270 degrees for the left of a stereo stream, 90
+    /// for its right, 0 for a mono one.
     pan: i32,
     pitch: u16,
-    held: bool,
     /// The half the voice is in.
     playing: u32,
-    /// Ticks since the key-on (the first poll comes a tick after it).
-    age: u32,
     /// The last of the data is in the ring.
     last_queued: bool,
     /// The half the voice is not in holds data to play next.
     other_ready: bool,
+    /// Its voice has stopped after the last data.
+    ended: bool,
 }
 
+/// A stream playing: one channel, or two for a stereo stream.
+#[derive(Clone, Debug)]
+struct Stream {
+    channels: Vec<Channel>,
+    group: i8,
+    volume: i32,
+    pan: i32,
+    held: bool,
+    /// Ticks since the key-on (the first poll comes a tick after it).
+    age: u32,
+}
 /// The streams.
 pub(crate) struct Streams {
     /// The rings `snd_InitVAGStreamingEx` set up, and the bytes of each.
@@ -159,7 +169,7 @@ impl Streams {
     /// Reads `bytes` of the file from `at` into the ring at `to`, the last
     /// block flagged to repeat (the voice jumps to its loop address) or,
     /// at the end of the data, to end.
-    fn fill(bus: &mut dyn Bus, s: &mut Stream, to: u32) {
+    fn fill(bus: &mut dyn Bus, s: &mut Channel, to: u32) {
         let at = u64::from(s.fed);
         let want = s.half.min(s.length.saturating_sub(s.fed));
         let start = s.file + at;
@@ -193,60 +203,97 @@ impl Streams {
         bus.upload(to, &data);
     }
 
-    /// `snd_PlayVAGStreamByLoc`: the stream's handle, or 0.
+    /// `snd_PlayVAGStreamByLoc`: the stream's handle, or 0. A stereo
+    /// stream (a second file for the right) takes two rings, a mono one
+    /// one; without as many free, the stream does not start (Sly 1 sets up
+    /// one ring, so its driver refuses stereo, and so does this one).
     pub(crate) fn play(&mut self, bus: &mut dyn Bus, voices: &mut Voices, a: &PlayVag) -> u32 {
-        if a.lba_right != 0 {
-            tracing::warn!(target: "snd989", "stereo streams are not supported yet (lba {:#x}, {:#x})", a.lba, a.lba_right);
-        }
         let Some(slot) = self.slots.iter().position(Option::is_none) else {
             return 0;
         };
-        let Some(&ring) = self.rings.get(slot.min(self.rings.len().saturating_sub(1))) else {
-            return 0;
+        let files: Vec<(u32, i32)> = if a.lba_right == 0 {
+            vec![(a.lba, 0)]
+        } else {
+            vec![(a.lba, 0x10E), (a.lba_right, 0x5A)]
         };
-        if self.slots.iter().flatten().any(|s| s.ring == ring) {
+        let busy: Vec<u32> = self
+            .slots
+            .iter()
+            .flatten()
+            .flat_map(|s| s.channels.iter().map(|c| c.ring))
+            .collect();
+        let free: Vec<u32> = self
+            .rings
+            .iter()
+            .copied()
+            .filter(|r| !busy.contains(r))
+            .take(files.len())
+            .collect();
+        if free.len() < files.len() {
             return 0;
         }
-        let Some(header) = bus.sectors(a.lba, 1) else {
-            return 0;
-        };
-        let Some((data_bytes, rate)) = vag_header(&header, a.offset as usize) else {
-            tracing::warn!(target: "snd989", "stream at lba {:#x}: no VAG header", a.lba);
-            return 0;
-        };
-        let Some(granted) = voices.alloc_stream(a.group) else {
-            return 0;
-        };
-        let pitch = ((u64::from(rate) * 4096 / 48000) & 0x3FFF) as u16;
+        let mut channels = Vec::new();
+        for (&(lba, pan), &ring) in files.iter().zip(&free) {
+            let Some((data_bytes, rate)) = bus
+                .sectors(lba, 1)
+                .and_then(|h| vag_header(&h, a.offset as usize))
+            else {
+                tracing::warn!(target: "snd989", "stream at lba {lba:#x}: no VAG header");
+                return 0;
+            };
+            channels.push(Channel {
+                file: u64::from(lba) * u64::from(SECTOR) + u64::from(a.offset),
+                length: HEADER + data_bytes,
+                fed: 0,
+                ring,
+                half: self.ring_bytes / 2,
+                voice: 0,
+                pan,
+                pitch: ((u64::from(rate) * 4096 / 48000) & 0x3FFF) as u16,
+                playing: 0,
+                last_queued: false,
+                other_ready: false,
+                ended: false,
+            });
+        }
         let mut s = Stream {
-            file: u64::from(a.lba) * u64::from(SECTOR) + u64::from(a.offset),
-            length: HEADER + data_bytes,
-            fed: 0,
-            ring,
-            half: self.ring_bytes / 2,
-            voice: granted.voice,
+            channels,
             group: a.group,
             volume: ((a.volume.min(0x400) * 127) >> 10) as i32,
             pan: i32::from(a.pan),
-            pitch,
             held: a.flags & 1 != 0,
-            playing: 0,
             age: 0,
-            last_queued: false,
-            other_ready: false,
         };
-        Self::fill(bus, &mut s, ring);
-        if !s.last_queued {
-            let second = ring + s.half;
-            Self::fill(bus, &mut s, second);
-            s.other_ready = true;
+        let mut granted = Vec::new();
+        for _ in 0..s.channels.len() {
+            if let Some(g) = voices.alloc_stream(a.group) {
+                granted.push(g.voice);
+            } else {
+                for &v in &granted {
+                    voices.stream_release(v);
+                }
+                return 0;
+            }
         }
-        let (lr, p) = if s.held {
-            ([0, 0], 0)
-        } else {
-            (Self::lr(voices, &s), pitch)
-        };
-        voices.key_on_stream(s.voice, lr, p, ring + HEADER, s.group);
+        for (k, voice) in granted.into_iter().enumerate() {
+            let held = s.held;
+            let lr = if held {
+                [0, 0]
+            } else {
+                Self::lr(voices, &s, k)
+            };
+            let c = &mut s.channels[k];
+            c.voice = voice;
+            let ring = c.ring;
+            Self::fill(bus, c, ring);
+            if !c.last_queued {
+                let second = ring + c.half;
+                Self::fill(bus, c, second);
+                c.other_ready = true;
+            }
+            let pitch = if held { 0 } else { c.pitch };
+            voices.key_on_stream(voice, lr, pitch, ring + HEADER, s.group);
+        }
         self.words[slot] = ((self.words[slot] & 0xFFFF).wrapping_add(1) & 0xFFFF)
             | ((slot as u32) << 16)
             | HANDLE_TYPE
@@ -255,7 +302,8 @@ impl Streams {
         self.words[slot]
     }
 
-    fn lr(voices: &Voices, s: &Stream) -> [i16; 2] {
+    /// Channel `k`'s left and right.
+    fn lr(voices: &Voices, s: &Stream, k: usize) -> [i16; 2] {
         let mut lr = [0; 2];
         stream_volume(
             &voices.pan,
@@ -264,7 +312,7 @@ impl Streams {
             s.pan,
             0x7F,
             0x7F,
-            0,
+            s.channels[k].pan,
             &mut lr,
         );
         lr
@@ -275,7 +323,6 @@ impl Streams {
         let Some(slot) = self.find(handle) else {
             return;
         };
-        let lr = self.slots[slot].as_ref().map(|s| Self::lr(voices, s));
         let Some(s) = self.slots[slot].as_mut() else {
             return;
         };
@@ -283,8 +330,11 @@ impl Streams {
             return;
         }
         s.held = false;
-        voices.write(reg::voice(s.voice, reg::PITCH), s.pitch);
-        voices.stream_volume(s.voice, lr.unwrap_or([0, 0]));
+        let s = s.clone();
+        for (k, c) in s.channels.iter().enumerate() {
+            voices.write(reg::voice(c.voice, reg::PITCH), c.pitch);
+            voices.stream_volume(c.voice, Self::lr(voices, &s, k));
+        }
     }
 
     /// `snd_SetSoundVolPan` on a stream.
@@ -303,8 +353,9 @@ impl Streams {
         }
         if !s.held {
             let s = s.clone();
-            let lr = Self::lr(voices, &s);
-            voices.stream_volume(s.voice, lr);
+            for (k, c) in s.channels.iter().enumerate() {
+                voices.stream_volume(c.voice, Self::lr(voices, &s, k));
+            }
         }
     }
 
@@ -324,46 +375,64 @@ impl Streams {
 
     fn end(&mut self, voices: &mut Voices, slot: usize) {
         if let Some(s) = self.slots[slot].take() {
-            voices.stream_release(s.voice);
+            for c in &s.channels {
+                voices.stream_release(c.voice);
+            }
             self.words[slot] &= !0x8000_0000;
         }
     }
 
     /// The stream pass of a tick: where each voice is, refills, and ends.
+    /// A stream is over when every channel's voice has stopped after its
+    /// last data.
     pub(crate) fn tick(&mut self, bus: &mut dyn Bus, voices: &mut Voices) {
         for slot in 0..SLOTS {
             let Some(mut s) = self.slots[slot].take() else {
                 continue;
             };
             s.age += 1;
-            if s.age < 2 {
-                self.slots[slot] = Some(s);
-                continue;
+            if s.age >= 2 {
+                for c in &mut s.channels {
+                    Self::poll(bus, voices, c, s.age);
+                }
             }
-            if s.last_queued && bus.read(reg::voice(s.voice, reg::ENVX), 2) == 0 {
-                voices.stream_release(s.voice);
+            if s.channels.iter().all(|c| c.ended) {
+                for c in &s.channels {
+                    voices.stream_release(c.voice);
+                }
                 self.words[slot] &= !0x8000_0000;
                 continue;
             }
-            let hi = bus.read(reg::address(s.voice, reg::NAX), 2);
-            let lo = bus.read(reg::address(s.voice, reg::NAX) + 2, 2);
-            let nax = ((hi & 0xF) << 16 | lo) * 2;
-            let half = u32::from(nax >= s.ring + s.half);
-            if half != s.playing {
-                // The voice left the other half: refill it, and send the
-                // voice there next.
-                s.playing = half;
-                s.other_ready = false;
-                if !s.last_queued {
-                    let other = s.ring + (1 - half) * s.half;
-                    Self::fill(bus, &mut s, other);
-                    s.other_ready = true;
-                    voices.write_address(s.voice, reg::LSAX, other);
-                }
-            } else if s.age == 2 && s.other_ready {
-                voices.write_address(s.voice, reg::LSAX, s.ring + (1 - half) * s.half);
-            }
             self.slots[slot] = Some(s);
+        }
+    }
+
+    /// One channel's poll.
+    fn poll(bus: &mut dyn Bus, voices: &mut Voices, c: &mut Channel, age: u32) {
+        if c.ended {
+            return;
+        }
+        if c.last_queued && bus.read(reg::voice(c.voice, reg::ENVX), 2) == 0 {
+            c.ended = true;
+            return;
+        }
+        let hi = bus.read(reg::address(c.voice, reg::NAX), 2);
+        let lo = bus.read(reg::address(c.voice, reg::NAX) + 2, 2);
+        let nax = ((hi & 0xF) << 16 | lo) * 2;
+        let half = u32::from(nax >= c.ring + c.half);
+        if half != c.playing {
+            // The voice left the other half: refill it, and send the voice
+            // there next.
+            c.playing = half;
+            c.other_ready = false;
+            if !c.last_queued {
+                let other = c.ring + (1 - half) * c.half;
+                Self::fill(bus, c, other);
+                c.other_ready = true;
+                voices.write_address(c.voice, reg::LSAX, other);
+            }
+        } else if age == 2 && c.other_ready {
+            voices.write_address(c.voice, reg::LSAX, c.ring + (1 - half) * c.half);
         }
     }
 }

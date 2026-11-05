@@ -48,10 +48,11 @@ impl Bus for SoundBus<'_> {
 
 impl IopCore {
     /// Plays sound with the Rust driver from now on, its random numbers
-    /// seeded from the module image (the disc's `989SND.IRX`).
-    pub(crate) fn start_sound(&mut self, module: Option<&[u8]>) {
+    /// seeded from the module image (the disc's `989SND.IRX`), its reverb
+    /// presets from libsd's.
+    pub(crate) fn start_sound(&mut self, module: Option<&[u8]>, libsd: Option<&[u8]>) {
         if self.sound.is_none() {
-            self.sound = Some(Box::new(Driver::new(module)));
+            self.sound = Some(Box::new(Driver::new(module, libsd)));
             self.sound_due = self.cpu.cycles + TICK_CYCLES;
         }
     }
@@ -119,7 +120,7 @@ impl IopCore {
         reply_size: u32,
     ) -> Vec<u8> {
         if self.sound.is_none() {
-            self.start_sound(None);
+            self.start_sound(None, None);
         }
         let IopCore {
             sound,

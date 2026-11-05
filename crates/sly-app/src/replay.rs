@@ -35,6 +35,35 @@ pub(crate) struct Frames<'a> {
     pub(crate) wav: Option<&'a std::cell::RefCell<crate::sound::Wav>>,
 }
 
+/// A call to inject: its field, function and words.
+type Injection = (u64, u32, Vec<u32>);
+
+/// Calls to inject into 989snd, for checking commands the game does not
+/// send against both drivers: `$SLY_RS_SND_INJECT` holds
+/// `FIELD:FUNCTION:WORD,WORD...;...` (function decimal, words hex), each
+/// sent at the start of its field (or as soon after as the disc's driver
+/// is free).
+fn injections() -> Vec<Injection> {
+    std::env::var("SLY_RS_SND_INJECT")
+        .unwrap_or_default()
+        .split(';')
+        .filter_map(|item| {
+            let mut parts = item.trim().split(':');
+            let field = parts.next()?.parse().ok()?;
+            let function = parts.next()?.parse().ok()?;
+            let words = parts
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .filter(|w| !w.is_empty())
+                .map(|w| u32::from_str_radix(w.trim(), 16))
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            Some((field, function, words))
+        })
+        .collect()
+}
+
 /// Runs `fields` fields of `script`, saving pictures on the way.
 #[allow(clippy::cast_precision_loss, reason = "a report")]
 fn advance(
@@ -42,8 +71,9 @@ fn advance(
     fields: u64,
     script: &replay::Script,
     frames: &Frames<'_>,
+    injections: &mut Vec<Injection>,
 ) -> Result<ps2_ee::Stop> {
-    if frames.dir.is_none() && !frames.timing && frames.wav.is_none() {
+    if frames.dir.is_none() && !frames.timing && frames.wav.is_none() && injections.is_empty() {
         return Ok(replay::run(machine, fields, script));
     }
     let mut started = std::time::Instant::now();
@@ -72,6 +102,13 @@ fn advance(
     };
     let mut before = times(machine);
     for _ in 0..fields {
+        let field = machine.cpu.cycles / ps2_ee::FIELD_CYCLES;
+        injections.retain(|(at, function, words)| {
+            *at > field
+                || !machine
+                    .iop
+                    .inject_989snd(&mut machine.mem, *function, words)
+        });
         let stop = replay::run(machine, 1, script);
         if let Some(wav) = frames.wav {
             wav.borrow_mut().write(&machine.iop.take_samples())?;
@@ -167,12 +204,19 @@ pub(crate) fn run(
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     machine.iop.keep_samples(frames.wav.is_some());
+    let mut injections = injections();
     let mut out = io::stdout().lock();
     let started = std::time::Instant::now();
     let mut failures = 0;
     let mut done = 0;
     for checkpoint in &mut replay.checkpoints {
-        let stop = advance(&mut machine, checkpoint.field - done, &script, frames)?;
+        let stop = advance(
+            &mut machine,
+            checkpoint.field - done,
+            &script,
+            frames,
+            &mut injections,
+        )?;
         done = checkpoint.field;
         if stop != ps2_ee::Stop::Budget {
             bail!("stopped at field {done}: {stop:?}");
@@ -208,7 +252,9 @@ pub(crate) fn run(
         let mut left = end - done;
         if let Some((_, dumped)) = frames.gs_dump {
             let before = left.saturating_sub(dumped);
-            if advance(&mut machine, before, &script, frames)? != ps2_ee::Stop::Budget {
+            if advance(&mut machine, before, &script, frames, &mut injections)?
+                != ps2_ee::Stop::Budget
+            {
                 bail!("stopped before the GS dump");
             }
             left -= before;
@@ -216,7 +262,7 @@ pub(crate) fn run(
             let block = hw.gs_privileged();
             hw.gs.start_dump(block);
         }
-        let stop = advance(&mut machine, left, &script, frames)?;
+        let stop = advance(&mut machine, left, &script, frames, &mut injections)?;
         if let Some((path, _)) = frames.gs_dump {
             let bytes = machine.hw.borrow_mut().gs.finish_dump().unwrap_or_default();
             std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;

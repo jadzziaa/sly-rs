@@ -19,9 +19,11 @@
 //! port of the driver in Ratchet & Clank, whose build is close to Sly's);
 //! the music sequencers follow OpenGOAL's 989snd (ISC).
 //!
-//! Not covered yet: stereo streams, reverb presets other than "off" (the
-//! only one Sly 1 uses), `snd_AutoVol`, `snd_SetSoundPitch`, and the
-//! driver's own disc reads for the game (`snd_StreamSafeCdRead`).
+//! Not covered: the driver's own disc reads for the game
+//! (`snd_StreamSafeCdRead`, which Sly 1 does not use), and the time the
+//! disc takes (a bank's or a stream's data arrive at once). `snd_AutoVol`
+//! is checked against the one call Sly 1 makes; stereo streams only
+//! against the disc driver's refusal (Sly 1 sets up one stream ring).
 
 // The driver works in the IOP's 16- and 32-bit words, as the module does;
 // the casts are its truncations.
@@ -45,6 +47,7 @@ use std::rc::Rc;
 mod bank;
 mod effects;
 mod music;
+mod reverb;
 mod stream;
 mod tables;
 mod voices;
@@ -116,13 +119,16 @@ pub struct Driver {
     reply: Vec<u32>,
     /// Each core's MMIX, as last written.
     mmix: [u16; 2],
+    /// Each core's ATTR, as last written.
+    attr: [u16; 2],
+    reverb: reverb::Reverb,
     movie: Option<Movie>,
     ticks: u64,
 }
 
 impl Default for Driver {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, None)
     }
 }
 
@@ -163,9 +169,14 @@ fn r250_of(image: &[u8]) -> Option<([u16; R250_LEN], usize)> {
 
 impl Driver {
     /// A driver, its random numbers seeded from the disc's module image
-    /// (`989SND.IRX` as loaded, at address 0), if given.
+    /// (`989SND.IRX` as loaded, at address 0), its reverb presets from
+    /// libsd's (`LIBSD.IRX`), if given.
     #[must_use]
-    pub fn new(module: Option<&[u8]>) -> Self {
+    pub fn new(module: Option<&[u8]>, libsd: Option<&[u8]>) -> Self {
+        let presets = libsd.and_then(reverb::Presets::from_libsd).unwrap_or_else(|| {
+            tracing::warn!(target: "snd989", "no libsd image: reverb types other than off are silent");
+            reverb::Presets::off_only()
+        });
         let found = module.and_then(r250_of);
         if let Some(([first, ..], index)) = &found {
             tracing::debug!(target: "snd989", "random numbers from the module: index {index}, first {first:#x}");
@@ -188,6 +199,8 @@ impl Driver {
             next_handle: 0x001F_0000,
             reply: vec![0; 0x400],
             mmix: [0xF00, 0xF0C],
+            attr: [0xC000, 0xC001],
+            reverb: reverb::Reverb::new(presets),
             movie: None,
             ticks: 0,
         }
@@ -229,6 +242,9 @@ impl Driver {
         if self.voices.tick.is_multiple_of(2) {
             self.effects.tick_lfos(&mut self.voices, &mut self.rng);
         }
+        let mut ops = Vec::new();
+        self.reverb.tick(&mut ops);
+        self.apply_reverb(bus, ops);
         self.flush(bus);
     }
 
@@ -375,17 +391,14 @@ impl Driver {
                 None
             }
             14 => {
-                self.reverb_type(d[0], d[1]);
+                self.reverb_type(bus, d[0], d[1] as i32);
                 None
             }
             15 => {
-                for c in 0..2 {
-                    if d[0] & (1 << c) != 0 {
-                        let at = 0x1F90_0764 + 0x28 * c as u32;
-                        self.voices.write(at, d[1] as u16);
-                        self.voices.write(at + 2, d[2] as u16);
-                    }
-                }
+                let mut ops = Vec::new();
+                self.reverb
+                    .set_depth(d[0], d[1] as u16, d[2] as u16, &mut ops);
+                self.apply_reverb(bus, ops);
                 None
             }
             17 => Some(self.play(d)),
@@ -447,12 +460,10 @@ impl Driver {
                 }
                 None
             }
-            28 => Some(0),
+            28 => Some(self.original_pitch(d[0], d[1] as usize)),
             30 => {
-                // snd_SetSoundPitch(handle, pitch modulation).
                 if kind(d[0]) == 5 {
-                    self.effects
-                        .set_pitch_mod(&mut self.voices, d[0], d[1] as i16);
+                    self.effects.set_note(&mut self.voices, d[0], d[1]);
                 }
                 None
             }
@@ -460,6 +471,12 @@ impl Driver {
                 if kind(d[0]) == 5 {
                     self.effects
                         .set_bend_of(&mut self.voices, d[0], d[1] as i16);
+                }
+                None
+            }
+            34 => {
+                if kind(d[0]) == 5 {
+                    self.effects.auto_volume(d[0], d[1] as i32, d[2] as i32);
                 }
                 None
             }
@@ -512,11 +529,36 @@ impl Driver {
             // ResolveBankXREFS, and PreAllocReverbWorkArea (the reverb
             // work area of the only type used, off, is the tiny one at
             // the top of sound memory).
-            8 | 81 => None,
+            81 => {
+                // The reserving core's MMIX effect bits go on first.
+                for c in 0..2usize {
+                    if d[0] & (1 << c) != 0 {
+                        self.mmix[c] |= 3;
+                        let mmix = self.mmix[c];
+                        self.voices.write(0x1F90_0198 + 0x400 * c as u32, mmix);
+                    }
+                }
+                let mut ops = Vec::new();
+                self.reverb
+                    .reserve(&mut self.memory, d[0], d[1] as i32, &mut ops);
+                self.apply_reverb(bus, ops);
+                None
+            }
+            8 => None,
             _ => {
                 tracing::warn!(target: "snd989", "command {id} not supported ({:x?})", &d[..4]);
                 None
             }
+        }
+    }
+
+    /// `snd_GetSoundOriginalPitch(bank, sound)`: the note a sound effect
+    /// plays its tones at, in 1/128ths of a semitone: 60 << 7 (what Sly 1's
+    /// driver answers), the scale `snd_SetSoundPitch` works in.
+    fn original_pitch(&self, bank: u32, sound: usize) -> u32 {
+        match self.banks.get(&bank).map(|b| &b.content) {
+            Some(Content::Effects(sounds)) if sound < sounds.len() => 60 << 7,
+            _ => 0,
         }
     }
 
@@ -752,39 +794,33 @@ impl Driver {
         self.mmix = [0xF00, 0xF0C];
     }
 
-    /// `snd_SetReverbType(cores, type)`: the reverb's parameters and work
-    /// area for each core in the mask. Only type 0 (off) is known.
-    fn reverb_type(&mut self, cores: u32, kind: u32) {
-        if kind != 0 {
-            tracing::warn!(target: "snd989", "reverb type {kind} not supported: set off");
-        }
-        for c in 0..2usize {
-            if cores & (1 << c) == 0 {
-                continue;
+    /// `snd_SetReverbType(cores, type)`.
+    fn reverb_type(&mut self, bus: &mut dyn Bus, cores: u32, mode: i32) {
+        let mut ops = Vec::new();
+        self.reverb
+            .set_type(&mut self.memory, cores, mode, &mut ops);
+        self.apply_reverb(bus, ops);
+    }
+
+    /// The reverb's register writes, in order with the voices'.
+    fn apply_reverb(&mut self, bus: &mut dyn Bus, ops: Vec<reverb::Op>) {
+        for op in ops {
+            match op {
+                reverb::Op::Write(address, value) => self.voices.write(address, value),
+                reverb::Op::Enable(c, on) => {
+                    let attr = if on {
+                        self.attr[c] | 0x80
+                    } else {
+                        self.attr[c] & !0x80
+                    };
+                    self.attr[c] = attr;
+                    self.voices.write(0x1F90_019A + 0x400 * c as u32, attr);
+                }
+                reverb::Op::Clear(address, bytes) => {
+                    self.flush(bus);
+                    bus.upload(address, &vec![0; bytes as usize]);
+                }
             }
-            let (regs, vols) = (
-                0x1F90_0000 + 0x400 * c as u32,
-                0x1F90_0760 + 0x28 * c as u32,
-            );
-            self.mmix[c] |= 3;
-            let mmix = self.mmix[c];
-            self.voices.write(regs + 0x198, mmix);
-            self.voices.write(vols + 4, 0);
-            self.voices.write(vols + 6, 0);
-            for o in [0x2E4, 0x2E6, 0x2E8, 0x2EA] {
-                self.voices.write(regs + o, 0);
-            }
-            for o in (0x14..0x24).step_by(2) {
-                self.voices.write(vols + o, 0);
-            }
-            for o in (0x2EC..0x33C).step_by(2) {
-                let four = matches!(o, 0x2EE | 0x2F2 | 0x30E | 0x312);
-                self.voices.write(regs + o, if four { 4 } else { 0 });
-            }
-            self.voices.write(vols + 0x24, 0);
-            self.voices.write(vols + 0x26, 0);
-            self.voices.write(regs + 0x2E0, 0xE + c as u16);
-            self.voices.write(regs + 0x2E2, 0xFFF8);
         }
     }
 
@@ -925,7 +961,7 @@ mod tests {
             disc: bank::tests::effect_bank(),
             ..TestBus::default()
         };
-        let mut driver = Driver::new(None);
+        let mut driver = Driver::new(None, None);
         driver.call(SERVER, 0, &0x26_0DC0u32.to_le_bytes(), 12, &mut bus);
         let handle = driver.call(LOADER, 3, &[0; 8], 4, &mut bus);
         let handle = u32::from_le_bytes([handle[0], handle[1], handle[2], handle[3]]);
@@ -955,5 +991,69 @@ mod tests {
         assert_eq!(words[0], u32::MAX);
         assert_eq!(words[1], sound);
         assert_eq!(words[3], u32::MAX);
+    }
+
+    fn words(w: &[u32]) -> Vec<u8> {
+        w.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// A disc with a VAG file of 0x3000 data bytes at 44.1 kHz at sectors
+    /// 10 and 20.
+    fn vag_disc() -> Vec<u8> {
+        let mut disc = vec![0u8; 30 * 0x800];
+        for lba in [10usize, 20] {
+            let h = &mut disc[lba * 0x800..];
+            h[..4].copy_from_slice(b"VAGp");
+            h[0xC..0x10].copy_from_slice(&0x3000u32.to_be_bytes());
+            h[0x10..0x14].copy_from_slice(&44100u32.to_be_bytes());
+        }
+        disc
+    }
+
+    /// A stereo stream takes two rings: refused with one (as Sly 1's
+    /// driver refuses it), two voices panned left and right with two.
+    #[test]
+    fn stereo_streams() {
+        for (rings, voices) in [(1u32, 0usize), (2, 2)] {
+            let mut bus = TestBus {
+                disc: vag_disc(),
+                ..TestBus::default()
+            };
+            let mut driver = Driver::new(None, None);
+            driver.call(SERVER, 0, &words(&[0]), 12, &mut bus);
+            driver.call(SERVER, 42, &words(&[rings, 0x2000, 1, 1]), 12, &mut bus);
+            bus.writes.clear();
+            let reply = driver.call(
+                SERVER,
+                44,
+                &words(&[10, 20, 0x0400_0000, 0, 2, 0, 0]),
+                12,
+                &mut bus,
+            );
+            let handle = u32::from_le_bytes([reply[4], reply[5], reply[6], reply[7]]);
+            assert_eq!(handle != 0, voices == 2, "{rings} rings");
+            driver.tick(&mut bus);
+            let pitches: Vec<u32> = bus
+                .writes
+                .iter()
+                .filter(|w| w.0 & 0xF == 4 && w.0 < 0x1F90_0180)
+                .map(|w| w.1)
+                .collect();
+            assert_eq!(pitches.len(), voices);
+            assert!(pitches.iter().all(|&p| p == 3763));
+            if voices == 2 {
+                // Left: all on the left, right: all on the right.
+                let vol = |v: u32| {
+                    bus.writes
+                        .iter()
+                        .find(|w| w.0 == v)
+                        .map_or(u32::MAX, |w| w.1)
+                };
+                assert_eq!(vol(0x1F90_0002), 0);
+                assert_eq!(vol(0x1F90_0010), 0);
+                assert_ne!(vol(0x1F90_0000), 0);
+                assert_ne!(vol(0x1F90_0012), 0);
+            }
+        }
     }
 }

@@ -223,8 +223,7 @@ enum Command {
         #[arg(long)]
         widescreen: bool,
         /// Sound by the disc's own driver on the emulated IOP (true) or by
-        /// the Rust one (false). Default: classic, until the Rust driver
-        /// covers Sly 1's sound.
+        /// the Rust one (false). Default: the Rust one.
         #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
         classic: Option<bool>,
     },
@@ -241,7 +240,7 @@ enum Command {
         #[arg(long)]
         replay: Option<PathBuf>,
         /// Sound by the disc's own driver (true) or the Rust one (false),
-        /// for both machines. Default: the replay's, else classic.
+        /// for both machines. Default: the replay's, else the Rust one.
         #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
         classic: Option<bool>,
     },

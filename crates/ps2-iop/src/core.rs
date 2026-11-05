@@ -253,6 +253,17 @@ impl IopCore {
         true
     }
 
+    /// Whether server `sid`'s thread has nothing queued and is not
+    /// answering a request (its receive buffer is free).
+    pub(crate) fn rpc_idle(&self, sid: u32) -> bool {
+        let Some(server) = self.servers.get(&sid) else {
+            return false;
+        };
+        self.queues
+            .get(&server.queue)
+            .is_some_and(|(t, q)| q.is_empty() && !self.serving.contains_key(t))
+    }
+
     /// Registers a library a module exports.
     pub fn register_library(&mut self, name: String, functions: Vec<u32>) {
         tracing::debug!(target: "iop::hle", "library {name} registered ({} functions)", functions.len());

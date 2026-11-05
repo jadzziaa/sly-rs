@@ -52,6 +52,10 @@ const CALL_LATENCY: u64 = 2343;
 /// in Sly 1's traces).
 const BANK_LATENCY: u64 = 250_000;
 
+/// The reply header of a call [`Iop::inject_989snd`] made: its answer goes
+/// nowhere.
+const INJECTED: [u32; 4] = [u32::MAX; 4];
+
 /// Whether `sid` is one of 989snd's servers.
 fn is_989snd(sid: u32) -> bool {
     sid == ps2_snd989::SERVER || sid == ps2_snd989::LOADER
@@ -255,6 +259,8 @@ pub struct Iop {
     rust_sound: bool,
     /// The machine's time (IOP cycles) as it hands over a transfer.
     now: u64,
+    /// The disc's libsd, kept for the Rust driver's reverb presets.
+    libsd: Option<Vec<u8>>,
 }
 
 impl Default for Iop {
@@ -282,6 +288,7 @@ impl Iop {
             next_load: 0,
             rust_sound: false,
             now: 0,
+            libsd: None,
         }
     }
 
@@ -295,6 +302,39 @@ impl Iop {
                 self.register(&[sid], Box::new(Unknown { sid }));
             }
         }
+    }
+
+    /// Calls 989snd's command server as the EE would, with no one waiting
+    /// for the answer: a check of a command the game does not send, the
+    /// same on both drivers. False if the disc's driver is busy with a
+    /// call of the game's (try again later).
+    pub fn inject_989snd(&mut self, mem: &mut Memory, function: u32, words: &[u32]) -> bool {
+        let data: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        if self.rust_sound {
+            let now = self.now.max(self.core.cpu.cycles);
+            if let Err(error) = self.core.run_until(&mut mem.regions, now) {
+                tracing::warn!(target: "iop::snd989", "{error}");
+            }
+            self.core.sound_call(ps2_snd989::SERVER, function, &data, 0);
+            return true;
+        }
+        let server = ps2_snd989::SERVER;
+        let Some(buffer) = self.core.servers.get(&server).map(|g| g.buffer) else {
+            return false;
+        };
+        if !self.core.rpc_idle(server) {
+            return false;
+        }
+        for (i, &b) in data.iter().enumerate() {
+            mem.regions.iop_ram[(buffer as usize + i) & 0x1F_FFFF] = b;
+        }
+        trace_989snd(mem, buffer, server, function, data.len() as u32);
+        self.core.request(RpcRequest {
+            sid: server,
+            function,
+            size: data.len() as u32,
+            reply: (INJECTED, 0, 0),
+        })
     }
 
     /// Whether the Rust 989snd plays sound.
@@ -379,6 +419,10 @@ impl Iop {
         }
         while let Some((request, data)) = self.core.answered.pop_front() {
             let ([a, b, c, d], recv_buf, recv_size) = request.reply;
+            if [a, b, c, d] == INJECTED {
+                tracing::debug!(target: "iop::snd989", "injected {} answered: {:#x}", request.function, iop_word(mem, data + 4));
+                continue;
+            }
             tracing::debug!(target: "iop::rpc", "{:#x} function {:#x} answered at IOP cycle {}: {recv_size} bytes from {data:#x} ({:#x}...) to EE {recv_buf:#x}", request.sid, request.function, self.core.cpu.cycles, iop_word(mem, data));
             if is_989snd(request.sid) {
                 let words: Vec<u32> = (0..(recv_size / 4).min(40))
@@ -489,9 +533,13 @@ impl Iop {
             return false;
         }
         if self.rust_sound && SOUND_MODULES.contains(&name.as_str()) {
-            if name == SOUND_MODULES[1] {
-                self.core
-                    .start_sound(module.as_ref().map(|m| m.image.as_slice()));
+            if name == SOUND_MODULES[0] {
+                self.libsd = module.map(|m| m.image);
+            } else {
+                self.core.start_sound(
+                    module.as_ref().map(|m| m.image.as_slice()),
+                    self.libsd.as_deref(),
+                );
             }
             return false;
         }

@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T09:24:09Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T09:50:53Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -58,6 +58,12 @@ sources:
   - id: m3-compare
     resource: replay games/sly1/replays/new-game.toml against new-game-rust.toml (the same presses, classic = false), --wav and SLY_RS_LOG=iop::hw=trace, compared with numpy (per-second correlation at the best lag, peaks, RMS) and by key-on events; the logo movies (card with a save, movies = true) the same way, 2026-11-05
     title: The Rust 989snd against the disc's driver
+  - id: m3-prologue
+    resource: the user's prologue.toml (19,180 fields into the first levels; read from the main checkout, never copied) replayed classic with SLY_RS_LOG=iop::snd989=debug,iop::hw=trace, then with classic = false, --wav both, compared as m3-compare; libsd's preset table read from the disc's LIBSD.IRX, 2026-11-05
+    title: Sly 1's sound calls into its first levels, on both drivers
+  - id: m3-inject
+    resource: SLY_RS_SND_INJECT (sly-rs replay) sending snd_SetReverbType for all ten types on both cores, snd_SetReverbDepth, a stereo and a mono snd_PlayVAGStreamByLoc into both drivers over the new-game replay, register writes and --wav compared, 2026-11-05
+    title: Calls the game does not make, injected into both drivers
   - id: opengoal
     resource: https://github.com/open-goal/jak-project (game/sound/989snd), ISC, read from a sparse clone, 2026-11-05
     title: OpenGOAL's 989snd (MIDI, AME, banks)
@@ -157,8 +163,8 @@ answering the EE's `snd_*` calls at the RPC level and driving
 exact port of R&C 1's build is the guide (its handlers, grains, banks and
 pitch tables; GPL-3.0), but not a drop-in: Sly 1's build differs, and
 rac-rs leaves out what Sly needs, streamed VAG (voice lines), movie sound
-and MIDI sequences.[^rac-rs] Built in M3 (below), behind the classic
-setting until it covers Sly 1's sound.
+and MIDI sequences.[^rac-rs] Built in M3 (below); the default since
+M3's second step.
 
 ### Movies
 
@@ -290,8 +296,8 @@ an option.
   **Decided (2026-11-05):**[^ps3-movies] extracting and upscaling the PS3
   movies waits until after parity, where a player on the host side can
   show them at their own resolution (with the Rust player).
-- **M3, 2026-11-05: a Rust 989snd (`ps2-snd989`), behind the classic
-  setting.** It answers 989snd's two RPC servers in place of the disc's
+- **M3, 2026-11-05: a Rust 989snd (`ps2-snd989`), the default since
+  M3's second step (below); the disc's driver is the classic setting.** It answers 989snd's two RPC servers in place of the disc's
   module (the IOP loads neither `LIBSD.IRX` nor `989SND.IRX`); its 240 Hz
   timer is an IOP event, so its register writes reach the SPU2 at the
   cycle they are made, and its replies wait as long as the disc driver's
@@ -319,10 +325,11 @@ an option.
     auto-DMA input, refilled from the DMA interrupt; the libsd and driver
     start-up writes. `IsSoundALooper` is the sound's flag bit 0 (all 234
     answers of the disc's driver), not a loop in its grains.
-  - **Not yet**: stereo streams, reverb types other than off, `AutoVol`,
-    the driver's own disc reads for the game (`StreamSafeCdRead`), and
-    disc timing (a bank and a stream's data arrive at once; the reply
-    waits, the data does not).
+  - **Not yet** (first step): stereo streams, reverb types other than
+    off, `AutoVol`, the driver's own disc reads for the game
+    (`StreamSafeCdRead`), and disc timing (a bank and a stream's data
+    arrive at once; the reply waits, the data does not). The second step
+    (below) covers the first three.
   - **Against the disc's driver**[^m3-compare] (the new-game presses,
     each run with its own sound; the game's timing differs a little, so
     sound effects that follow game events and random choices drift):
@@ -349,10 +356,56 @@ an option.
   - **By ear** (the user, 2026-11-05):[^listened-rust] the two drivers'
     sound over the new-game replay, listened to back to back many times,
     sounds the same.
-  - **Classic stays the default** (`classic = true` under `[play]`): the
-    Rust driver is chosen with `classic = false`, `play --classic=false`,
-    `run --classic=false`, `lockstep --classic=false`, or `classic = false`
-    in a replay (a replay without the key is classic, as recorded before).
+  - Classic stayed the default after this first step.
+- **M3, second step, 2026-11-05: the rest of Sly 1's calls; the Rust
+  driver is the default.**
+  - **Sly 1's calls into its first levels**[^m3-prologue] (the user's
+    prologue recording, classic, 312 s of sound): besides the new-game
+    set, `SetSoundPitch` (182), `PauseSound`/`ContinueSound` (7),
+    `AutoVol` (1), `GetSoundOriginalPitch` (1). The game asks for
+    reverb type 0 (off) only, on core 1, and plays mono streams only: it
+    sets up one stream ring (`InitVAGStreamingEx(1, 0x2000, ...)`), and the
+    disc's driver refuses a stereo stream with one ring.
+  - **Reverb, all ten types.** The driver's reverb logic (rac-rs's port:
+    work areas cut from the top of a 128 KiB page, a reserved area kept,
+    the area cleared and the effect switched on ten ticks later at the
+    depth) with libsd's presets read from the disc's `LIBSD.IRX` (ten
+    records of 32 registers, PS1 units of 8 bytes, four halfwords each on
+    the SPU2) and libsd's work-area sizes; echo and delay take the delay
+    and feedback the driver asks for (0, 0). `PreAllocReverbWorkArea`
+    turns the core's MMIX effect bits on. Injected into both drivers[^m3-inject]
+    (`SetReverbType` for types 1 to 9 on core 0, type 3 on core 1, and
+    the depths): **all 866 reverb register writes identical, in order**
+    (ESA, EEA, the presets, EVOL, ATTR's effect bit); before the echo
+    and delay patch, 853.
+  - **Stereo streams**: two rings, two voices panned 270 and 90 degrees,
+    each fed from its own file; refused without two free rings, as the
+    disc's driver refuses it (`PlayVAGStreamByLoc` answers 0 for both).
+    Never heard against the disc's driver, which cannot play one in Sly
+    1. An injected mono stream: key-on registers and every LSAX flip the
+    same as the disc driver's, within a tick.
+  - **`SetSoundPitch(handle, pitch)`** sets the note a sound's tones play
+    at, in 1/128ths of a semitone (60 << 7 their own pitch, which is what
+    `GetSoundOriginalPitch` answers): `0x20D8` gives PITCH 0x516 on the
+    disc's driver and on this one. **`AutoVol(handle, -4, 120, 2)`**
+    fades the sound and keys it off within nine ticks on the disc's
+    driver; this one steps the volume scale by 120 a tick and stops it at
+    0 (other arguments are not seen in Sly 1, so not checked).
+  - **Against the disc's driver over the prologue**: the two runs' games
+    drift apart after about 90 seconds (the recording loses step on both,
+    as it does since the SPU2 sounds), so the comparison holds where they
+    play the same: in the first 90 s, key-ons 1,786 / 1,773; music 1,408
+    of 1,418 matched, volume and envelope identical, pitch in 1,400;
+    streams 10 of 10 identical; sound effects 294 of 310 matched by
+    sample. Per-second correlation: 0.75, 0.96 and 0.82 averaged over
+    the first three half-minutes; over the whole 312 s RMS 787 / 770,
+    peaks 16,886 / 15,989.
+  - **The default is the Rust driver** (`CLASSIC = false`: `[play]
+    classic = false`, `run` and `lockstep` without a replay). The disc's
+    driver is chosen with `classic = true`, `play --classic`, `run
+    --classic`, `lockstep --classic`, or `classic = true` in a replay; a
+    replay without the key is still classic, as recorded, so old replays
+    keep their hashes.
 - Not checked yet: audio-to-picture sync measured within one run (against
   PCSX2 the sound lines up 246 ms from the pictures, most likely when
   PCSX2's capture started), and the movies later in the game.
@@ -392,3 +445,5 @@ recorded again where the machine's state changes.
 [^m3-trace]: Sly 1's 989snd call set and register traffic
 [^m3-compare]: The Rust 989snd against the disc's driver
 [^opengoal]: OpenGOAL's 989snd (MIDI, AME, banks)
+[^m3-prologue]: Sly 1's sound calls into its first levels, on both drivers
+[^m3-inject]: Calls the game does not make, injected into both drivers

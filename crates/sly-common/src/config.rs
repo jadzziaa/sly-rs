@@ -59,9 +59,9 @@ pub enum ConfigError {
 }
 
 /// Whether sound is classic (the disc's 989snd on the emulated IOP) when
-/// nothing says otherwise. The Rust driver becomes the default once it
-/// covers Sly 1's sound.
-pub const CLASSIC: bool = true;
+/// nothing says otherwise: no, the Rust driver plays it. A replay without
+/// the key is classic all the same, as it was recorded.
+pub const CLASSIC: bool = false;
 
 /// The loaded configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

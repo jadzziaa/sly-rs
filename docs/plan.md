@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T08:58:09Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T09:50:53Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -851,11 +851,12 @@ given: the gates are the schedule.
   default does not fit Sly's player (see the doc), a question for the
   user. M3 (2026-11-05): a Rust 989snd, `ps2-snd989` (sound effects,
   AME and MIDI music, mono VAG streams, movie sound), behind the classic
-  setting (`[play] classic`, `--classic`, `classic` in replays), which
-  stays the default for now: against the disc's driver over the new-game
-  presses its music and stream key-ons match register for register and
-  movie sound sample for sample; stereo streams and reverb presets are
-  left to do.
+  setting (`[play] classic`, `--classic`, `classic` in replays). Its
+  second step covers the rest of Sly 1's calls (reverb, all ten types,
+  register for register against the disc's driver; stereo streams;
+  `SetSoundPitch`, `AutoVol`), and the Rust driver is now the default
+  (the user found the two the same by ear); the disc's driver is the
+  classic setting, and replays without the key stay classic.
 
 ### Phase 9 - Sly 1 complete and fast
 

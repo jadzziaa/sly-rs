@@ -403,6 +403,34 @@ impl SpuMemory {
         Some(a)
     }
 
+    /// A reverb work area of `size` bytes: in the smallest free region that
+    /// holds it below a 128 KiB boundary under the region's end, cut
+    /// against that boundary.
+    pub(crate) fn alloc_effect(&mut self, size: u32) -> Option<u32> {
+        let n = Self::round(size);
+        let mut best: Option<(usize, u32)> = None;
+        for (i, &(a, b)) in self.free.iter().enumerate() {
+            let aligned = b & !0x1_FFFF;
+            if a < aligned
+                && aligned - a >= n
+                && best.is_none_or(|(j, _)| b - a < self.free[j].1 - self.free[j].0)
+            {
+                best = Some((i, aligned));
+            }
+        }
+        let (i, aligned) = best?;
+        let at = aligned - n;
+        let (a, b) = self.free[i];
+        self.free.remove(i);
+        if at + n < b {
+            self.free.insert(i, (at + n, b));
+        }
+        if a < at {
+            self.free.insert(i, (a, at));
+        }
+        Some(at)
+    }
+
     /// Gives a block back, merging it with its neighbours.
     pub(crate) fn release(&mut self, address: u32, size: u32) {
         let n = Self::round(size);
