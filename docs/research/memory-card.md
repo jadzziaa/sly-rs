@@ -3,7 +3,7 @@ type: Finding
 title: Memory card saves
 description: How sly-rs gives Sly 1 a memory card - the card manager's file system over a PCSX2-compatible image, the card server's calls as Sly 1 makes them, how play, replay and run hold cards so replays stay exact - and the cross-check with PCSX2, which reads sly-rs's saves and writes the same card layout byte for byte.
 tags: [finding, memory-card, iop, mcserv, mcman, saves, determinism, phase-7]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:20:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:07:34Z }
 sources:
   - id: ps2sdk
     resource: https://github.com/ps2dev/ps2sdk (iop/memorycard/mcman, iop/memorycard/mcserv, ee/rpc/memorycard, common/include/libmc-common.h), read from a shallow clone for facts, 2026-11-04
@@ -113,6 +113,10 @@ recordings run without a card and keep their hashes.
   load from the title have not been driven yet; they use the calls above.
 - Sony's `mcman` keeps a journal in the backup blocks to survive a write
   cut short; sly-rs writes the image whole, renamed into place.
+- `play` writes the image when the game completes a change (closes a
+  written file, creates, deletes or renames one): a file still being
+  written when the window closes is lost, as on a console switched off
+  mid-save.
 - `Unformat`, page-level reads and writes, and PS1 cards are not answered.
 
 [^ps2sdk]: ps2sdk's reimplementation of libmc, mcserv and mcman
