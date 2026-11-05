@@ -3,7 +3,7 @@ type: Finding
 title: Widescreen in Sly 1
 description: 'How sly-rs makes Sly 1 draw at 16:9 behind an option - the camera''s aspect ratio set in one place, changed by an instruction patch the interpreter runs while memory keeps the game''s bytes - and the checks: off leaves replays exact, on stays equal in lockstep, widens the 3D view, and keeps the 2D interface at 4:3 by narrowing its GIF packets.'
 tags: [widescreen, enhancement, patch, camera, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T11:02:38Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T11:22:06Z }
 sources:
   - id: disasm
     resource: sly-rs disasm sly1 over the whole .text section (SCUS-97198), 2026-11-05

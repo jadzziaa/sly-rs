@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-05
+* **Update**: [Widescreen in Sly 1](research/widescreen.md): captions keep their 4:3 place relative to the screen's edges, a caption's lines placed as one block; flat 2D taken from paths 2 and 3 only (VU1's flat output is projected 3D).
 * **Update**: [Widescreen in Sly 1](research/widescreen.md): the portraits sit at the screen's edges as in 4:3 (the user's choice); sub-views in an outer third keep their distance from that edge.
 * **Update**: [Widescreen in Sly 1](research/widescreen.md): the 2D interface keeps 4:3 - flat GIF tags and sub-views (the portraits' scissors) narrowed before the GS takes them; full-width 2D and the depth-tested world stay at 16:9.
 * **Verification**: [Sound and movies](research/sound-and-movies.md): the user found the Rust 989snd the same as the disc's driver by ear on the prologue's gameplay and the reverb types too.

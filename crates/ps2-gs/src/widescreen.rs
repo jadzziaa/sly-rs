@@ -7,17 +7,17 @@
 //! renderers draw the same thing. In a displayed frame, these narrow to
 //! 3/4 of their width:
 //!
-//! - each GIF tag drawn without a depth test (ZTE off, or ZTST ALWAYS)
-//!   whose vertices do not reach both edges of the frame;
+//! - each GIF tag sent by path 2 or 3 (VIF1's DIRECT, the GIF's DMA)
+//!   drawn without a depth test (ZTE off, or ZTST ALWAYS) whose vertices
+//!   do not reach both edges of the frame (VU1's flat output is projected
+//!   3D, such as light cones, which the wider camera already widens);
 //! - everything drawn in a sub-view, a scissor narrower than the frame
 //!   (Sly 1's portraits are 3D models drawn in one), and the scissor
 //!   itself.
 //!
-//! A sub-view in the left or right third of the frame keeps its distance
-//! from that edge, as it sits in 4:3 (the portraits at the screen's
-//! edges); anything else narrows towards the frame's centre. A flat tag
-//! centred in an edge sub-view's box goes with it (the portraits' static
-//! and outlines, drawn without their scissor).
+//! What lies wholly in the frame's left or right third keeps its distance
+//! from that edge, as it sits in 4:3 (the portraits, captions); anything
+//! else narrows towards the frame's centre (the text box, the credits).
 //!
 //! Depth-tested 3D in the whole frame, and flat things that span it (screen
 //! passes, fades, the binocucom's outline), stay as they are; so does
@@ -30,12 +30,10 @@
 use crate::Gs;
 use crate::regs::{addr, bits};
 
-/// The display's frames (FBP, in FRAME's units), as V-blanks report them,
-/// and the edge sub-views seen.
+/// The display's frames (FBP, in FRAME's units), as V-blanks report them.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Narrow {
     displayed: Vec<u32>,
-    boxes: Vec<SubView>,
 }
 
 /// Which point of the frame something keeps its distance from.
@@ -44,14 +42,6 @@ enum Anchor {
     Left,
     Centre,
     Right,
-}
-
-/// An edge sub-view's box, in pixels as the game set it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SubView {
-    x: [i64; 2],
-    y: [i64; 2],
-    anchor: Anchor,
 }
 
 /// The registers a tag's vertices are judged and moved by, followed through
@@ -147,13 +137,13 @@ fn scissor_box(scissor: u64) -> [i64; 4] {
     [0, 16, 32, 48].map(|at| i64::from(bits(scissor, at, 11)))
 }
 
-/// Where a box from `x0` to `x1` in a frame `width` wide (pixels) keeps its
-/// place: at the edge whose third it is in, else at the centre.
+/// Where something from `x0` to `x1` in a frame `width` wide (any unit)
+/// keeps its place: at the edge whose third it lies wholly in, else at the
+/// centre.
 const fn anchor(x0: i64, x1: i64, width: i64) -> Anchor {
-    let twice_centre = x0 + x1;
-    if twice_centre * 3 < width * 2 {
+    if x1 * 3 <= width {
         Anchor::Left
-    } else if twice_centre * 3 > width * 4 {
+    } else if x0 * 3 >= width * 2 {
         Anchor::Right
     } else {
         Anchor::Centre
@@ -220,41 +210,6 @@ impl Narrow {
         }
     }
 
-    /// Notes an edge sub-view's box (the last eight kept).
-    fn note(&mut self, scissor: u64, width: i64) {
-        let [x0, x1, y0, y1] = scissor_box(scissor);
-        let anchor = anchor(x0, x1, width);
-        let sub = SubView {
-            x: [x0, x1],
-            y: [y0, y1],
-            anchor,
-        };
-        if anchor != Anchor::Centre && !self.boxes.contains(&sub) {
-            if self.boxes.len() == 8 {
-                self.boxes.remove(0);
-            }
-            self.boxes.push(sub);
-        }
-    }
-
-    /// The anchor of the edge sub-view whose box holds the centre of a flat
-    /// tag's vertices, if one does (outlines drawn around a box reach
-    /// beyond it).
-    fn anchor_of(&self, places: &[[i64; 2]]) -> Option<Anchor> {
-        let centre = |k: usize| {
-            let (lo, hi) = places.iter().fold((i64::MAX, i64::MIN), |(lo, hi), p| {
-                (lo.min(p[k]), hi.max(p[k]))
-            });
-            i64::midpoint(lo, hi)
-        };
-        let (x, y) = (centre(0), centre(1));
-        self.boxes.iter().rev().find_map(|b| {
-            ((b.x[0] * 16..=b.x[1] * 16 + 16).contains(&x)
-                && (b.y[0] * 16..=b.y[1] * 16 + 16).contains(&y))
-            .then_some(b.anchor)
-        })
-    }
-
     /// Whether `frame` is one the display shows.
     fn shown(&self, frame: u64) -> bool {
         self.displayed.contains(&bits(frame, 0, 9))
@@ -281,8 +236,8 @@ fn scissor_context(address: u8) -> Option<usize> {
 impl Gs {
     /// Narrows `data`'s flat tags and sub-views (see the module), if
     /// widescreen is on.
-    pub(crate) fn narrow(&mut self, path: usize, data: &mut [u128]) {
-        let Some(mut narrow) = self.narrow.take() else {
+    pub(crate) fn narrow(&self, path: usize, data: &mut [u128]) {
+        let Some(narrow) = &self.narrow else {
             return;
         };
         let mut state = State {
@@ -296,6 +251,8 @@ impl Gs {
         };
         let mut at = self.paths[path].remaining();
         let mut vertices = Vec::new();
+        // The transfer's flat tags, judged together once it is walked.
+        let mut pieces: Vec<Piece> = Vec::new();
         while at < data.len() {
             let tag = data[at];
             at += 1;
@@ -308,7 +265,7 @@ impl Gs {
             };
             let desc = |k: usize| ((tag >> (64 + 4 * (k % nreg))) & 0xF) as u8;
             vertices.clear();
-            let mut flat = true;
+            let mut flat = path != 1;
             match flg {
                 0 => {
                     if bits(lo, 46, 1) != 0 {
@@ -327,14 +284,13 @@ impl Gs {
                             // in the second word; as register values, in
                             // the first.
                             let y = if matches!(desc(k), 4 | 5) { 32 } else { 16 };
-                            vertices.push(Vertex::new(at, (0, y), &state, &narrow));
+                            vertices.push(Vertex::new(at, (0, y), &state, narrow));
                         } else if let Some(context) = scissor_context(address) {
                             // A sub-view's scissor narrows with what it holds.
                             let frame = state.frame[context];
                             let width = frame_width(frame);
                             let mut value = value;
                             if narrow.shown(frame) && sub_view(value, width) {
-                                narrow.note(value, width);
                                 let [x0, x1, _, _] = scissor_box(value);
                                 value = narrow_scissor(value, width, anchor(x0, x1, width));
                                 data[at] = (data[at] >> 64 << 64) | u128::from(value);
@@ -354,7 +310,7 @@ impl Gs {
                         let address = desc(k);
                         if is_vertex(address) {
                             flat &= narrow.flat(&state);
-                            vertices.push(Vertex::new(qword, (shift, shift + 16), &state, &narrow));
+                            vertices.push(Vertex::new(qword, (shift, shift + 16), &state, narrow));
                         } else if address < 0xE {
                             state.write(address, (q >> shift) as u64);
                         }
@@ -366,19 +322,85 @@ impl Gs {
             if let Some(anchor) = vertices.iter().find_map(|v| v.sub) {
                 narrow_tag(data, &vertices, anchor);
             } else if flat && !vertices.is_empty() {
-                let places: Vec<[i64; 2]> = vertices.iter().map(|v| v.place(data)).collect();
-                let spans = places.iter().any(|p| p[0] <= EDGE)
-                    && places
-                        .iter()
-                        .zip(&vertices)
-                        .any(|(p, v)| p[0] >= v.width - EDGE);
+                let piece = Piece::new(data, &vertices);
+                let spans = piece.bounds[0] <= EDGE && piece.bounds[1] >= vertices[0].width - EDGE;
                 if !spans {
-                    let anchor = narrow.anchor_of(&places).unwrap_or(Anchor::Centre);
-                    narrow_tag(data, &vertices, anchor);
+                    pieces.push(piece);
                 }
             }
         }
-        self.narrow = Some(narrow);
+        narrow_pieces(data, &mut pieces);
+    }
+}
+
+/// A flat tag: its vertices and their bounds (X, then Y; 1/16 pixels).
+struct Piece {
+    vertices: Vec<Vertex>,
+    bounds: [i64; 4],
+    /// The piece whose group it joined (itself at first).
+    group: usize,
+}
+
+impl Piece {
+    fn new(data: &[u128], vertices: &[Vertex]) -> Self {
+        let mut bounds = [i64::MAX, i64::MIN, i64::MAX, i64::MIN];
+        for v in vertices {
+            let [x, y] = v.place(data);
+            bounds = [
+                bounds[0].min(x),
+                bounds[1].max(x),
+                bounds[2].min(y),
+                bounds[3].max(y),
+            ];
+        }
+        Self {
+            vertices: vertices.to_vec(),
+            bounds,
+            group: 0,
+        }
+    }
+
+    /// Whether two pieces belong to one block: they overlap across, and
+    /// are at most a line apart down (the lines of a caption).
+    fn near(&self, other: &Self) -> bool {
+        let line = 16 * 16;
+        let [a, b] = [self.bounds, other.bounds];
+        a[0] <= b[1] && b[0] <= a[1] && a[2] <= b[3] + line && b[2] <= a[3] + line
+    }
+}
+
+/// Narrows a transfer's flat pieces by blocks: pieces near each other
+/// (directly or through others) share the anchor of their joint bounds, so
+/// that a caption's lines stay together.
+fn narrow_pieces(data: &mut [u128], pieces: &mut [Piece]) {
+    fn root(pieces: &[Piece], mut k: usize) -> usize {
+        while pieces[k].group != k {
+            k = pieces[k].group;
+        }
+        k
+    }
+    for (k, piece) in pieces.iter_mut().enumerate() {
+        piece.group = k;
+    }
+    for k in 0..pieces.len() {
+        for j in 0..k {
+            if pieces[k].near(&pieces[j]) {
+                let (rk, rj) = (root(pieces, k), root(pieces, j));
+                pieces[rk].group = rj;
+            }
+        }
+    }
+    for k in 0..pieces.len() {
+        let group = root(pieces, k);
+        let (x0, x1) = pieces
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| root(pieces, j) == group)
+            .fold((i64::MAX, i64::MIN), |(lo, hi), (_, p)| {
+                (lo.min(p.bounds[0]), hi.max(p.bounds[1]))
+            });
+        let width = pieces[k].vertices[0].width;
+        narrow_tag(data, &pieces[k].vertices, anchor(x0, x1, width));
     }
 }
 
@@ -419,10 +441,7 @@ mod tests {
 
     fn gs() -> Gs {
         let mut gs = Gs {
-            narrow: Some(Narrow {
-                displayed: vec![0],
-                ..Narrow::default()
-            }),
+            narrow: Some(Narrow { displayed: vec![0] }),
             prmodecont: 1,
             ..Gs::default()
         };
@@ -435,15 +454,24 @@ mod tests {
     }
 
     #[test]
-    fn flat_tags_narrow_towards_the_centre_and_full_width_ones_stay() {
-        let mut gs = gs();
+    fn flat_tags_narrow_towards_their_anchor_and_full_width_ones_stay() {
+        let gs = gs();
+        // Across the middle: 320 + (200 - 320) * 3/4 = 230, and 410.
+        let mut data = sprites(&[200, 440]);
+        gs.narrow(3, &mut data);
+        assert_eq!((data[1], data[2]), (230 * 16, 410 * 16));
+        // In the left third: from the left edge.
         let mut data = sprites(&[0, 160]);
-        gs.narrow(1, &mut data);
-        // 320 + (0 - 320) * 3/4 = 80; 320 + (160 - 320) * 3/4 = 200.
-        assert_eq!((data[1], data[2]), (80 * 16, 200 * 16));
+        gs.narrow(3, &mut data);
+        assert_eq!((data[1], data[2]), (0, 120 * 16));
+        // Across the frame: as it is.
         let mut data = sprites(&[0, 640]);
-        gs.narrow(1, &mut data);
+        gs.narrow(3, &mut data);
         assert_eq!((data[1], data[2]), (0, 640 * 16));
+        // From VU1: projected 3D, as it is.
+        let mut data = sprites(&[200, 440]);
+        gs.narrow(1, &mut data);
+        assert_eq!((data[1], data[2]), (200 * 16, 440 * 16));
     }
 
     #[test]
@@ -459,13 +487,30 @@ mod tests {
         // In the left third: it keeps its distance from the left edge.
         assert_eq!(data[1] as u64, 0x1 | 0x78 << 16 | 0x9D << 32 | 0xD5 << 48);
         assert_eq!((data[3], data[4]), (12, 120 * 16));
-        // Flat things inside its box go with it.
+        // Flat things in the same third go the same way.
         let mut data = sprites_at(&[10, 150], 180);
         gs.ctx[0].test = 0;
         gs.ctx[0].scissor = 0x27F << 16 | 0xDF << 48;
-        gs.narrow(1, &mut data);
+        gs.narrow(3, &mut data);
         let line = u128::from(180_u32 * 16) << 32;
         assert_eq!((data[1], data[2]), (0x78 | line, 0x708 | line));
+    }
+
+    #[test]
+    fn a_captions_lines_keep_one_anchor() {
+        let gs = gs();
+        // A long first line across the middle, a short second one under it
+        // in the left third: both narrow towards the centre.
+        let mut data = sprites_at(&[47, 480], 100);
+        data.extend(sprites_at(&[62, 162], 115));
+        gs.narrow(3, &mut data);
+        let x = |q: u128| i64::from((q & 0xFFFF) as u16);
+        let centre = |px: i64| narrowed(px * 16, 640 * 16, Anchor::Centre);
+        assert_eq!((x(data[4]), x(data[5])), (centre(62), centre(162)));
+        // Alone, the second line keeps to the left edge.
+        let mut data = sprites_at(&[62, 162], 115);
+        gs.narrow(3, &mut data);
+        assert_eq!(x(data[1]), narrowed(62 * 16, 640 * 16, Anchor::Left));
     }
 
     #[test]
