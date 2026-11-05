@@ -42,6 +42,11 @@
 # CARD_OUT=IMAGE copies slot 1's card, as the game left it, to IMAGE at the
 # end (it holds the game's saves: keep it outside the repository).
 #
+# AUDIO=FILE writes the sound PCSX2 makes between two `capture` presses
+# (its video capture, audio only, as 16-bit WAV through the system's
+# ffmpeg) to FILE. PCSX2's own sound output is off (the null backend), so
+# runs make no sound.
+#
 # PCSX2 runs inside `gamescope --backend headless` (no window opens) with a
 # data folder of its own in a temporary directory, no memory card unless
 # CARD is given, the software renderer at native resolution, and the USA
@@ -74,6 +79,7 @@ SettingsVersion = 1
 Bios = bios
 Logs = logs
 MemoryCards = memcards
+Videos = videos
 [Filenames]
 BIOS = $(basename "$bios")
 [EmuCore]
@@ -102,6 +108,9 @@ LRight = Keyboard/L
 [Hotkeys]
 GSDumpSingleFrame = Keyboard/F8
 SaveStateToSlot = Keyboard/F1
+ToggleVideoCapture = Keyboard/F9
+[SPU2/Output]
+Backend = Null
 [EmuCore/GS]
 GSDumpCompression = 0
 Renderer = 13
@@ -117,7 +126,11 @@ SaveFrameCount = $count
 SaveFrameBy = ${STEP:-1}
 HWDumpDirectory = $out
 SWDumpDirectory = $out
+EnableVideoCapture = false
+EnableAudioCapture = true
+CaptureContainer = wav
 INI
+mkdir -p "$data/videos"
 
 # PCSX2 and the presser run inside gamescope, on its Xwayland.
 cat > "$work/inside.sh" <<'SH'
@@ -148,6 +161,13 @@ until ls "$out" 2>/dev/null | grep -q "$last"; do
     fi
     sleep 0.5
 done
+# The sound captured.
+if [ -n "${AUDIO:-}" ]; then
+    sleep 1
+    for wav in "$data"/videos/*.wav "$data"/videos/*/*.wav; do
+        [ -e "$wav" ] && cp "$wav" "$AUDIO"
+    done
+fi
 # The card as the game left it.
 if [ -n "${CARD_OUT:-}" ] && [ -e "$data/memcards/Mcd001.ps2" ]; then
     cp "$data/memcards/Mcd001.ps2" "$CARD_OUT"

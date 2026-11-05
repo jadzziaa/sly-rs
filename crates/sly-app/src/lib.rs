@@ -13,6 +13,7 @@ mod play;
 mod replay;
 mod run;
 mod screen;
+mod sound;
 mod vu_bench;
 
 use std::path::PathBuf;
@@ -382,6 +383,9 @@ enum Command {
         scale: u32,
         #[command(flatten)]
         card: CardArgs,
+        /// Write the sound to this WAV file (48 kHz, 16-bit stereo).
+        #[arg(long)]
+        wav: Option<PathBuf>,
     },
     /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
     /// as PCSX2 keeps them), or check an existing one with --check.
@@ -481,6 +485,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             gpu,
             scale,
             card,
+            wav,
         } => replay::run(
             &path,
             record,
@@ -492,6 +497,8 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
                 timing,
                 gpu: gpu.then_some(scale),
+                wav_path: wav.as_deref(),
+                wav: None,
             },
             recompiled.filter(|_| !interpret),
         ),

@@ -23,6 +23,8 @@ gpu = false
 # With the GPU, draw at this many times the PS2's resolution (1 to 4): a
 # sharper picture for four, nine or sixteen times the GPU's work.
 scale = 1
+# Sound volume in percent; 0 turns sound off.
+volume = 100
 
 # Key bindings replace the defaults one by one: a DualShock button (as in a
 # replay's presses) or a stick direction (left-up, right-down, ...) = a key

@@ -1,5 +1,8 @@
 # Update log
 
+## 2026-11-05
+* **Update**: [Sound and movies](research/sound-and-movies.md): the user's decisions recorded (Rust rewrites by default, emulation behind a classic setting); M1 and M2: `ps2-spu2` (PCSX2's SPU2, ported) under the disc's 989snd, `replay --wav`, sound in `play` through cpal. New-game replay hashes re-recorded.
+
 ## 2026-11-04
 * **Creation**: [Sound and movies](research/sound-and-movies.md), phase 8's proposal: an SPU2 under Sly's own 989snd, exact on the IOP's clock (989snd reads its voices' envelopes thousands of times); cpal output through a resampling buffer; movies through an emulated IPU; four decisions for the user.
 * **Update**: Phase 7's open items settled: the pad record carries the button mask the disc's libpad reads, so Sly 1 enters pressure mode (0x79, Shock2) as on a console ([sly1-boot.md](research/sly1-boot.md)); Sly's shadow in the opening cutscene matches PCSX2, in the real game and drawn from our GS dump ([sly1-graphics.md](research/sly1-graphics.md)). New-game replay hashes re-recorded.

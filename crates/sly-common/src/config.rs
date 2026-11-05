@@ -93,6 +93,8 @@ pub struct Play {
     /// When drawing on the GPU, draw at this many times the GS's
     /// resolution (1 to 4).
     pub scale: u32,
+    /// Sound volume, in percent (0 is silent: no sound device is opened).
+    pub volume: u32,
 }
 
 impl Default for Play {
@@ -104,6 +106,7 @@ impl Default for Play {
             gamepad: BTreeMap::new(),
             gpu: false,
             scale: 1,
+            volume: 100,
         }
     }
 }
@@ -294,7 +297,14 @@ mod tests {
         assert!(!config.play().pause_on_focus_loss);
         assert_eq!(config.play().window, [1280, 896]);
         assert_eq!(config.play().keys["cross"], "KeyK");
-        assert!(Config::parse("[play]\nvolume = 3\n", Path::new(".")).is_err());
+        assert!(Config::parse("[play]\nloudness = 3\n", Path::new(".")).is_err());
+        assert_eq!(
+            Config::parse("[play]\nvolume = 30\n", Path::new("."))
+                .unwrap()
+                .play()
+                .volume,
+            30
+        );
     }
 
     #[test]

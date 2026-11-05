@@ -1,7 +1,8 @@
 //! `replay`: runs a replay file and checks its checkpoints (world, level and
 //! state hash), or records the hashes with `--record`. `--frames` saves what
 //! the display shows every so many fields, `--beyond` runs on past the end
-//! with the pad left alone, `--gs-dump` writes the last fields' GS traffic.
+//! with the pad left alone, `--gs-dump` writes the last fields' GS traffic,
+//! `--wav` the sound.
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -14,6 +15,7 @@ use sly_common::state::Sly1State;
 use crate::Recompiled;
 
 /// Pictures to save while a replay runs.
+#[derive(Clone, Copy)]
 pub(crate) struct Frames<'a> {
     /// The directory (`fieldNNNNNN.png`).
     pub(crate) dir: Option<&'a Path>,
@@ -27,6 +29,10 @@ pub(crate) struct Frames<'a> {
     pub(crate) timing: bool,
     /// Draw on the GPU, at this many times the GS's resolution.
     pub(crate) gpu: Option<u32>,
+    /// The WAV file to write the sound to.
+    pub(crate) wav_path: Option<&'a Path>,
+    /// Where the sound goes, as it is made (opened from `wav_path`).
+    pub(crate) wav: Option<&'a std::cell::RefCell<crate::sound::Wav>>,
 }
 
 /// Runs `fields` fields of `script`, saving pictures on the way.
@@ -37,7 +43,7 @@ fn advance(
     script: &replay::Script,
     frames: &Frames<'_>,
 ) -> Result<ps2_ee::Stop> {
-    if frames.dir.is_none() && !frames.timing {
+    if frames.dir.is_none() && !frames.timing && frames.wav.is_none() {
         return Ok(replay::run(machine, fields, script));
     }
     let mut started = std::time::Instant::now();
@@ -67,6 +73,9 @@ fn advance(
     let mut before = times(machine);
     for _ in 0..fields {
         let stop = replay::run(machine, 1, script);
+        if let Some(wav) = frames.wav {
+            wav.borrow_mut().write(&machine.iop.take_samples())?;
+        }
         if stop != ps2_ee::Stop::Budget {
             return Ok(stop);
         }
@@ -113,6 +122,10 @@ fn advance(
     Ok(ps2_ee::Stop::Budget)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the replay's steps, read top to bottom"
+)]
 pub(crate) fn run(
     path: &Path,
     record: bool,
@@ -120,6 +133,15 @@ pub(crate) fn run(
     frames: &Frames<'_>,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
+    let wav_path = frames.wav_path;
+    let sound = wav_path
+        .map(crate::sound::Wav::create)
+        .transpose()?
+        .map(std::cell::RefCell::new);
+    let frames = &Frames {
+        wav: sound.as_ref(),
+        ..*frames
+    };
     let mut replay = Replay::load(path)?;
     let game =
         Game::from_key(&replay.game).with_context(|| format!("unknown game {:?}", replay.game))?;
@@ -137,6 +159,7 @@ pub(crate) fn run(
     if let Some(dir) = frames.dir {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    machine.iop.keep_samples(frames.wav.is_some());
     let mut out = io::stdout().lock();
     let started = std::time::Instant::now();
     let mut failures = 0;
@@ -214,6 +237,10 @@ pub(crate) fn run(
         writeln!(out, "hashes recorded in {}", path.display())?;
     }
     card.write(&machine)?;
+    if let (Some(sound), Some(path)) = (sound, wav_path) {
+        sound.into_inner().finish()?;
+        writeln!(out, "the sound is in {}", path.display())?;
+    }
     if failures > 0 {
         bail!("{failures} checkpoints failed");
     }

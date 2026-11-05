@@ -34,6 +34,7 @@ KEYS = {
     "right": "Right",
     "gsdump": "F8",
     "state": "F1",
+    "capture": "F9",
     "lup": "i",
     "ldown": "k",
     "lleft": "j",

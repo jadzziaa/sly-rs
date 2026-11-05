@@ -1,0 +1,13 @@
+[package]
+name = "ps2-spu2"
+description = "The PlayStation 2's sound processor (SPU2): two cores of 24 ADPCM voices with envelopes, reverb and AutoDMA input, ported from PCSX2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

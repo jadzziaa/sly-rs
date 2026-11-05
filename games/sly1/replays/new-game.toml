@@ -12,16 +12,16 @@ presses = ["start@300", "start@500", "cross@700", "start@1600", "start@2000"]
 field = 600
 world = 0
 level = 2
-hash = "e3743f7c58cef316"
+hash = "9a088e37ed79175c"
 
 [[checkpoint]]
 field = 1500
 world = 0
 level = 3
-hash = "883892699a279710"
+hash = "32794f5122f09ecd"
 
 [[checkpoint]]
 field = 2600
 world = 0
 level = 3
-hash = "bc47c2de9f5be662"
+hash = "f9e37a7eecfc97ae"

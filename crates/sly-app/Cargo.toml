@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+cpal.workspace = true
 gilrs.workspace = true
 object.workspace = true
 pollster.workspace = true

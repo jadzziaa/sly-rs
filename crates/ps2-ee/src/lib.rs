@@ -343,6 +343,7 @@ impl Machine {
                 hw.gs_csr
             };
             self.iop.vblank(&mut self.mem);
+            self.iop.sound_until(now / IOP_DIVIDER);
             if let Some((flag, csr_at)) = self.kernel.vsync_flag() {
                 self.mem.write32(flag, 1);
                 self.mem.write64(csr_at, csr);

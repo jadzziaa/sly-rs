@@ -1,10 +1,10 @@
 ---
 type: Proposal
 title: Sound and movies (phase 8)
-description: The design for phase 8 - an SPU2 under Sony's own 989snd, run on the IOP's clock so that everything the game reads stays exact, its output carried to the host through a resampling buffer, and movies decoded by an emulated IPU under the game's own libmpeg - with what Sly 1 asks of the SPU2 today, the milestones and their checks, and the four decisions it needs.
+description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T05:20:00Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T06:16:47Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -25,6 +25,15 @@ sources:
   - id: user
     resource: human:august, 2026-11-04
     title: The user's go-ahead to start the next plan step while away
+  - id: decisions
+    resource: human:august, 2026-11-05
+    title: 'The user''s decisions: emulation behind a classic setting, not the default; otherwise the Rust rewrites; cpal; silence on a slow host'
+  - id: pcsx2-sound
+    resource: tools/pcsx2-frames.sh with AUDIO (PCSX2's audio capture) against sly-rs replay --wav, the save dialog (blank card, Left at 300, Cross at 340) and the opening scene (card with a save), compared with numpy, 2026-11-05
+    title: sly-rs's sound against PCSX2's
+  - id: pcsx2-spu2
+    resource: https://github.com/PCSX2/pcsx2 (pcsx2/SPU2), GPL-3.0-or-later, read from a sparse clone, 2026-11-05
+    title: PCSX2's SPU2
 ---
 
 # Sound and movies (phase 8)
@@ -32,8 +41,15 @@ sources:
 Phase 8's gate: every movie plays in sync, and sound effects and music
 match PCSX2 recordings of the same replay by ear and by waveform.[^plan]
 With phase 7's remaining work waiting on the user's playthrough, this is
-the next step;[^user] it needs decisions before code, so this is a
-proposal.
+the next step.[^user]
+
+**Decided (2026-11-05):**[^decisions] the Rust rewrites are the default, a
+Rust 989snd for sound and a Rust MPEG-2 decoder in place of libmpeg's
+decoding for movies; the emulation of the hardware under Sony's own code
+(the disc's 989snd on the emulated IOP over the SPU2, an emulated IPU
+under libmpeg) is a **classic** setting, not the default. `cpal` carries
+the sound out, and a slow host gets silence, not stretched sound. The
+sections below keep the comparison that led there.
 
 ## Where things stand
 
@@ -55,7 +71,13 @@ proposal.
 
 ## Design
 
-### An SPU2 under the real 989snd
+Both sound paths drive one SPU2 voice engine, `ps2-spu2`, ported from
+PCSX2's (`pcsx2/SPU2`, GPL-3.0-or-later like sly-rs),[^pcsx2-spu2] so that
+the output matches PCSX2's by construction: in classic, the disc's 989snd
+writes its registers; by default, the Rust 989snd does. A replay records
+which (`classic = true`), since the two leave different machine states.
+
+### Classic: the SPU2 under the real 989snd
 
 Emulate the SPU2 as hardware, under the 989snd the disc carries, rather
 than replacing 989snd as rac-rs does.[^rac-rs] The driver's sequencing,
@@ -100,9 +122,21 @@ gap is silence rather than slowed sound. Headless runs make the same
 samples and can write them to a WAV file (`replay --wav`), which is how
 the gate's waveform comparison with PCSX2 is made.
 
-### Movies: an emulated IPU under the game's libmpeg
+### Default: a Rust 989snd
 
-Two ways to play Sly's PSS movies:
+A port of Sly 1's own driver (989snd, built 21 August 2002, with MIDI),
+answering the EE's `snd_*` calls at the RPC level and driving
+`ps2-spu2`'s voices directly, with the IOP running no sound code. rac-rs's
+exact port of R&C 1's build is the guide (its handlers, grains, banks and
+pitch tables; GPL-3.0), but not a drop-in: Sly 1's build differs, and
+rac-rs leaves out what Sly needs, streamed VAG (voice lines), movie sound
+and MIDI sequences.[^rac-rs] Until it exists, the classic path is the only
+one that sounds.
+
+### Movies
+
+Two ways to play Sly's PSS movies (the first is classic, the second the
+default):
 
 | | IPU emulation | Hook libmpeg, decode in Rust |
 | --- | --- | --- |
@@ -111,40 +145,81 @@ Two ways to play Sly's PSS movies:
 | Size | the IPU only (no motion compensation, no picture management) | a whole decoder |
 | Audio | untouched: the game demultiplexes and sends it to 989snd | untouched as well, if the demultiplexer still runs |
 
-**Proposed: the IPU.** The three movie hooks then go, behind an option
-that keeps skipping movies.
+The three movie hooks go once either plays movies; skipping movies stays
+an option.
+
+## Progress
+
+- **M1, 2026-11-05: the SPU2 sounds.** `ps2-spu2` ports PCSX2's SPU2 in
+  PS2 mode (voices, envelopes, volume slides, noise, pitch modulation, the
+  mix, reverb with its resampling filters, the IRQ address, plain and
+  AutoDMA transfers), 13 unit tests. The IOP's hardware model hands it
+  every SPU2 register access and DMA transfer and catches it up to the
+  IOP's clock (and to the machine's at each V-blank), so the disc's
+  989snd now drives a real chip. Over the new-game replay the sound is
+  silent through the boot, then the attract and intro play (peaks up to
+  17,459 of 32,767); the replay reaches its three places, hashes recorded
+  again. `replay --wav FILE` writes the sound.
+- **M2, 2026-11-05: `play` sounds**, through `cpal` and the resampling
+  buffer (checked headless at 1% volume: the stream opens, at 44.1 kHz
+  here, and the game runs; not yet listened to). `volume` under `[play]`,
+  0 for none.
+- Until the Rust 989snd exists, the disc's driver is the only one, so
+  there is no classic setting yet: it comes with the choice.
+- **Against PCSX2, 2026-11-05.**[^pcsx2-sound] PCSX2's release builds
+  record sound only through their video capture; `tools/pcsx2-frames.sh`
+  now takes `AUDIO=FILE` (audio only, WAV; a `capture` press starts and
+  stops it) and runs PCSX2 with its sound output off.
+  - **An isolated sound is the same, sample for sample.** The cursor
+    sound of the "create a save file?" dialog (Left at field 300, with a
+    blank card in both): correlation 0.995 as made; with PCSX2's
+    DC-blocking output filter (`spu2.cpp`'s `DCFilter`, applied to
+    sly-rs's samples) **correlation 1.000000, every sample within 1** (its
+    float conversion).
+  - **The opening scene** (PCSX2 frames 1300-2200, the same stretch of
+    ours): the music lines up at one offset, constant to 0.1 ms over 13
+    seconds, so it runs at PCSX2's tempo; per second the correlation is
+    0.32 to 0.90, the sound effects falling at slightly different moments
+    (the two runs' animations are a few frames apart, as the pictures
+    showed).
+  - `play` applies the same DC filter; `replay --wav` writes the chip's
+    own output.
+- **Cost**: on the user's prologue recording (PGO, GPU drawing) the IOP,
+  with the SPU2 in it, takes 7.0% of the machine thread's host time,
+  against about 1% before: the chip costs about 6%.
+- **Recordings made before the SPU2 drift**: with voices that now play
+  out, the game's timing changes where it waits on sound, so a recording
+  made against the silent chip loses step. The user's prologue recording
+  still plays (the binocucom, the titles, the level) but ends in the
+  first level instead of the next, its input out of step; it needs
+  recording again. The new-game replay reaches its places; its hashes are
+  recorded again. No SPU2 interrupt is raised over the prologue: Sly's
+  voice lines do not wait on one.
+- Not checked yet: AutoDMA from the IOP's DMA side (movie sound).
 
 ## Milestones and checks
 
-1. **M1 Voices**: ADPCM, pitch and Gaussian interpolation, ADSR, key on and
-   off, `ENVX`/`ENDX`/next address; `replay --wav`. Checks: unit tests
-   against the published tables and known VAG data; the new-game replay's
-   sound effects against a PCSX2 recording of the same presses, by ear and
-   by waveform of isolated effects.
-2. **M2 Play**: `cpal` output with the resampling buffer; volume in
-   `[play]`.
-3. **M3 The rest of the chip**: reverb, noise, pitch modulation, the IRQ
-   address. Check: music against PCSX2 recordings.
-4. **M4 AutoDMA input**: streamed voice lines and movie sound.
-5. **M5 Movies**: the IPU; the hooks removed. Check: every movie against
-   PCSX2's frames and sound, in sync.
+1. **M1 The SPU2**: `ps2-spu2` (voices, envelopes, mixing, reverb, the IRQ
+   address, AutoDMA), wired under the classic path; `replay --wav`.
+   Checks: unit tests; the new-game replay's sound against a PCSX2
+   recording of the same presses, by ear and by waveform.
+2. **M2 Play**: `cpal` output with the resampling buffer; the classic
+   setting in `[play]`, `play --classic`, and in replays.
+3. **M3 The Rust 989snd**: banks, sounds and their grains, voice
+   allocation, MIDI, streams, movie sound, against the classic path's
+   register writes and output.
+4. **M4 Movies**: the Rust decoder (default), then the IPU (classic); the
+   hooks removed. Check: every movie against PCSX2's frames and sound, in
+   sync.
 
-Each milestone keeps every replay exact (hashes re-recorded once at M1) and
-`lockstep` equal.
-
-## Decisions needed
-
-1. **The SPU2 under the real 989snd** (proposed), or a Rust 989snd as rac-rs
-   has.
-2. **Movies through an emulated IPU** (proposed), or hooking libmpeg with a
-   Rust MPEG-2 decoder.
-3. **`cpal`** as a new dependency for sound output (mainstream; `cargo deny`
-   would check it).
-4. **On a slow host**: silence when the buffer runs dry (proposed), or
-   stretching the sound.
+Each milestone keeps every replay exact and `lockstep` equal; hashes are
+recorded again where the machine's state changes.
 
 [^plan]: 'sly-rs: plan, phase 8 - Sound and movies'
 [^regs]: What 989snd asks of the SPU2 in Sly 1
 [^symbols]: Sly 1's sound and movie functions by name
 [^rac-rs]: How rac-rs is built (a Rust port of 989snd emitting SPU2 voices; movies by a pure-Rust MPEG-2 decoder; GPL-3.0)
 [^user]: The user's go-ahead to start the next plan step while away
+[^decisions]: The user's decisions: emulation behind a classic setting, not the default; otherwise the Rust rewrites; cpal; silence on a slow host
+[^pcsx2-spu2]: PCSX2's SPU2
+[^pcsx2-sound]: sly-rs's sound against PCSX2's

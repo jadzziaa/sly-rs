@@ -326,6 +326,29 @@ impl Iop {
         Ok(())
     }
 
+    /// Brings the SPU2 up to `until` (IOP cycles), the machine's time at a
+    /// V-blank. An IOP with nothing due by then idles to it, as it would
+    /// when next run.
+    pub fn sound_until(&mut self, until: u64) {
+        if !self.core.busy(until) {
+            self.core.cpu.cycles = self.core.cpu.cycles.max(until);
+        }
+        let now = self.core.cpu.cycles;
+        self.core.hw.now = now;
+        self.core.hw.catch_up(now);
+    }
+
+    /// Keeps the SPU2's samples for [`Iop::take_samples`] from now on, or
+    /// stops keeping them (the default: headless runs need no sound).
+    pub fn keep_samples(&mut self, keep: bool) {
+        self.core.hw.keep_samples(keep);
+    }
+
+    /// The SPU2's 48 kHz samples made since the last call, if kept.
+    pub fn take_samples(&mut self) -> Vec<[i16; 2]> {
+        self.core.hw.take_samples()
+    }
+
     /// Whether the IOP's processor has something to do by `until`.
     #[must_use]
     pub fn busy(&self, until: u64) -> bool {

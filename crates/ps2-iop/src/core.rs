@@ -365,25 +365,20 @@ impl IopCore {
             .min()
     }
 
-    /// Completes the DMA transfers due by now: their data moves and their
-    /// interrupt line is raised.
+    /// Runs the SPU2 up to now and completes the DMA transfers due: their
+    /// data moves and their interrupt line is raised; so is the SPU2's, if
+    /// it asked.
     fn finish_transfers(&mut self, ram: &mut [u8]) {
+        self.hw.now = self.cpu.cycles;
+        self.hw.catch_up(self.cpu.cycles);
         for t in self.hw.take_due(self.cpu.cycles) {
-            let (madr, spu, n) = (
-                t.madr as usize & 0x1F_FFFF,
-                t.spu as usize,
-                t.bytes as usize,
-            );
-            let n = n
-                .min(ram.len().saturating_sub(madr))
-                .min(self.hw.spu_ram.len().saturating_sub(spu));
-            if t.to_spu {
-                self.hw.spu_ram[spu..spu + n].copy_from_slice(&ram[madr..madr + n]);
-            } else {
-                ram[madr..madr + n].copy_from_slice(&self.hw.spu_ram[spu..spu + n]);
-            }
+            self.hw.complete(&t, ram);
             tracing::debug!(target: "iop::spu2", "cycle {}: DMA done, line {:#x}", self.cpu.cycles, t.line);
             self.raise(t.line);
+        }
+        if self.hw.take_irq() {
+            tracing::debug!(target: "iop::spu2", "cycle {}: SPU2 interrupt", self.cpu.cycles);
+            self.raise(crate::spu2::SPU2_LINE);
         }
     }
 

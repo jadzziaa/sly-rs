@@ -171,30 +171,10 @@ fn emulate(
         let name = crate::use_gpu(&machine, options.settings.scale, shared_gpu)?;
         tracing::info!("drawing on the GPU: {name}");
     }
-    let (script, ahead, card, mut saving) = match &options.replay {
-        Some(path) => {
-            let replay = Replay::load(path)?;
-            let card = replay
-                .card
-                .as_deref()
-                .map(|spec| sly_common::card::load(spec, path.parent().unwrap_or(Path::new("."))))
-                .transpose()?;
-            if card.is_some() {
-                tracing::info!("the memory card is the replay's: saves stay in memory");
-            }
-            (Script::of(&replay)?, replay.fields, card, None)
-        }
-        None => match &options.card {
-            Some(path) => (
-                Script::default(),
-                0,
-                Some(open_card(path)?),
-                Some(CardSaver::new(path.clone())),
-            ),
-            None => (Script::default(), 0, None, None),
-        },
-    };
+    let (script, ahead, card, mut saving) = start(options)?;
     machine.iop.insert_card(card.clone());
+    let speaker = speaker(options.settings.volume);
+    machine.iop.keep_samples(speaker.is_some());
     let gamepad_map = GamepadMap::new(&options.settings.gamepad)?;
     let mut gamepads = gilrs::Gilrs::new()
         .map_err(|e| tracing::warn!("no gamepads: {e}"))
@@ -228,6 +208,14 @@ fn emulate(
         }
         if let Some(saver) = &mut saving {
             saver.after_field(&machine);
+        }
+        // Sound plays once the session is live; a replay played through at
+        // full speed is silent.
+        let samples = machine.iop.take_samples();
+        if let Some(speaker) = &speaker
+            && live
+        {
+            speaker.push(&samples);
         }
         // While a replay plays through, show one picture in 30.
         if live || field.is_multiple_of(30) {
@@ -270,6 +258,46 @@ fn emulate(
         save(path, options.game, &mut machine, &recorder, card.as_ref())?;
     }
     Ok(())
+}
+
+/// What the session starts from: the input to play through first and how
+/// many fields of it, the memory card, and where the card is saved.
+fn start(options: &Options) -> Result<(Script, u64, Option<ps2_memcard::Card>, Option<CardSaver>)> {
+    Ok(match &options.replay {
+        Some(path) => {
+            let replay = Replay::load(path)?;
+            let card = replay
+                .card
+                .as_deref()
+                .map(|spec| sly_common::card::load(spec, path.parent().unwrap_or(Path::new("."))))
+                .transpose()?;
+            if card.is_some() {
+                tracing::info!("the memory card is the replay's: saves stay in memory");
+            }
+            (Script::of(&replay)?, replay.fields, card, None)
+        }
+        None => match &options.card {
+            Some(path) => (
+                Script::default(),
+                0,
+                Some(open_card(path)?),
+                Some(CardSaver::new(path.clone())),
+            ),
+            None => (Script::default(), 0, None, None),
+        },
+    })
+}
+
+/// The sound card at `volume` percent, if sound is on and a card opens.
+fn speaker(volume: u32) -> Option<crate::sound::Speaker> {
+    if volume == 0 {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss, reason = "a percentage")]
+    let volume = volume.min(100) as f32 / 100.0;
+    crate::sound::Speaker::open(volume)
+        .map_err(|e| tracing::warn!("no sound: {e:#}"))
+        .ok()
 }
 
 /// The card image at `path`, or a new formatted one written there.

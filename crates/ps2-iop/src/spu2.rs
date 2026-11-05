@@ -1,46 +1,53 @@
-//! The IOP's hardware, as far as the modules it runs need it: the SPU2's
-//! two cores (registers and 2 MiB of sound memory, silent) and the IOP DMA
-//! channels that feed them (4 for core 0, 7 for core 1).
+//! The IOP's hardware, as far as the modules it runs need it: the SPU2
+//! ([`ps2_spu2`], PCSX2's, ported) and the IOP DMA channels that feed it (4
+//! for core 0, 7 for core 1).
 //!
-//! A DMA transfer starts when its channel's CHCR gets the start bit. It
-//! takes one IOP cycle per word; then the data moves between IOP RAM and
-//! sound memory, the start bit clears and the channel's interrupt line is
-//! raised (0x24 or 0x28), as `libsd` expects. Writes to a core's data port
-//! go to sound memory at the core's transfer address. A core's STATX has
-//! bit 7 set while it has no transfer under way (`libsd` waits for it after
-//! each one). Every other register reads back what was last written.
+//! The SPU2 makes a sample every 768 IOP cycles. It is caught up to the
+//! IOP's clock before every access to its registers, as the IOP's
+//! processor runs, and to the machine's time at each V-blank, so whatever
+//! the IOP reads is what the chip holds at that moment. While a core's
+//! interrupt is enabled, the next sample is an IOP event, so an interrupt
+//! is raised at the sample that causes it.
+//!
+//! A DMA transfer starts when its channel's CHCR gets the start bit and
+//! takes one IOP cycle per word; then its data moves between IOP RAM and
+//! the SPU2, the start bit clears and the channel's interrupt line is
+//! raised (0x24 or 0x28), as `libsd` expects. Other registers read back
+//! what was last written.
 
 use std::collections::BTreeMap;
 
 use ps2_core::iop::IopMmio;
-
-/// Sound memory size: 2 MiB.
-pub const SPU_RAM_SIZE: usize = 2 << 20;
+use ps2_spu2::Spu2;
 
 /// The DMA channels feeding the SPU2: (channel, base register, core,
 /// interrupt line).
 const CHANNELS: [(u8, u32, usize, u32); 2] = [(4, 0x1F80_10C0, 0, 0x24), (7, 0x1F80_1500, 1, 0x28)];
 
-/// A core's registers start here.
-fn core_base(core: usize) -> u32 {
-    0x1F90_0000 + 0x400 * core as u32
-}
+/// The SPU2's registers.
+const SPU2: std::ops::Range<u32> = 0x1F90_0000..0x1F90_0800;
+
+/// The cores' ATTR registers: bit 6 enables the core's interrupt.
+const ATTR: [u32; 2] = [0x1F90_019A, 0x1F90_059A];
+
+/// The IOP interrupt line of the SPU2.
+pub const SPU2_LINE: u32 = 9;
 
 /// A DMA transfer under way.
 #[derive(Clone, Copy, Debug)]
 pub struct Transfer {
     /// Its channel's interrupt line.
     pub line: u32,
+    /// The SPU2 core it feeds.
+    pub core: usize,
     /// Its CHCR register.
     pub chcr: u32,
     /// IOP RAM address.
     pub madr: u32,
     /// Bytes.
     pub bytes: u32,
-    /// From IOP RAM to sound memory (or back).
+    /// From IOP RAM to the SPU2 (or back).
     pub to_spu: bool,
-    /// Sound memory address.
-    pub spu: u32,
     /// IOP cycle at which it completes.
     pub due: u64,
 }
@@ -48,8 +55,16 @@ pub struct Transfer {
 /// The IOP's hardware registers.
 pub struct IopHardware {
     values: BTreeMap<u32, u32>,
-    /// SPU2 sound memory.
-    pub spu_ram: Vec<u8>,
+    /// The SPU2.
+    pub spu: Spu2,
+    /// The IOP cycle of the SPU2's next sample.
+    next_sample: u64,
+    /// Whether each core's interrupt is enabled (ATTR bit 6).
+    irq_enabled: [bool; 2],
+    /// An SPU2 interrupt waits to be raised.
+    irq_pending: bool,
+    /// The samples made, when they are wanted.
+    samples: Option<Vec<[i16; 2]>>,
     /// The IOP clock, set by the processor before each instruction.
     pub now: u64,
     /// Transfers under way.
@@ -60,7 +75,11 @@ impl Default for IopHardware {
     fn default() -> Self {
         Self {
             values: BTreeMap::new(),
-            spu_ram: vec![0; SPU_RAM_SIZE],
+            spu: Spu2::new(),
+            next_sample: ps2_spu2::CYCLES_PER_SAMPLE,
+            irq_enabled: [false; 2],
+            irq_pending: false,
+            samples: None,
             now: 0,
             transfers: Vec::new(),
         }
@@ -68,26 +87,45 @@ impl Default for IopHardware {
 }
 
 impl IopHardware {
-    /// A core's transfer address, in bytes (the register counts
-    /// halfwords).
-    fn tsa(&self, core: usize) -> u32 {
-        let base = core_base(core);
-        let hi = self.values.get(&(base + 0x1A8)).copied().unwrap_or(0) & 0xF;
-        let lo = self.values.get(&(base + 0x1AA)).copied().unwrap_or(0) & 0xFFFF;
-        ((hi << 16) | lo) * 2
+    /// Runs the SPU2 up to IOP cycle `now`.
+    pub fn catch_up(&mut self, now: u64) {
+        while self.next_sample <= now {
+            let sample = self.spu.step();
+            if let Some(samples) = &mut self.samples {
+                samples.push(sample);
+            }
+            if self.spu.take_irq().contains(&true) {
+                self.irq_pending = true;
+            }
+            self.next_sample += ps2_spu2::CYCLES_PER_SAMPLE;
+        }
     }
 
-    fn set_tsa(&mut self, core: usize, bytes: u32) {
-        let base = core_base(core);
-        let halfwords = (bytes / 2) & 0xF_FFFF;
-        self.values.insert(base + 0x1A8, halfwords >> 16);
-        self.values.insert(base + 0x1AA, halfwords & 0xFFFF);
+    /// Whether the SPU2 raised its interrupt (taken).
+    pub fn take_irq(&mut self) -> bool {
+        std::mem::take(&mut self.irq_pending)
     }
 
-    /// When the next transfer completes.
+    /// Keeps the samples the SPU2 makes from now on (or stops keeping
+    /// them).
+    pub fn keep_samples(&mut self, keep: bool) {
+        self.samples = keep.then(Vec::new);
+    }
+
+    /// The samples made since the last call, if they are kept.
+    pub fn take_samples(&mut self) -> Vec<[i16; 2]> {
+        self.samples
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// When the next transfer completes, or, while an SPU2 interrupt is
+    /// enabled, the next sample is made.
     #[must_use]
     pub fn next_due(&self) -> Option<u64> {
-        self.transfers.iter().map(|t| t.due).min()
+        let sample = self.irq_enabled.contains(&true).then_some(self.next_sample);
+        self.transfers.iter().map(|t| t.due).chain(sample).min()
     }
 
     /// Takes the transfers due by `now` (the processor moves their data).
@@ -101,6 +139,31 @@ impl IopHardware {
         due
     }
 
+    /// Moves a finished transfer's data between IOP RAM and the SPU2.
+    pub fn complete(&mut self, t: &Transfer, ram: &mut [u8]) {
+        self.catch_up(self.now);
+        let madr = t.madr as usize & 0x1F_FFFF;
+        let n = (t.bytes as usize).min(ram.len().saturating_sub(madr)) & !1;
+        if t.to_spu {
+            let halfwords: Vec<u16> = ram[madr..madr + n]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&b| u16::from_le_bytes(b))
+                .collect();
+            self.spu.dma_write(t.core, &halfwords);
+        } else {
+            let halfwords = self.spu.dma_read(t.core, n / 2);
+            for (k, h) in halfwords.iter().enumerate() {
+                ram[madr + 2 * k..madr + 2 * k + 2].copy_from_slice(&h.to_le_bytes());
+            }
+        }
+        self.spu.set_dma_busy(t.core, false);
+        if self.spu.take_irq().contains(&true) {
+            self.irq_pending = true;
+        }
+    }
+
     /// A DMA channel's CHCR was written.
     fn start(&mut self, channel: usize, chcr: u32) {
         let (_, base, core, line) = CHANNELS[channel];
@@ -111,15 +174,16 @@ impl IopHardware {
         let bcr = self.values.get(&(base + 4)).copied().unwrap_or(0);
         let (size, count) = (bcr & 0xFFFF, (bcr >> 16).max(1));
         let words = size * count;
-        let spu = self.tsa(core);
-        tracing::debug!(target: "iop::spu2", "cycle {}: DMA {}: {} bytes {} sound memory {spu:#x}, IOP RAM {madr:#x}", self.now, CHANNELS[channel].0, words * 4, if chcr & 1 != 0 { "to" } else { "from" });
+        tracing::debug!(target: "iop::spu2", "cycle {}: DMA {}: {} bytes {} the SPU2, IOP RAM {madr:#x}", self.now, CHANNELS[channel].0, words * 4, if chcr & 1 != 0 { "to" } else { "from" });
+        self.catch_up(self.now);
+        self.spu.set_dma_busy(core, true);
         self.transfers.push(Transfer {
             line,
+            core,
             chcr: base + 8,
             madr,
             bytes: words * 4,
             to_spu: chcr & 1 != 0,
-            spu,
             due: self.now + u64::from(words).max(1),
         });
     }
@@ -127,39 +191,43 @@ impl IopHardware {
 
 impl IopMmio for IopHardware {
     fn read(&mut self, address: u32, bytes: u32) -> u32 {
-        let mut value = self.values.get(&address).copied().unwrap_or(0);
-        if let Some(core) = [0x1F90_0344, 0x1F90_0744]
-            .iter()
-            .position(|&a| a == address)
-        {
-            // STATX bit 7: the core's DMA has finished.
-            let line = CHANNELS[core].3;
-            let busy = self.transfers.iter().any(|t| t.line == line);
-            value = (value & !0x80) | if busy { 0 } else { 0x80 };
-        }
+        let value = if SPU2.contains(&address) {
+            self.catch_up(self.now);
+            let low = u32::from(self.spu.read16(address));
+            if bytes == 4 {
+                low | u32::from(self.spu.read16(address + 2)) << 16
+            } else {
+                low
+            }
+        } else {
+            self.values.get(&address).copied().unwrap_or(0)
+        };
         tracing::trace!(target: "iop::hw", "read{} {address:#010x} = {value:#x}", bytes * 8);
         value
     }
 
     fn write(&mut self, address: u32, bytes: u32, value: u32) {
         tracing::trace!(target: "iop::hw", "write{} {address:#010x} = {value:#x}", bytes * 8);
-        // A 32-bit write to a pair of 16-bit SPU2 registers.
-        if bytes == 4 && (0x1F90_0000..0x1F90_0800).contains(&address) {
-            self.write(address, 2, value & 0xFFFF);
-            self.write(address + 2, 2, value >> 16);
+        if SPU2.contains(&address) {
+            self.catch_up(self.now);
+            // A 32-bit write is a pair of 16-bit registers.
+            let halves: &[(u32, u32)] = if bytes == 4 {
+                &[(address, value & 0xFFFF), (address + 2, value >> 16)]
+            } else {
+                &[(address, value & 0xFFFF)]
+            };
+            for &(at, half) in halves {
+                self.spu.write16(at, half as u16);
+                if let Some(core) = ATTR.iter().position(|&a| a == at) {
+                    self.irq_enabled[core] = half & 0x40 != 0;
+                }
+            }
+            if self.spu.take_irq().contains(&true) {
+                self.irq_pending = true;
+            }
             return;
         }
         match address {
-            // The cores' data ports: manual writes to sound memory.
-            0x1F90_01AC | 0x1F90_05AC => {
-                let core = usize::from(address >= 0x1F90_0400);
-                let at = self.tsa(core) as usize;
-                if let Some(slot) = self.spu_ram.get_mut(at..at + 2) {
-                    slot.copy_from_slice(&(value as u16).to_le_bytes());
-                }
-                self.set_tsa(core, (at as u32 + 2) % SPU_RAM_SIZE as u32);
-                return;
-            }
             // BCR written as two halves.
             0x1F80_10C6 | 0x1F80_1506 => {
                 let base = address - 2;
