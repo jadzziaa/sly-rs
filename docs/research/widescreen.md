@@ -3,7 +3,7 @@ type: Finding
 title: Widescreen in Sly 1
 description: 'How sly-rs makes Sly 1 draw at 16:9 behind an option - the camera''s aspect ratio set in one place, changed by an instruction patch the interpreter runs while memory keeps the game''s bytes - and the checks: off leaves replays exact, on stays equal in lockstep, widens the 3D view, and keeps the 2D interface at 4:3 by narrowing its GIF packets.'
 tags: [widescreen, enhancement, patch, camera, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T11:22:06Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T11:25:35Z }
 sources:
   - id: disasm
     resource: sly-rs disasm sly1 over the whole .text section (SCUS-97198), 2026-11-05
@@ -19,7 +19,7 @@ sources:
     title: The checks
   - id: anchors
     resource: human:august, 2026-11-05
-    title: 'The user''s choice: the binocucom''s frame stays stretched; the portraits sit at the screen''s edges as in 4:3'
+    title: 'The user''s choices: the binocucom''s frame stays stretched; the portraits and captions sit as in 4:3 relative to the screen''s edges'
   - id: hud-dump
     resource: a GS dump of the widescreen new-game replay at fields 2501-2502 (the binocucom), its GIF transfers grouped by path, frame, depth test and scissor; the user's prologue recording (first 7,000 fields) with and without widescreen, pictures every 250 fields, 2026-11-05
     title: How Sly 1's 2D reaches the GS
@@ -108,22 +108,32 @@ What a GS dump at the binocucom shows:[^hud-dump]
 
 So, in a frame the display shows (its FBP among DISPFB's, which the
 machine reports at each V-blank), these narrow to 3/4 of their width:
-each GIF tag drawn without a depth test whose vertices do not reach both
-edges, and everything drawn under a scissor narrower than the frame, the
-scissor included. Where they keep their place follows the user's choice
-(2026-11-05):[^anchors] a sub-view in the frame's left or right third keeps
-its distance from that edge, as in 4:3, so the portraits sit at the screen's
-edges; a flat tag centred in such a box goes with it (the portraits' static
-and outlines are drawn without their scissor); everything else narrows
-towards the centre (the text box, captions, the binocucom's indicators). Full-width 2D (screen passes, fades, the
+
+- each GIF tag sent by path 2 or 3 drawn without a depth test whose
+  vertices do not reach both edges (VU1's flat output is projected 3D,
+  such as the light cones around a lamp, which reach far off screen; the
+  wider camera already widens them);
+- everything drawn under a scissor narrower than the frame, the scissor
+  included, whatever its path or depth test.
+
+Where they keep their place follows the user's choices
+(2026-11-05):[^anchors] what lies wholly in the frame's left or right third
+keeps its distance from that edge, as in 4:3; anything else narrows towards
+the centre. A sub-view is placed by its scissor (the portraits at the
+screen's edges, the text box centred). A transfer's flat tags are placed in
+blocks: tags that overlap across and are at most a line apart down share the
+anchor of their joint bounds, so a caption's lines stay together ("Paris,
+France / 4:20 am" at the left edge, "Starring / Sly Cooper" at the right,
+"Sony Computer Entertainment America / Presents" centred; placed line by
+line, the short "Presents" broke away to the left). Full-width 2D (screen passes, fades, the
 binocucom's outline and tick band) stays across 16:9, and so does the
 depth-tested 3D world; frames not shown (textures drawn into) are left
 alone.
 
 - Pictures: captions, dialogue text, portraits (models, frames, static),
   the binocucom's side indicators and the credits keep their 4:3
-  proportions; the portraits sit at the screen's edges, the rest in the
-  central 4:3 area; the binocucom's frame spans 16:9.
+  proportions; the portraits and captions sit where they sit in 4:3
+  relative to the screen's edges; the binocucom's frame spans 16:9.
 - The machine's state is not touched (the widescreen replay's hash is the
   same before and after), so `lockstep` stays equal (1,100 fields) and
   widescreen off leaves everything as it was. GS dumps written with it on
@@ -136,4 +146,4 @@ alone.
 [^pnach]: pcsx2_patches: the community widescreen patch for Sly 1 and 2 (lui 0x3FA6 to 0x3FDD)
 [^runs]: The checks
 [^hud-dump]: How Sly 1's 2D reaches the GS
-[^anchors]: The user's choice: the binocucom's frame stays stretched; the portraits sit at the screen's edges as in 4:3
+[^anchors]: The user's choices: the binocucom's frame stays stretched; the portraits and captions sit as in 4:3 relative to the screen's edges
