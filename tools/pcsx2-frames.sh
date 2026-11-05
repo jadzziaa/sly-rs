@@ -39,6 +39,8 @@
 # is not changed). Without one, Sly 1 stops at its "no memory card" dialog,
 # and PCSX2's own new cards are unformatted, so Sly asks to format them:
 # `sly-rs format-card IMAGE` writes a formatted one.
+# CARD_OUT=IMAGE copies slot 1's card, as the game left it, to IMAGE at the
+# end (it holds the game's saves: keep it outside the repository).
 #
 # PCSX2 runs inside `gamescope --backend headless` (no window opens) with a
 # data folder of its own in a temporary directory, no memory card unless
@@ -146,6 +148,10 @@ until ls "$out" 2>/dev/null | grep -q "$last"; do
     fi
     sleep 0.5
 done
+# The card as the game left it.
+if [ -n "${CARD_OUT:-}" ] && [ -e "$data/memcards/Mcd001.ps2" ]; then
+    cp "$data/memcards/Mcd001.ps2" "$CARD_OUT"
+fi
 # GS dumps taken with the gsdump press, savestates with the state press.
 for dump in "$data"/snaps/*.gs "$data"/snaps/*/*.gs "$data"/sstates/*.p2s "$data"/sstates/*/*.p2s; do
     [ -e "$dump" ] && cp "$dump" "$out/"

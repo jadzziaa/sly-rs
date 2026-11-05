@@ -1732,6 +1732,7 @@ name = "ps2-iop"
 version = "0.1.0"
 dependencies = [
  "ps2-core",
+ "ps2-memcard",
  "tracing",
 ]
 
@@ -2116,6 +2117,7 @@ dependencies = [
  "ps2-disc",
  "ps2-ee",
  "ps2-iop",
+ "ps2-memcard",
  "serde",
  "thiserror 2.0.21",
  "toml",

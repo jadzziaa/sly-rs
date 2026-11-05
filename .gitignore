@@ -5,6 +5,9 @@
 /target/
 # Local configuration (paths to the user's discs); sly-rs.example.toml is the template.
 /sly-rs.toml
+# Memory card images: the user's saves (play's default folder, recordings' copies).
+/cards/
+*.ps2
 # Caches of local tools.
 /graft/
 __pycache__/

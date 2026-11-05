@@ -97,6 +97,56 @@ impl Recompiled {
     }
 }
 
+/// A memory card for `run` and `replay`.
+#[derive(clap::Args)]
+pub(crate) struct CardArgs {
+    /// Insert a memory card in port 0: `formatted` for a blank one, or a
+    /// card image (`.ps2`, as PCSX2 keeps them), which is read, never
+    /// written. `replay` takes the replay's card unless given one.
+    #[arg(long)]
+    card: Option<String>,
+    /// Write the card as the game left it to this image at the end.
+    #[arg(long)]
+    card_out: Option<PathBuf>,
+}
+
+impl CardArgs {
+    /// Inserts the card given, or `default` (relative to `base`).
+    fn insert(
+        &self,
+        machine: &ps2_ee::Machine,
+        default: Option<&str>,
+        base: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let (spec, base) = match (&self.card, default) {
+            (Some(spec), _) => (Some(spec.as_str()), std::path::Path::new(".")),
+            (None, spec) => (spec, base),
+        };
+        if let Some(spec) = spec {
+            machine
+                .iop
+                .insert_card(Some(sly_common::card::load(spec, base)?));
+        }
+        Ok(())
+    }
+
+    /// Writes the card to `--card-out`, if given.
+    fn write(&self, machine: &ps2_ee::Machine) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let Some(path) = &self.card_out else {
+            return Ok(());
+        };
+        let (card, _) = machine
+            .iop
+            .card()
+            .context("--card-out: no memory card was inserted")?;
+        sly_common::card::save(&card, path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!("the memory card is in {}", path.display());
+        Ok(())
+    }
+}
+
 /// A Rust static recompilation of the PS2 Sly Cooper trilogy.
 #[derive(Parser)]
 #[command(version, about)]
@@ -162,6 +212,8 @@ enum Command {
         /// Fields the GS dump covers.
         #[arg(long, default_value_t = 2)]
         gs_dump_fields: u64,
+        #[command(flatten)]
+        card: CardArgs,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -242,6 +294,14 @@ enum Command {
         /// (as `scale` under `[play]`).
         #[arg(long)]
         scale: Option<u32>,
+        /// Play with this memory card image instead of the configured one
+        /// (`[cards]`; default `cards/GAME.ps2` beside `sly-rs.toml`). A
+        /// missing image is made, formatted; saves are written to it.
+        #[arg(long, conflicts_with = "no_card")]
+        card: Option<PathBuf>,
+        /// Play without a memory card.
+        #[arg(long)]
+        no_card: bool,
     },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
@@ -320,6 +380,8 @@ enum Command {
         /// With --gpu, draw at this many times the GS's resolution (1 to 4).
         #[arg(long, default_value_t = 1)]
         scale: u32,
+        #[command(flatten)]
+        card: CardArgs,
     },
     /// Write a freshly formatted 8 MB memory card image (`.ps2`, with ECC,
     /// as PCSX2 keeps them), or check an existing one with --check.
@@ -388,6 +450,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             screenshot,
             gs_dump,
             gs_dump_fields,
+            card,
         } => run::run(
             &game,
             fields,
@@ -397,6 +460,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 screenshot: screenshot.as_deref(),
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
             },
+            &card,
             recompiled.filter(|_| !interpret),
         ),
         Command::Lockstep {
@@ -416,9 +480,11 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             timing,
             gpu,
             scale,
+            card,
         } => replay::run(
             &path,
             record,
+            &card,
             &replay::Frames {
                 dir: frames.as_deref(),
                 every,
@@ -463,12 +529,14 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             interpret,
             gpu,
             scale,
+            card,
+            no_card,
         } => sly_common::Game::from_key(&game)
             .ok_or_else(|| anyhow::anyhow!("unknown game {game:?}"))
             .and_then(|game| {
-                let mut settings = sly_common::config::Config::load()
-                    .map(|c| c.play().clone())
-                    .unwrap_or_default();
+                let config = sly_common::config::Config::load().unwrap_or_default();
+                let mut settings = config.play().clone();
+                let card = (!no_card).then(|| card.unwrap_or_else(|| config.card(game)));
                 settings.gpu |= gpu;
                 if let Some(scale) = scale {
                     settings.scale = scale;
@@ -478,6 +546,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                         game,
                         record,
                         replay,
+                        card,
                         settings,
                     },
                     recompiled.filter(|_| !interpret),

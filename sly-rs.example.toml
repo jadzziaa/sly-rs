@@ -7,6 +7,12 @@ sly1 = "oracle/Sly Cooper and the Thievius Raccoonus (USA)/Sly Cooper and the Th
 sly2 = "oracle/Sly 2 - Band of Thieves (USA)/Sly 2 - Band of Thieves (USA).iso"
 sly3 = "oracle/Sly 3 - Honor Among Thieves (USA)/Sly 3 - Honor Among Thieves (USA).iso"
 
+# The memory card images `sly-rs play` saves to (8 MB `.ps2`, as PCSX2
+# keeps them: a card moves between the two). The default is
+# cards/GAME.ps2 beside this file, made formatted when missing.
+# [cards]
+# sly1 = "cards/sly1.ps2"
+
 # How `sly-rs play` behaves (all optional; these are the defaults).
 [play]
 pause_on_focus_loss = true

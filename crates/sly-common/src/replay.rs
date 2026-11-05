@@ -5,6 +5,8 @@
 //! ```toml
 //! game = "sly1"
 //! fields = 2000
+//! card = "formatted"   # a memory card: a blank one, or an image's path
+//!                      #   (relative to the replay); none if left out
 //! presses = ["cross@700", "start@900"]   # BUTTON@FIELD, held six fields
 //! inputs = ["1200:0040", "1206:0000:80807f00"]
 //!
@@ -23,6 +25,9 @@
 //!
 //! Input changes only at field boundaries, so a replay runs the same way
 //! every time, interpreted or recompiled, live or replayed.
+//!
+//! A replay's card is read, never written: the game saves to a copy in
+//! memory, so the replay starts from the same card every time.
 
 use std::path::Path;
 
@@ -257,6 +262,10 @@ pub struct Replay {
     /// Presses, `BUTTON@FIELD`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presses: Vec<String>,
+    /// The memory card in port 0: [`card::FORMATTED`](crate::card::FORMATTED)
+    /// or an image's path, relative to the replay. None if left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<String>,
     /// The pad's state as it changes, `FIELD:BUTTONS[:STICKS]` (hex).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
@@ -321,11 +330,13 @@ mod tests {
             game: "sly1".to_owned(),
             fields: 400,
             presses: vec!["cross@200".to_owned()],
+            card: Some(crate::card::FORMATTED.to_owned()),
             inputs: recorder.inputs().to_vec(),
             checkpoints: Vec::new(),
         };
         let text = toml::to_string(&replay).unwrap();
         let back: Replay = toml::from_str(&text).unwrap();
+        assert_eq!(back.card.as_deref(), Some("formatted"));
         let script = Script::of(&back).unwrap();
         for f in 0..400 {
             let mut expected = live(f);

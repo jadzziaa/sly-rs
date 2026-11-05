@@ -1,10 +1,14 @@
-//! Where the user keeps their discs, and how `play` behaves.
+//! Where the user keeps their discs and memory cards, and how `play`
+//! behaves.
 //!
 //! The configuration is a TOML file, `sly-rs.toml`:
 //!
 //! ```toml
 //! [discs]
 //! sly1 = "oracle/Sly Cooper and the Thievius Raccoonus (USA)/Sly Cooper and the Thievius Raccoonus (USA).iso"
+//!
+//! [cards]              # memory card images `play` saves to (default:
+//! sly1 = "cards/sly1.ps2"  #   cards/GAME.ps2 beside this file)
 //!
 //! [play]
 //! pause_on_focus_loss = true
@@ -58,7 +62,10 @@ pub enum ConfigError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
     path: Option<PathBuf>,
+    /// The directory relative paths are resolved against.
+    base: PathBuf,
     discs: BTreeMap<Game, PathBuf>,
+    cards: BTreeMap<Game, PathBuf>,
     play: Play,
 }
 
@@ -107,9 +114,12 @@ struct FileFormat {
     #[serde(default)]
     discs: DiscsFormat,
     #[serde(default)]
+    cards: DiscsFormat,
+    #[serde(default)]
     play: Play,
 }
 
+/// A path per game (`[discs]`, `[cards]`).
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DiscsFormat {
@@ -161,18 +171,21 @@ impl Config {
     /// The TOML error if the text is not valid configuration.
     pub fn parse(text: &str, base: &Path) -> Result<Self, toml::de::Error> {
         let file: FileFormat = toml::from_str(text)?;
-        let entries = [
-            (Game::Sly1, file.discs.sly1),
-            (Game::Sly2, file.discs.sly2),
-            (Game::Sly3, file.discs.sly3),
-        ];
-        let discs = entries
+        let paths = |format: DiscsFormat| {
+            [
+                (Game::Sly1, format.sly1),
+                (Game::Sly2, format.sly2),
+                (Game::Sly3, format.sly3),
+            ]
             .into_iter()
             .filter_map(|(game, path)| Some((game, base.join(path?))))
-            .collect();
+            .collect()
+        };
         Ok(Self {
             path: None,
-            discs,
+            base: base.to_path_buf(),
+            discs: paths(file.discs),
+            cards: paths(file.cards),
             play: file.play,
         })
     }
@@ -191,6 +204,17 @@ impl Config {
     #[must_use]
     pub fn disc(&self, game: Game) -> Option<&Path> {
         self.discs.get(&game).map(PathBuf::as_path)
+    }
+
+    /// The memory card image `play` uses for `game`: as configured, else
+    /// `cards/GAME.ps2` beside the configuration file (or in the current
+    /// directory, without one).
+    #[must_use]
+    pub fn card(&self, game: Game) -> PathBuf {
+        self.cards
+            .get(&game)
+            .cloned()
+            .unwrap_or_else(|| self.base.join("cards").join(format!("{}.ps2", game.key())))
     }
 
     /// How `play` behaves.
@@ -254,6 +278,14 @@ mod tests {
     }
 
     #[test]
+    fn cards_default_beside_the_file() {
+        let config =
+            Config::parse("[cards]\nsly2 = \"/mc/two.ps2\"\n", Path::new("/work")).unwrap();
+        assert_eq!(config.card(Game::Sly1), Path::new("/work/cards/sly1.ps2"));
+        assert_eq!(config.card(Game::Sly2), Path::new("/mc/two.ps2"));
+    }
+
+    #[test]
     fn play_settings_default_and_override() {
         let config = Config::parse("", Path::new(".")).unwrap();
         assert!(config.play().pause_on_focus_loss);
@@ -269,10 +301,7 @@ mod tests {
     fn unknown_keys_are_errors() {
         assert!(Config::parse("[discs]\nsly4 = \"x.iso\"\n", Path::new(".")).is_err());
         assert!(Config::parse("[disks]\n", Path::new(".")).is_err());
-        assert_eq!(
-            Config::parse("", Path::new(".")).unwrap(),
-            Config::default()
-        );
+        assert_eq!(Config::parse("", Path::new("")).unwrap(), Config::default());
     }
 
     #[test]

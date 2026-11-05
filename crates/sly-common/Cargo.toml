@@ -13,6 +13,7 @@ ps2-core.workspace = true
 ps2-disc.workspace = true
 ps2-ee.workspace = true
 ps2-iop.workspace = true
+ps2-memcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true

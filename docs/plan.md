@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T09:50:27Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:04:40Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -592,7 +592,8 @@ given: the gates are the schedule.
     - `padman` (the protocol ps2sdk's `libpad` documents, version 4.3 like
       the disc's module): a DualShock 2 in port 0 whose record is written
       into EE memory each V-blank.
-    - `mcserv` (MCSERV 2.0f numbering): no card inserted yet.
+    - `mcserv` (MCSERV 2.0f numbering): no card inserted yet (a card
+      since 2026-11-04: [research/memory-card.md](research/memory-card.md)).
     - Hooks (plan §5.3): native replacements by address, left out of
       generated code so a compiled call always reaches them. Movies are
       skipped by three hooks around `CMpeg::Execute`'s decoding, so the
@@ -623,7 +624,8 @@ given: the gates are the schedule.
         re-recorded. Its checkpoints are at 600 (the dialog), 1500 (the
         title) and 2600 (the level's intro, confirmed by screenshot).
   - Outstanding, carried to the phases that need them:
-    - A memory card image (PCSX2-compatible `.ps2`), for saving.
+    - A memory card image (PCSX2-compatible `.ps2`), for saving: done in
+      phase 7.
     - One disc drive model with modelled read times shared by `cdvdfsv` and
       `cdvdman`: reads complete at once for now.
     - Recompiling the IOP's modules: they run on the interpreter, which is
@@ -808,7 +810,14 @@ given: the gates are the schedule.
   - Open from that test: Sly's shadow in the opening cutscene (to compare
     with PCSX2), pressure mode (the real game reaches mode 0x79, Shock2;
     ours stays at 0x73, Shock).
-  - Next: memory card saves.
+  - Memory card saves (2026-11-04,
+    [research/memory-card.md](research/memory-card.md)): the card
+    manager's file system over a `.ps2` image and the card server's calls
+    as Sly 1 makes them. `play` saves to `cards/GAME.ps2` (or `[cards]`),
+    recordings keep the card they started from, replays and runs use a
+    card only when asked. Sly 1 creates its save file; PCSX2 reads it, and
+    sly-rs reads one PCSX2 wrote, the same layout byte for byte. Not yet
+    driven: a save of progress and a load from the title.
 
 ### Phase 8 - Sound and movies
 

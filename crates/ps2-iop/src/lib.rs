@@ -200,6 +200,8 @@ pub struct Iop {
     pub core: IopCore,
     /// What the pad in port 0 reports.
     pad: std::rc::Rc<std::cell::Cell<pad::PadInput>>,
+    /// The memory card in port 0, slot 0, if one is inserted.
+    card: mcserv::Slot,
     files: Option<Box<dyn Files>>,
     loads: BTreeMap<u64, PendingLoad>,
     next_load: u64,
@@ -224,6 +226,7 @@ impl Iop {
             commands: BTreeMap::new(),
             core: IopCore::new(),
             pad: std::rc::Rc::default(),
+            card: mcserv::Slot::default(),
             files: None,
             loads: BTreeMap::new(),
             next_load: 0,
@@ -237,7 +240,32 @@ impl Iop {
             &pad::PADMAN,
             Box::new(pad::Padman::new(std::rc::Rc::clone(&self.pad))),
         );
-        self.register(&[mcserv::MCSERV], Box::new(mcserv::Mcserv));
+        self.register(
+            &[mcserv::MCSERV],
+            Box::new(mcserv::Mcserv::new(std::rc::Rc::clone(&self.card))),
+        );
+    }
+
+    /// Inserts a memory card in port 0, slot 0 (none is, at first), or
+    /// takes it out.
+    pub fn insert_card(&self, card: Option<ps2_memcard::Card>) {
+        *self.card.borrow_mut() = card.map(|card| ps2_memcard::Files::new(card, cdvd::CLOCK));
+    }
+
+    /// The memory card in port 0, slot 0, and how many changes were
+    /// completed on it: a new count means an image to save.
+    #[must_use]
+    pub fn card(&self) -> Option<(ps2_memcard::Card, u64)> {
+        self.card
+            .borrow()
+            .as_ref()
+            .map(|files| (files.card().clone(), files.changes()))
+    }
+
+    /// How many changes were completed on the memory card, if one is in.
+    #[must_use]
+    pub fn card_changes(&self) -> Option<u64> {
+        self.card.borrow().as_ref().map(ps2_memcard::Files::changes)
     }
 
     /// Sets what the pad in port 0 reports from the next V-blank on.

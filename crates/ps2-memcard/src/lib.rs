@@ -9,8 +9,16 @@
 //! for backups. Layout and values follow PCSX2's `MemoryCardFolder` and
 //! `MemoryCardFile` (read for facts) and mymc's formatter, which describe
 //! what Sony's formatter writes.
+//!
+//! [`Files`] is the card's file system as the IOP's card manager (`mcman`)
+//! keeps it: what the game's `libmc` calls open, read, write, list and
+//! delete.
 
 use std::fmt;
+
+mod files;
+
+pub use files::{Files, Time, info, open, result};
 
 /// Bytes of data in a page.
 pub const PAGE_SIZE: usize = 512;
@@ -23,9 +31,9 @@ pub const PAGES: usize = 16_384;
 /// Bytes in an image with ECC (8,650,752).
 pub const IMAGE_SIZE: usize = PAGES * RAW_PAGE_SIZE;
 
-const PAGES_PER_CLUSTER: usize = 2;
+pub(crate) const PAGES_PER_CLUSTER: usize = 2;
 const CLUSTERS_PER_BLOCK: u32 = 8;
-const CLUSTER_SIZE: usize = PAGE_SIZE * PAGES_PER_CLUSTER;
+pub(crate) const CLUSTER_SIZE: usize = PAGE_SIZE * PAGES_PER_CLUSTER;
 const PAGES_PER_BLOCK: usize = 16;
 const CLUSTERS: u32 = 8192;
 /// FAT entries per cluster.
@@ -50,8 +58,8 @@ const CARD_FLAGS: u8 = 0x2B;
 
 /// FAT entries: a cluster in use carries this bit; the last of a chain is
 /// all ones; a free one is all ones without it.
-const IN_USE: u32 = 0x8000_0000;
-const CHAIN_END: u32 = 0xFFFF_FFFF;
+pub(crate) const IN_USE: u32 = 0x8000_0000;
+pub(crate) const CHAIN_END: u32 = 0xFFFF_FFFF;
 const FREE: u32 = 0x7FFF_FFFF;
 
 /// Directory entry modes.
@@ -266,7 +274,7 @@ impl Card {
 
     /// Reads an image: 8 MB with ECC, or without (PCSX2 accepts both; the
     /// ECC is added). It must be formatted as an 8 MB card, and every page
-    /// must match its ECC.
+    /// must match its ECC or be erased.
     ///
     /// # Errors
     ///
@@ -284,7 +292,11 @@ impl Card {
         };
         let card = Self { image };
         for p in 0..PAGES {
-            if card.image[p * RAW_PAGE_SIZE + PAGE_SIZE..][..12] != spare(card.page(p))[..12] {
+            let raw = &card.image[p * RAW_PAGE_SIZE..][..RAW_PAGE_SIZE];
+            // An erased page (all ones, spare included) has no ECC: the
+            // card manager leaves its backup blocks so.
+            let erased = raw.iter().all(|&b| b == 0xFF);
+            if !erased && raw[PAGE_SIZE..][..12] != spare(card.page(p))[..12] {
                 return Err(CardError::Ecc(p));
             }
         }
@@ -308,10 +320,21 @@ impl Card {
         &self.image
     }
 
-    fn page(&self, page: usize) -> &[u8; PAGE_SIZE] {
+    pub(crate) fn page(&self, page: usize) -> &[u8; PAGE_SIZE] {
         self.image[page * RAW_PAGE_SIZE..][..PAGE_SIZE]
             .try_into()
             .unwrap_or(&[0xFF; PAGE_SIZE])
+    }
+
+    /// Replaces a page's data, and its ECC with it. The spare's last four
+    /// bytes are zeros, as the card manager writes them.
+    pub(crate) fn set_page(&mut self, page: usize, data: &[u8; PAGE_SIZE]) {
+        let at = page * RAW_PAGE_SIZE;
+        if let Some(raw) = self.image.get_mut(at..at + RAW_PAGE_SIZE) {
+            raw[..PAGE_SIZE].copy_from_slice(data);
+            raw[PAGE_SIZE..PAGE_SIZE + 12].copy_from_slice(&spare(data)[..12]);
+            raw[PAGE_SIZE + 12..].fill(0);
+        }
     }
 
     fn u16_at(&self, page: usize, at: usize) -> u16 {
@@ -333,19 +356,48 @@ impl Card {
         )
     }
 
+    /// The (physical) cluster of the FAT that holds an allocatable
+    /// cluster's entry.
+    fn fat_cluster(&self, cluster: u32) -> u32 {
+        let fat_index = cluster / PER_CLUSTER;
+        let indirect = self.u32_at(0, 0x50 + 4 * (fat_index / PER_CLUSTER) as usize);
+        self.cluster_word(indirect, fat_index % PER_CLUSTER)
+    }
+
     /// The FAT entry of an allocatable cluster.
     #[must_use]
     pub fn fat(&self, cluster: u32) -> u32 {
-        let fat_index = cluster / PER_CLUSTER;
-        let indirect = self.u32_at(0, 0x50 + 4 * (fat_index / PER_CLUSTER) as usize);
-        let fat_cluster = self.cluster_word(indirect, fat_index % PER_CLUSTER);
-        self.cluster_word(fat_cluster, cluster % PER_CLUSTER)
+        self.cluster_word(self.fat_cluster(cluster), cluster % PER_CLUSTER)
+    }
+
+    /// Sets the FAT entry of an allocatable cluster.
+    pub(crate) fn set_fat(&mut self, cluster: u32, value: u32) {
+        let byte = (cluster % PER_CLUSTER) as usize * 4;
+        let page = self.fat_cluster(cluster) as usize * PAGES_PER_CLUSTER + byte / PAGE_SIZE;
+        let mut data = *self.page(page);
+        data[byte % PAGE_SIZE..][..4].copy_from_slice(&value.to_le_bytes());
+        self.set_page(page, &data);
+    }
+
+    /// Allocatable clusters: those below this are the file system's.
+    pub(crate) fn alloc_end(&self) -> u32 {
+        self.u32_at(0, 0x38)
+    }
+
+    /// The first page of an allocatable cluster.
+    pub(crate) fn cluster_page(cluster: u32) -> usize {
+        (ALLOC_OFFSET + cluster) as usize * PAGES_PER_CLUSTER
+    }
+
+    /// The root directory's first cluster.
+    pub(crate) fn root_cluster(&self) -> u32 {
+        self.u32_at(0, 0x3C)
     }
 
     /// Allocatable clusters not in use.
     #[must_use]
     pub fn free_clusters(&self) -> u32 {
-        let end = self.u32_at(0, 0x38);
+        let end = self.alloc_end();
         u32::try_from((0..end).filter(|&c| self.fat(c) & IN_USE == 0).count()).unwrap_or(0)
     }
 
@@ -477,6 +529,10 @@ mod tests {
             .flat_map(|_| [[0xFF; PAGE_SIZE].as_slice(), &spare(&[0xFF; PAGE_SIZE])].concat())
             .collect();
         assert_eq!(Card::new(blank).err(), Some(CardError::Unformatted));
+        // Erased pages, spare included, are fine (the backup blocks).
+        let mut image = Card::formatted().image().to_vec();
+        image[16352 * RAW_PAGE_SIZE..16353 * RAW_PAGE_SIZE].fill(0xFF);
+        assert!(Card::new(image).is_ok());
         assert_eq!(Card::new(vec![0; 100]).err(), Some(CardError::Size(100)));
     }
 }

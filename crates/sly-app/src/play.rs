@@ -9,6 +9,13 @@
 //! picture to the window, which never holds the machine back. Fields are
 //! paced to NTSC's 59.94 Hz; a machine that falls behind is not made to
 //! catch up in a burst. Losing focus pauses the game between fields.
+//!
+//! The memory card is an image file (`[cards]` in `sly-rs.toml`), made
+//! when missing and written again, on a thread of its own, each time the
+//! game completes a change to it. A session played on from a replay uses
+//! the replay's card instead, in memory only, so that it replays the same.
+//! A recording keeps the card it started from: `formatted`, or a copy of
+//! the image beside it (`NAME.card.ps2`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +50,8 @@ pub(crate) struct Options {
     pub(crate) record: Option<PathBuf>,
     /// A replay to play through first, at full speed, before handing over.
     pub(crate) replay: Option<PathBuf>,
+    /// The memory card image to play with and save to, if any.
+    pub(crate) card: Option<PathBuf>,
     /// The `[play]` settings.
     pub(crate) settings: sly_common::config::Play,
 }
@@ -162,13 +171,30 @@ fn emulate(
         let name = crate::use_gpu(&machine, options.settings.scale, shared_gpu)?;
         tracing::info!("drawing on the GPU: {name}");
     }
-    let (script, ahead) = match &options.replay {
+    let (script, ahead, card, mut saving) = match &options.replay {
         Some(path) => {
             let replay = Replay::load(path)?;
-            (Script::of(&replay)?, replay.fields)
+            let card = replay
+                .card
+                .as_deref()
+                .map(|spec| sly_common::card::load(spec, path.parent().unwrap_or(Path::new("."))))
+                .transpose()?;
+            if card.is_some() {
+                tracing::info!("the memory card is the replay's: saves stay in memory");
+            }
+            (Script::of(&replay)?, replay.fields, card, None)
         }
-        None => (Script::default(), 0),
+        None => match &options.card {
+            Some(path) => (
+                Script::default(),
+                0,
+                Some(open_card(path)?),
+                Some(CardSaver::new(path.clone())),
+            ),
+            None => (Script::default(), 0, None, None),
+        },
     };
+    machine.iop.insert_card(card.clone());
     let gamepad_map = GamepadMap::new(&options.settings.gamepad)?;
     let mut gamepads = gilrs::Gilrs::new()
         .map_err(|e| tracing::warn!("no gamepads: {e}"))
@@ -199,6 +225,9 @@ fn emulate(
         let stop = replay::field(&mut machine, pad);
         if stop != Stop::Budget {
             return Err(anyhow!("the machine stopped at field {field}: {stop:?}"));
+        }
+        if let Some(saver) = &mut saving {
+            saver.after_field(&machine);
         }
         // While a replay plays through, show one picture in 30.
         if live || field.is_multiple_of(30) {
@@ -234,20 +263,107 @@ fn emulate(
             }
         }
     }
+    if let Some(saver) = &mut saving {
+        saver.finish();
+    }
     if let Some(path) = &options.record {
-        save(path, options.game, &mut machine, &recorder)?;
+        save(path, options.game, &mut machine, &recorder, card.as_ref())?;
     }
     Ok(())
 }
 
-/// Writes the session as a replay: its input, and a checkpoint at its end.
-fn save(path: &Path, game: Game, machine: &mut ps2_ee::Machine, recorder: &Recorder) -> Result<()> {
+/// The card image at `path`, or a new formatted one written there.
+fn open_card(path: &Path) -> Result<ps2_memcard::Card> {
+    if path.exists() {
+        tracing::info!("memory card: {}", path.display());
+        return Ok(sly_common::card::open(path)?);
+    }
+    let card = ps2_memcard::Card::formatted();
+    sly_common::card::save(&card, path).with_context(|| format!("writing {}", path.display()))?;
+    tracing::info!("memory card: {} (new, formatted)", path.display());
+    Ok(card)
+}
+
+/// Writes the card's image each time the game completes a change to it,
+/// on a thread of its own so that the fields keep their pace.
+struct CardSaver {
+    path: PathBuf,
+    /// The changes the last image written held.
+    saved: u64,
+    writing: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CardSaver {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            saved: 0,
+            writing: None,
+        }
+    }
+
+    fn after_field(&mut self, machine: &ps2_ee::Machine) {
+        if machine
+            .iop
+            .card_changes()
+            .is_none_or(|changes| changes == self.saved)
+        {
+            return;
+        }
+        let Some((card, changes)) = machine.iop.card() else {
+            return;
+        };
+        self.saved = changes;
+        self.finish();
+        let path = self.path.clone();
+        self.writing = std::thread::Builder::new()
+            .name("card".into())
+            .spawn(move || {
+                if let Err(error) = sly_common::card::save(&card, &path) {
+                    tracing::error!("writing the memory card {}: {error}", path.display());
+                }
+            })
+            .map_err(|error| tracing::error!("writing the memory card: {error}"))
+            .ok();
+    }
+
+    /// Waits for the image being written.
+    fn finish(&mut self) {
+        if let Some(writing) = self.writing.take() {
+            let _ = writing.join();
+        }
+    }
+}
+
+/// Writes the session as a replay: its input, the card it started with,
+/// and a checkpoint at its end.
+fn save(
+    path: &Path,
+    game: Game,
+    machine: &mut ps2_ee::Machine,
+    recorder: &Recorder,
+    card: Option<&ps2_memcard::Card>,
+) -> Result<()> {
     let fields = machine.cpu.cycles / FIELD_CYCLES;
     let state = Sly1State::read(&mut machine.mem);
+    let card = match card {
+        None => None,
+        Some(card) if card.image() == ps2_memcard::Card::formatted().image() => {
+            Some(sly_common::card::FORMATTED.to_owned())
+        }
+        Some(card) => {
+            let copy = path.with_extension("card.ps2");
+            sly_common::card::save(card, &copy)
+                .with_context(|| format!("writing {}", copy.display()))?;
+            copy.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }
+    };
     let replay = Replay {
         game: game.key().to_owned(),
         fields,
         presses: Vec::new(),
+        card,
         inputs: recorder.inputs().to_vec(),
         checkpoints: vec![Checkpoint {
             field: fields,

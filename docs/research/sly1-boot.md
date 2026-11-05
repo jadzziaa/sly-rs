@@ -3,7 +3,7 @@ type: Finding
 title: How Sly 1 boots in the interpreter
 description: The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver on the emulated IOP, DMA and GS events, the pad, the memory card check, the title and a new game - up to its first level.
 tags: [finding, boot, sly1, kernel, sif, rpc, iop, sound, phase-3, phase-5]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-03T14:28:33Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:04:40Z }
 sources:
   - id: run
     resource: sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02
@@ -108,7 +108,8 @@ instructions per second, about 0.6 times real time.
     (`g_save`, `0x264A40`). `sceMcInit` needs mcserv ≥ 0x20A and mcman ≥
     0x20E, or every later call fails with -100. With no card in the slot
     (`GetInfo` -10), the check completes and the game goes on to its title,
-    the attract world (level 2).
+    the attract world (level 2). With a card and no save file, it asks to
+    create one first ([memory-card.md](memory-card.md)).
 15. **New game**: Cross at field 700 starts a transition to `jb_intro`
     (level 3); Start at field 900 plays a movie, which three hooks skip
     (`CMpeg::Start`, `sceMpegIsEnd`, `CMpeg::Finish`). The level then

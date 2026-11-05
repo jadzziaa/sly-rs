@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Creation**: [Memory card saves](research/memory-card.md): the card manager's file system over a PCSX2-compatible image and the card server's calls as Sly 1 makes them; play saves to a card file, recordings keep the card they started from, replays use one only when asked. PCSX2 reads sly-rs's save and sly-rs reads PCSX2's, the same layout byte for byte. Plan phase 7 updated.
 * **Update**: [Performance after the GPU GS](research/performance-options.md): VU1's operand checks are already vectorised in the native build; an integer clamp was slower, and at most about 7% is left there. Left as is.
 * **Update**: [Performance techniques](research/performance-prior-art.md): EE polling loops measured (sampled over 3,000 fields): none worth skipping; the list from rac-rs and paraLLEl-GS is done.
 * **Update**: [Performance techniques](research/performance-prior-art.md): weak GPUs measured on the integrated Radeon (exact shading is most of its 53 ms a field, finding covered pixels about a tenth); shading only covered pixels skipped.

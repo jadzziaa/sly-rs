@@ -2,7 +2,7 @@
 okf_version: "0.2"
 ---
 
-Documents of sly-rs, a Rust static recompilation of the PS2 Sly Cooper trilogy (Sly 1, 2 and 3, USA) from the user's own discs. This holds the plan, with each phase's status, and the research and findings behind it. Phases 0 to 5 are built; phase 6 (graphics) is under way. Start with the plan's summary (section 1). History: [log.md](log.md).
+Documents of sly-rs, a Rust static recompilation of the PS2 Sly Cooper trilogy (Sly 1, 2 and 3, USA) from the user's own discs. This holds the plan, with each phase's status, and the research and findings behind it. Phases 0 to 6 are built; phase 7 (playable Sly 1) is under way, and parts of phase 9 (speed, the GPU GS) are done. Start with the plan's summary (section 1). History: [log.md](log.md).
 
 <!-- okf index: generated; edit freely, or rerun `okf index` -->
 
@@ -12,4 +12,4 @@ Documents of sly-rs, a Rust static recompilation of the PS2 Sly Cooper trilogy (
 
 # Subdirectories
 
-* [research](research/index.md) - 7 Finding, 4 Research Note, 3 Proposal
+* [research](research/index.md) - 8 Finding, 4 Research Note, 3 Proposal

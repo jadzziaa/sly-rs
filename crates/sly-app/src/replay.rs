@@ -116,6 +116,7 @@ fn advance(
 pub(crate) fn run(
     path: &Path,
     record: bool,
+    card: &crate::CardArgs,
     frames: &Frames<'_>,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
@@ -124,6 +125,11 @@ pub(crate) fn run(
         Game::from_key(&replay.game).with_context(|| format!("unknown game {:?}", replay.game))?;
     let script = replay::Script::of(&replay)?;
     let (mut machine, _) = crate::boot(game, recompiled)?;
+    card.insert(
+        &machine,
+        replay.card.as_deref(),
+        path.parent().unwrap_or(Path::new(".")),
+    )?;
     if let Some(scale) = frames.gpu {
         let name = crate::use_gpu(&machine, scale, None)?;
         println!("drawing on the GPU: {name}");
@@ -207,6 +213,7 @@ pub(crate) fn run(
         replay.save(path)?;
         writeln!(out, "hashes recorded in {}", path.display())?;
     }
+    card.write(&machine)?;
     if failures > 0 {
         bail!("{failures} checkpoints failed");
     }

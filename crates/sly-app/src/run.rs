@@ -29,12 +29,14 @@ pub(crate) fn run(
     watch: &[String],
     press: &[String],
     pictures: &Pictures<'_>,
+    card: &crate::CardArgs,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
     let presses = sly_common::replay::Script::from(sly_common::replay::parse_presses(press)?);
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
     let recompiled = recompiled.filter(|_| watch.is_empty());
     let (mut machine, image) = crate::boot(game, recompiled)?;
+    card.insert(&machine, None, std::path::Path::new("."))?;
     if recompiled.is_none() {
         machine.samples = Some(std::collections::BTreeMap::new());
     }
@@ -312,6 +314,7 @@ pub(crate) fn run(
             names.get(&start).copied().unwrap_or("")
         )?;
     }
+    card.write(&machine)?;
     Ok(())
 }
 

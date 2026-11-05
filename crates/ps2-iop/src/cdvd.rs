@@ -31,6 +31,17 @@ const READY: u32 = 2;
 /// `sceCdStatus`: paused, disc spinning.
 const STATUS_PAUSED: u32 = 0x0A;
 
+/// The real-time clock: a fixed time keeps runs repeatable. The memory
+/// card's time stamps come from it too, as `mcman` reads them from here.
+pub const CLOCK: ps2_memcard::Time = ps2_memcard::Time {
+    second: 0,
+    minute: 0,
+    hour: 12,
+    day: 24,
+    month: 8,
+    year: 2002,
+};
+
 /// Raw 2048-byte sectors of the disc.
 pub trait Sectors {
     /// `count` sectors from `lba`, or `None` past the end of the disc.
@@ -73,10 +84,15 @@ impl Cdvd {
     fn scmd(call: &Call<'_>) -> Vec<u8> {
         match call.function {
             // sceCdReadClock: result, then stat, second, minute, hour, pad,
-            // day, month, year in BCD. A fixed time keeps runs repeatable.
+            // day, month, year in BCD.
             0x01 => {
-                let clock = bcd(0) << 8 | bcd(0) << 16 | bcd(12) << 24;
-                let date = bcd(24) << 8 | bcd(8) << 16 | bcd(2) << 24;
+                let c = CLOCK;
+                let clock = bcd(c.second.into()) << 8
+                    | bcd(c.minute.into()) << 16
+                    | bcd(c.hour.into()) << 24;
+                let date = bcd(c.day.into()) << 8
+                    | bcd(c.month.into()) << 16
+                    | bcd(u32::from(c.year) % 100) << 24;
                 reply(&[1, clock, date], call.reply_size)
             }
             0x03 => reply(&[PS2_DVD], call.reply_size),
