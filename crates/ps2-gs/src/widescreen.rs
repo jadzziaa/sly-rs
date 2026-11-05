@@ -99,6 +99,8 @@ struct Vertex {
     /// Its context's XYOFFSET and frame width, in 1/16 pixels.
     offset: [i64; 2],
     width: i64,
+    /// Its scissor's top and bottom (exclusive), in 1/16 pixels.
+    rows: [i64; 2],
     /// Drawn in a sub-view of a displayed frame: its anchor.
     sub: Option<Anchor>,
 }
@@ -116,11 +118,23 @@ impl Vertex {
             y_shift,
             offset: [bits(xyoffset, 0, 16), bits(xyoffset, 32, 16)].map(i64::from),
             width: width * 16,
+            rows: {
+                let [_, _, y0, y1] = scissor_box(scissor);
+                [y0 * 16, (y1 + 1) * 16]
+            },
             sub: (narrow.shown(state.frame[context]) && sub_view(scissor, width)).then(|| {
                 let [x0, x1, _, _] = scissor_box(scissor);
                 anchor(x0, x1, width)
             }),
         }
+    }
+
+    /// Whether `at` (its place) is a corner of the frame, as its scissor
+    /// bounds it: exactly on its left or right edge, and within a pixel of
+    /// its top or bottom (Sly 1 draws every other field half a line up).
+    fn at_corner(&self, [x, y]: [i64; 2]) -> bool {
+        let near = |a: i64, b: i64| (a - b).abs() <= 16;
+        (x == 0 || x == self.width) && (near(y, self.rows[0]) || near(y, self.rows[1]))
     }
 
     /// Its X and Y in its frame, in 1/16 pixels.
@@ -334,6 +348,7 @@ impl Gs {
                 }
             }
         }
+        narrow_framed(data, &mut fills);
         let moved = narrow_pieces(data, &mut pieces);
         follow_pieces(data, &fills, &moved);
     }
@@ -413,6 +428,88 @@ fn narrow_pieces(data: &mut [u128], pieces: &mut [Piece]) -> Vec<([i64; 4], Anch
         moved.push((pieces[k].bounds, anchor));
     }
     moved
+}
+
+/// Narrows what a fade frames while it is larger than the frame. Sly 1's
+/// fades close on (and open from) its logo through a fill over the whole
+/// frame, its corners on the frame's, with a hole cut to the logo's box;
+/// grown past the frame's edges, the logo's tags span it too. So that the
+/// logo keeps its 4:3 shape at every size, when a tag spanning the frame
+/// fills such a hole across, it and the others lying within the hole narrow
+/// towards the centre, and the hole with them; they and the fill are taken
+/// out of `fills`. Fills proper (vertices exactly on both edges) never count
+/// as framed, and the binocucom's tick band, as wide but in no hole, stays.
+fn narrow_framed(data: &mut [u128], fills: &mut Vec<Piece>) {
+    let near = |a: i64, b: i64| (a - b).abs() <= 16;
+    let places: Vec<Vec<[i64; 2]>> = fills
+        .iter()
+        .map(|f| f.vertices.iter().map(|v| v.place(data)).collect())
+        .collect();
+    let proper: Vec<bool> = fills
+        .iter()
+        .zip(&places)
+        .map(|(f, at)| {
+            let width = f.vertices[0].width;
+            at.iter().any(|&[x, _]| x == 0) && at.iter().any(|&[x, _]| x == width)
+        })
+        .collect();
+    let mut done = vec![false; fills.len()];
+    for k in 0..fills.len() {
+        let (fill, at) = (&fills[k], &places[k]);
+        let corner: Vec<bool> = fill
+            .vertices
+            .iter()
+            .zip(at)
+            .map(|(v, &p)| v.at_corner(p))
+            .collect();
+        if !corner.contains(&true) || !corner.contains(&false) {
+            continue;
+        }
+        let hole = at.iter().zip(&corner).filter(|&(_, &c)| !c).fold(
+            [i64::MAX, i64::MIN, i64::MAX, i64::MIN],
+            |b, (&[x, y], _)| [b[0].min(x), b[1].max(x), b[2].min(y), b[3].max(y)],
+        );
+        // A tiled fill's inner vertices are no hole.
+        if near(hole[0], 0) && near(hole[1], fill.vertices[0].width) {
+            continue;
+        }
+        let framed: Vec<usize> = (0..fills.len())
+            .filter(|&j| {
+                let b = fills[j].bounds;
+                j != k
+                    && !done[j]
+                    && !proper[j]
+                    && b[0] >= hole[0] - 16
+                    && b[1] <= hole[1] + 16
+                    && b[2] >= hole[2] - 16
+                    && b[3] <= hole[3] + 16
+            })
+            .collect();
+        let across = framed
+            .iter()
+            .any(|&j| near(fills[j].bounds[0], hole[0]) && near(fills[j].bounds[1], hole[1]));
+        if !across {
+            continue;
+        }
+        for &j in &framed {
+            narrow_tag(data, &fills[j].vertices, Anchor::Centre);
+            done[j] = true;
+        }
+        let edge: Vec<Vertex> = fill
+            .vertices
+            .iter()
+            .zip(&corner)
+            .filter(|&(_, &c)| !c)
+            .map(|(v, _)| *v)
+            .collect();
+        narrow_tag(data, &edge, Anchor::Centre);
+        done[k] = true;
+    }
+    let mut k = 0;
+    fills.retain(|_| {
+        k += 1;
+        !done[k - 1]
+    });
 }
 
 /// Moves the vertices of flat tags that span the frame which lie on a
@@ -595,6 +692,49 @@ mod tests {
         gs.narrow(3, &mut data);
         assert_eq!((x(data[3]), x(data[4])), (0, 160));
         assert_eq!(x(data[7]), 120);
+    }
+
+    #[test]
+    fn a_logo_larger_than_the_frame_keeps_narrowing_in_its_fade() {
+        let mut gs = gs();
+        // An XYOFFSET of 1000 pixels, so that vertices can lie left of the
+        // frame.
+        gs.ctx[0].xyoffset = 1000 * 16;
+        let tag = |points: &[(i32, i32)]| {
+            let shifted: Vec<_> = points
+                .iter()
+                .map(|&(x, y)| (u32::try_from(x + 1000).unwrap(), u32::try_from(y).unwrap()))
+                .collect();
+            sprites_through(&shifted)
+        };
+        // The fade's fill, its corners on the frame's and its hole at x -20
+        // to 660 (the logo's box, wider than the frame); the logo across the
+        // hole and a smaller part of it, both spanning the frame; and a wide
+        // row of sprites in no hole (the binocucom's tick band).
+        let mut data = tag(&[
+            (0, 0),
+            (-20, 10),
+            (640, 0),
+            (660, 10),
+            (640, 224),
+            (660, 200),
+            (0, 224),
+            (-20, 200),
+        ]);
+        data.extend(tag(&[(-20, 10), (660, 200)]));
+        data.extend(tag(&[(-4, 50), (644, 150)]));
+        data.extend(tag(&[(-200, 5), (840, 20)]));
+        gs.narrow(3, &mut data);
+        let x = |q: u128| i32::from((q & 0xFFFF) as u16) / 16 - 1000;
+        let centre =
+            |px: i64| i32::try_from(narrowed(px * 16, 640 * 16, Anchor::Centre) / 16).unwrap();
+        let fill: Vec<_> = data[1..9].iter().map(|&q| x(q)).collect();
+        let (l, r) = (centre(-20), centre(660));
+        assert_eq!(fill, [0, l, 640, r, 640, r, 0, l]);
+        assert_eq!((x(data[10]), x(data[11])), (l, r));
+        assert_eq!((x(data[13]), x(data[14])), (centre(-4), centre(644)));
+        // The tick band stays.
+        assert_eq!((x(data[16]), x(data[17])), (-200, 840));
     }
 
     #[test]

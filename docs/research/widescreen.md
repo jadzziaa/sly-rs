@@ -3,7 +3,7 @@ type: Finding
 title: Widescreen in Sly 1
 description: 'How sly-rs makes Sly 1 draw at 16:9 behind an option - the camera''s aspect ratio set in one place, changed by an instruction patch the interpreter runs while memory keeps the game''s bytes - and the checks: off leaves replays exact, on stays equal in lockstep, widens the 3D view, and keeps the 2D interface at 4:3 by narrowing its GIF packets.'
 tags: [widescreen, enhancement, patch, camera, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T22:11:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T23:11:35Z }
 sources:
   - id: disasm
     resource: sly-rs disasm sly1 over the whole .text section (SCUS-97198), 2026-11-05
@@ -20,6 +20,9 @@ sources:
   - id: logo-dump
     resource: a GS dump of the user's widescreen recording game1.toml at fields 19,619-19,620 (the fade to Sly's logo), its flat tags and their vertices; pictures every 60 fields of the whole recording before and after the change, 2026-11-05
     title: The fade to the logo
+  - id: fade-trace
+    resource: traces of every full-width flat tag (bounds, vertex count, primitive, vertices on the edges and corners) over prologue.toml and session.toml replayed in widescreen, the new-game replay in widescreen and the user's second game1.toml (2,982 fields); GS dumps at fields 1,101-1,104 and 965-966 of the latter; pictures every 2 fields of its fade with widescreen on and off, 2026-11-05
+    title: The logo larger than the frame
   - id: anchors
     resource: human:august, 2026-11-05
     title: 'The user''s choices: the binocucom''s frame stays stretched; the portraits and captions sit as in 4:3 relative to the screen''s edges'
@@ -156,6 +159,45 @@ vertices move with it; its others stay, so it still spans the frame.
   the same build, with or without the change; the machine's hash is the
   same.
 
+The same fade also opens from and closes on the logo while the logo is
+larger than the frame (the title after a save is loaded, the start and end
+of the prologue). The logo is five triangle tags (186, 66, 66, 159 and 141
+vertices), the 141's box being the fade's hole; they reach past the
+frame's edges one by one, and each that did counted as full-width 2D and
+stopped narrowing. So for a few fields the logo was drawn at two scales,
+then jumped to 16:9 (fields 1,103-1,104 of the user's second recording,
+the "brief distortion").[^fade-trace] Now, when a fill whose corners are
+the frame's has a hole that a full-width tag fills across, that tag and
+the others lying within the hole narrow towards the centre, and the hole
+with them; so the logo keeps its 4:3 shape at every size.
+
+What full-width 2D comes through, over the prologue, the user's other
+session and both recordings in widescreen:[^fade-trace]
+
+| Tags | Vertices on both edges, exactly | Corners |
+| --- | --- | --- |
+| Screen tiles (40 sprites), fades (2 or 4), the binocucom's frame (200, strip), the fade with its hole (10, strip) | yes, always | the fades and tiles; not the binocucom's frame |
+| The binocucom's tick band (384 sprites, -227 to 867 px) | never | no |
+| The logo's tags, grown past the frame | never | no |
+
+- How far a tag reaches past the edges does not tell the logo from the
+  tick band (the logo reached -263 px), and the logo's vertices fall
+  within half a pixel of both edges about one time in fifteen; exactly on
+  them, never. So a tag counts as framed only inside a fill's hole, never
+  one with vertices exactly on both edges, and the tick band, in no hole,
+  stays.
+- Sly 1 draws every other field half a line up: the fade's corners are at
+  y -0.5 and 223.5 there. The corner test allows a pixel up and down; at
+  first it did not, so the logo narrowed in one field and not the next,
+  and the display's blend of the two showed a ghost of it.
+- A hole that is the whole frame (a tiled fill's inner vertices) is
+  skipped.
+- A picture every 2 to 30 fields over the four replays, before and after:
+  only fades changed, and the binocucom's stretches did not. The dark
+  speckle a contact sheet shows at field 1,092 of the same recording shows
+  with widescreen off too (and not at full size): it is not the widescreen
+  filter's.
+
 - Pictures: captions, dialogue text, portraits (models, frames, static),
   the binocucom's side indicators and the credits keep their 4:3
   proportions; the portraits and captions sit where they sit in 4:3
@@ -173,4 +215,5 @@ vertices move with it; its others stay, so it still spans the frame.
 [^runs]: The checks
 [^hud-dump]: How Sly 1's 2D reaches the GS
 [^logo-dump]: The fade to the logo
+[^fade-trace]: The logo larger than the frame
 [^anchors]: The user's choices: the binocucom's frame stays stretched; the portraits and captions sit as in 4:3 relative to the screen's edges
