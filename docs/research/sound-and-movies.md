@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T06:16:47Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T06:20:37Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -177,11 +177,19 @@ an option.
     sly-rs's samples) **correlation 1.000000, every sample within 1** (its
     float conversion).
   - **The opening scene** (PCSX2 frames 1300-2200, the same stretch of
-    ours): the music lines up at one offset, constant to 0.1 ms over 13
-    seconds, so it runs at PCSX2's tempo; per second the correlation is
-    0.32 to 0.90, the sound effects falling at slightly different moments
-    (the two runs' animations are a few frames apart, as the pictures
-    showed).
+    ours, PCSX2's DC filter applied to ours): everything lines up at one
+    offset, constant to 0.1 ms over 13 seconds, so the music runs at
+    PCSX2's tempo; per second the correlation is 0.33 to 0.96, and almost
+    no samples are identical, even where music dominates. *Interpretation:*
+    989snd keys its voices on the IOP's timer ticks, and sly-rs's IOP
+    (high-level, not cycle-timed) places those ticks a few samples away
+    from PCSX2's, so each sound starts a few samples earlier or later; the
+    sound effects also follow the animation, a few frames apart between
+    the two runs. The isolated sound above shows the chip itself is exact.
+  - **Streams reach the chip**: from field 800 of the new-game replay the
+    SPU2 gets a 4,096-byte transfer about every ten fields (the attract's
+    music, then the binocucom's voice), by plain DMA; the binocucom's line
+    at field 2600 is the same as before the SPU2.
   - `play` applies the same DC filter; `replay --wav` writes the chip's
     own output.
 - **Cost**: on the user's prologue recording (PGO, GPU drawing) the IOP,
