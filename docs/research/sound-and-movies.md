@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T08:58:09Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T09:24:09Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -46,6 +46,9 @@ sources:
   - id: listened
     resource: human:august, 2026-11-05
     title: The user listened to the new-game replay's sound
+  - id: listened-rust
+    resource: human:august, 2026-11-05 (the new-game replay's 43 s, classic and Rust, as Opus clips)
+    title: The user compared the Rust 989snd with the disc's driver by ear
   - id: pcsx2-spu2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/SPU2), GPL-3.0-or-later, read from a sparse clone, 2026-11-05
     title: PCSX2's SPU2
@@ -343,6 +346,9 @@ an option.
     keeps its hashes; `new-game-rust.toml` (the same presses, `classic =
     false`) has its own, the same interpreted and recompiled, and
     `lockstep` is equal for its 2,600 fields. `test-full` runs both.
+  - **By ear** (the user, 2026-11-05):[^listened-rust] the two drivers'
+    sound over the new-game replay, listened to back to back many times,
+    sounds the same.
   - **Classic stays the default** (`classic = true` under `[play]`): the
     Rust driver is chosen with `classic = false`, `play --classic=false`,
     `run --classic=false`, `lockstep --classic=false`, or `classic = false`
@@ -382,6 +388,7 @@ recorded again where the machine's state changes.
 [^mods]: Movie and texture mods for Sly found on the web
 [^ps3-movies]: The user's decision: the PS3 movies (the Vita mod's source) after parity
 [^movies]: Sly 1's logo movies against PCSX2
+[^listened-rust]: The user compared the Rust 989snd with the disc's driver by ear
 [^m3-trace]: Sly 1's 989snd call set and register traffic
 [^m3-compare]: The Rust 989snd against the disc's driver
 [^opengoal]: OpenGOAL's 989snd (MIDI, AME, banks)
