@@ -16,6 +16,8 @@ pub(crate) struct Pictures<'a> {
     pub(crate) screenshot: Option<&'a std::path::Path>,
     /// A PCSX2 GS dump of the last fields, and how many.
     pub(crate) gs_dump: Option<(&'a std::path::Path, u64)>,
+    /// Play the game's movies instead of skipping them.
+    pub(crate) movies: bool,
 }
 
 #[allow(
@@ -37,6 +39,9 @@ pub(crate) fn run(
     let recompiled = recompiled.filter(|_| watch.is_empty());
     let (mut machine, image) = crate::boot(game, recompiled)?;
     card.insert(&machine, None, std::path::Path::new("."))?;
+    if pictures.movies {
+        sly_common::hooks::play_movies(&mut machine, game);
+    }
     if recompiled.is_none() {
         machine.samples = Some(std::collections::BTreeMap::new());
     }

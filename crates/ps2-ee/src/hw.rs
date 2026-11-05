@@ -24,7 +24,13 @@ pub mod intc {
     pub const VBLANK_START: u32 = 2;
     /// V-blank end.
     pub const VBLANK_END: u32 = 3;
+    /// The IPU (a command finished).
+    pub const IPU: u32 = 8;
 }
+
+/// The IPU's DMA channels: from it, to it.
+const FROM_IPU: usize = 3;
+const TO_IPU: usize = 4;
 
 /// Words of a VIF1 transfer the shadow reads before handing them to VU1's
 /// thread.
@@ -43,6 +49,23 @@ pub const DMA_CHANNELS: [(u32, &str); 10] = [
     (0x1000_D000, "fromSPR"),
     (0x1000_D400, "toSPR"),
 ];
+
+/// A DMA address in EE memory: the scratchpad when bit 31 is set.
+fn dma_address(madr: u32) -> u32 {
+    if madr & 0x8000_0000 != 0 {
+        0x7000_0000 | (madr & 0x3FF0)
+    } else {
+        madr & 0x01FF_FFF0
+    }
+}
+
+/// A quadword of EE memory at a DMA address.
+fn qword(regions: &mut Regions, madr: u32) -> u128 {
+    regions
+        .slice_mut(dma_address(madr), 16)
+        .and_then(|b| <[u8; 16]>::try_from(&*b).ok())
+        .map_or(0, u128::from_le_bytes)
+}
 
 /// SIF registers as the EE kernel's `sceSifGetReg`/`sceSifSetReg` number
 /// them.
@@ -106,6 +129,8 @@ pub struct Hardware {
     /// Host time spent in the VIFs (with the VU programs they start and
     /// what those draw), and in VU programs the EE starts (for reports).
     pub timing: Timing,
+    /// The IPU, decoding MPEG-2 for the game's movie player.
+    pub ipu: ps2_ipu::Ipu,
 }
 
 /// Host time spent by subsystem, for reports.
@@ -155,6 +180,7 @@ impl Hardware {
             vif1_chain: None,
             vif1_jobs: Vec::new(),
             timing: Timing::default(),
+            ipu: ps2_ipu::Ipu::new(),
         }
     }
 
@@ -237,10 +263,96 @@ impl Hardware {
         }
     }
 
+    /// Moves data between the IPU and its DMA channels as it asks, as
+    /// PCSX2 interleaves them (`ps2_ipu`'s crate documentation): toIPU
+    /// feeds the input FIFO while the IPU requests data, the IPU runs,
+    /// fromIPU drains its output; until nothing moves. A channel completes
+    /// when its count is done; the IPU's interrupt goes to the INTC.
+    /// Normal-mode transfers only (Sly's player feeds the IPU in pieces).
+    fn pump_ipu(&mut self, regions: &mut Regions) {
+        let reg = |hw: &Self, channel: usize, offset: u32| {
+            hw.regs
+                .get(&(DMA_CHANNELS[channel].0 + offset))
+                .copied()
+                .unwrap_or(0) as u32
+        };
+        let active = |hw: &Self, channel: usize| {
+            reg(hw, channel, 0) & 0x100 != 0 && reg(hw, channel, 0x20) & 0xFFFF != 0
+        };
+        loop {
+            let mut moved = false;
+            if active(self, TO_IPU) && self.ipu.data_requested() {
+                let (madr, qwc) = (reg(self, TO_IPU, 0x10), reg(self, TO_IPU, 0x20) & 0xFFFF);
+                let n = (qwc as usize).min(self.ipu.in_free());
+                if n > 0 {
+                    let qws: Vec<u128> = (0..n)
+                        .map(|k| qword(regions, madr + 16 * k as u32))
+                        .collect();
+                    self.ipu.push_in(&qws);
+                    self.set_dma_progress(TO_IPU, madr + 16 * n as u32, qwc - n as u32);
+                    moved = true;
+                    if self.ipu.waiting_on_input() {
+                        self.ipu.run();
+                    }
+                }
+            }
+            self.ipu.set_out_dma_ready(active(self, FROM_IPU));
+            if self.ipu.busy() && self.ipu.run() {
+                moved = true;
+            }
+            if active(self, FROM_IPU) && self.ipu.out_len() > 0 {
+                let (madr, qwc) = (
+                    reg(self, FROM_IPU, 0x10),
+                    reg(self, FROM_IPU, 0x20) & 0xFFFF,
+                );
+                let out = self.ipu.pop_out(qwc as usize);
+                for (k, q) in out.iter().enumerate() {
+                    if let Some(slot) = regions.slice_mut(dma_address(madr + 16 * k as u32), 16) {
+                        slot.copy_from_slice(&q.to_le_bytes());
+                    }
+                }
+                let n = out.len() as u32;
+                self.set_dma_progress(FROM_IPU, madr + 16 * n, qwc - n);
+                moved |= n > 0;
+                self.ipu.set_out_dma_ready(active(self, FROM_IPU));
+                if self.ipu.busy() && self.ipu.waiting_on_output() {
+                    self.ipu.run();
+                }
+            }
+            if self.ipu.take_irq() {
+                self.raise_intc(intc::IPU);
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    /// A channel's MADR and QWC as a transfer moves on; at QWC 0 the
+    /// transfer is done: STR clears and `D_STAT` says so.
+    fn set_dma_progress(&mut self, channel: usize, madr: u32, qwc: u32) {
+        let base = DMA_CHANNELS[channel].0;
+        self.regs.insert(base + 0x10, u128::from(madr));
+        self.regs.insert(base + 0x20, u128::from(qwc));
+        if qwc == 0 {
+            if let Some(chcr) = self.regs.get_mut(&base) {
+                *chcr &= !0x100;
+            }
+            self.complete_dma(channel);
+        }
+    }
+
     /// Starts a transfer on `channel` (its CHCR was written with STR set).
     fn kick_dma(&mut self, regions: &mut Regions, channel: usize, chcr: u32) {
         let (base, name) = DMA_CHANNELS[channel];
         *self.dma_kicks.entry(name).or_default() += 1;
+        if channel == FROM_IPU || channel == TO_IPU {
+            if (chcr >> 2) & 3 != 0 {
+                tracing::warn!(target: "ee::dma", "{name} in mode {}: only normal mode is modelled", (chcr >> 2) & 3);
+            }
+            self.pump_ipu(regions);
+            return;
+        }
         let reg =
             |hw: &Self, offset: u32| hw.regs.get(&(base + offset)).copied().unwrap_or(0) as u32;
         let (madr, qwc, tadr) = (reg(self, 0x10), reg(self, 0x20), reg(self, 0x30));
@@ -542,10 +654,20 @@ impl Mmio for HardwareHandle {
         self.0.borrow().clock.set(cycles);
     }
 
-    fn read(&mut self, _: &mut Regions, address: u32, bytes: u32) -> u128 {
+    fn read(&mut self, regions: &mut Regions, address: u32, bytes: u32) -> u128 {
         let mut hw = self.0.borrow_mut();
         hw.note(address, None, bytes);
         match address {
+            0x1000_2000..0x1000_2040 => {
+                let value = hw.ipu.read(address & !0xF);
+                hw.pump_ipu(regions);
+                u128::from(if bytes == 8 {
+                    value
+                } else {
+                    value & 0xFFFF_FFFF
+                })
+            }
+            0x1000_7000 => hw.ipu.pop_out(1).first().copied().unwrap_or(0),
             0x1000_F000 => u128::from(hw.intc_stat),
             0x1000_F010 => u128::from(hw.intc_mask),
             0x1000_E010 => u128::from(hw.d_stat),
@@ -595,6 +717,24 @@ impl Mmio for HardwareHandle {
             0x1200_1010 => hw.gs_imr = value as u64,
             0x1000_5000 => {
                 hw.write_vif1_fifo(value);
+                return true;
+            }
+            0x1000_2000..0x1000_2040 => {
+                let at = address & !0xF;
+                hw.ipu.write(at, value as u64);
+                // IDEC and BDEC start on the IPU's next step.
+                if at == ps2_ipu::IPU_CMD && matches!((value as u32) >> 28, 1 | 2) {
+                    hw.ipu.run();
+                }
+                hw.pump_ipu(regions);
+                return true;
+            }
+            0x1000_7010 => {
+                hw.ipu.push_in(&[value]);
+                if hw.ipu.busy() {
+                    hw.ipu.run();
+                }
+                hw.pump_ipu(regions);
                 return true;
             }
             0x1000_4000 => {

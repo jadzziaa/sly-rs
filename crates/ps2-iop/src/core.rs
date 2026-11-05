@@ -370,11 +370,9 @@ impl IopCore {
     /// it asked.
     fn finish_transfers(&mut self, ram: &mut [u8]) {
         self.hw.now = self.cpu.cycles;
-        self.hw.catch_up(self.cpu.cycles);
-        for t in self.hw.take_due(self.cpu.cycles) {
-            self.hw.complete(&t, ram);
-            tracing::debug!(target: "iop::spu2", "cycle {}: DMA done, line {:#x}", self.cpu.cycles, t.line);
-            self.raise(t.line);
+        for line in self.hw.finish_due(ram) {
+            tracing::debug!(target: "iop::spu2", "cycle {}: DMA done, line {line:#x}", self.cpu.cycles);
+            self.raise(line);
         }
         if self.hw.take_irq() {
             tracing::debug!(target: "iop::spu2", "cycle {}: SPU2 interrupt", self.cpu.cycles);

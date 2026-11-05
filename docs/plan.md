@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T05:57:58Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:09:08Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -844,7 +844,12 @@ given: the gates are the schedule.
   over the SPU2, the IPU) behind a classic setting; `cpal` output, silence
   on a slow host. First: `ps2-spu2`, ported from PCSX2, which both drive.
   Done (2026-11-05): the SPU2 under the disc's 989snd sounds, `replay
-  --wav` writes it and `play` plays it; PCSX2 comparison next.
+  --wav` writes it and `play` plays it; an isolated sound matches PCSX2
+  sample for sample, and the user found it right by ear. Movies play
+  through `ps2-ipu` (PCSX2's IPU, ported) under Sly's own player, their
+  sound sample for sample PCSX2's; the Rust decoder the user chose as the
+  default does not fit Sly's player (see the doc), a question for the
+  user.
 
 ### Phase 9 - Sly 1 complete and fast
 

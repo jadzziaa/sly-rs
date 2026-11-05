@@ -1867,6 +1867,7 @@ dependencies = [
  "ps2-core",
  "ps2-gs",
  "ps2-iop",
+ "ps2-ipu",
  "ps2-isa",
  "ps2-vu",
  "thiserror 2.0.21",
@@ -1902,6 +1903,10 @@ dependencies = [
  "ps2-spu2",
  "tracing",
 ]
+
+[[package]]
+name = "ps2-ipu"
+version = "0.1.0"
 
 [[package]]
 name = "ps2-isa"

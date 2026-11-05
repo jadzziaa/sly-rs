@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-05
+* **Update**: [Sound and movies](research/sound-and-movies.md): the user found the sound right by ear; movies play through `ps2-ipu` (PCSX2's IPU, ported) under Sly's own player, pictures within 8 levels of PCSX2's and sound sample for sample its; auto-DMA fed as the core asks. The Rust movie decoder does not fit Sly's player as hoped.
 * **Update**: [Sound and movies](research/sound-and-movies.md): the user's decisions recorded (Rust rewrites by default, emulation behind a classic setting); M1 and M2: `ps2-spu2` (PCSX2's SPU2, ported) under the disc's 989snd, `replay --wav`, sound in `play` through cpal. New-game replay hashes re-recorded.
 
 ## 2026-11-04

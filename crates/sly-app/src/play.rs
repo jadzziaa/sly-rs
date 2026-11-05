@@ -171,7 +171,16 @@ fn emulate(
         let name = crate::use_gpu(&machine, options.settings.scale, shared_gpu)?;
         tracing::info!("drawing on the GPU: {name}");
     }
-    let (script, ahead, card, mut saving) = start(options)?;
+    let Start {
+        script,
+        ahead,
+        card,
+        mut saving,
+        movies,
+    } = start(options)?;
+    if movies {
+        sly_common::hooks::play_movies(&mut machine, options.game);
+    }
     machine.iop.insert_card(card.clone());
     let speaker = speaker(options.settings.volume);
     machine.iop.keep_samples(speaker.is_some());
@@ -255,14 +264,33 @@ fn emulate(
         saver.finish();
     }
     if let Some(path) = &options.record {
-        save(path, options.game, &mut machine, &recorder, card.as_ref())?;
+        save(
+            path,
+            options.game,
+            &mut machine,
+            &recorder,
+            card.as_ref(),
+            movies,
+        )?;
     }
     Ok(())
 }
 
-/// What the session starts from: the input to play through first and how
-/// many fields of it, the memory card, and where the card is saved.
-fn start(options: &Options) -> Result<(Script, u64, Option<ps2_memcard::Card>, Option<CardSaver>)> {
+/// What the session starts from.
+struct Start {
+    /// The input to play through first, and how many fields of it.
+    script: Script,
+    ahead: u64,
+    /// The memory card, and where it is saved.
+    card: Option<ps2_memcard::Card>,
+    saving: Option<CardSaver>,
+    /// Whether movies play: as the replay played them, or as `[play]` says.
+    movies: bool,
+}
+
+/// What the session starts from: a replay's input, card and movies, or the
+/// configured card and settings.
+fn start(options: &Options) -> Result<Start> {
     Ok(match &options.replay {
         Some(path) => {
             let replay = Replay::load(path)?;
@@ -274,16 +302,20 @@ fn start(options: &Options) -> Result<(Script, u64, Option<ps2_memcard::Card>, O
             if card.is_some() {
                 tracing::info!("the memory card is the replay's: saves stay in memory");
             }
-            (Script::of(&replay)?, replay.fields, card, None)
+            Start {
+                script: Script::of(&replay)?,
+                ahead: replay.fields,
+                card,
+                saving: None,
+                movies: replay.movies,
+            }
         }
-        None => match &options.card {
-            Some(path) => (
-                Script::default(),
-                0,
-                Some(open_card(path)?),
-                Some(CardSaver::new(path.clone())),
-            ),
-            None => (Script::default(), 0, None, None),
+        None => Start {
+            script: Script::default(),
+            ahead: 0,
+            card: options.card.as_deref().map(open_card).transpose()?,
+            saving: options.card.clone().map(CardSaver::new),
+            movies: options.settings.movies,
         },
     })
 }
@@ -371,6 +403,7 @@ fn save(
     machine: &mut ps2_ee::Machine,
     recorder: &Recorder,
     card: Option<&ps2_memcard::Card>,
+    movies: bool,
 ) -> Result<()> {
     let fields = machine.cpu.cycles / FIELD_CYCLES;
     let state = Sly1State::read(&mut machine.mem);
@@ -392,6 +425,7 @@ fn save(
         fields,
         presses: Vec::new(),
         card,
+        movies,
         inputs: recorder.inputs().to_vec(),
         checkpoints: vec![Checkpoint {
             field: fields,

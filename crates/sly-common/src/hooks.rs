@@ -20,6 +20,14 @@ fn movie_ended(cpu: &mut Cpu, _: &mut Memory) {
     cpu.set64(2, 1);
 }
 
+/// Lets the game play its movies: the hooks that skip them are taken away,
+/// and its own player decodes them through the IPU.
+pub fn play_movies(machine: &mut ps2_ee::Machine, game: Game) {
+    for &(address, _, _) in hooks(game) {
+        machine.unhook(address);
+    }
+}
+
 /// A game's hooks: address, name, replacement.
 #[must_use]
 pub fn hooks(game: Game) -> &'static [(u32, &'static str, Hook)] {

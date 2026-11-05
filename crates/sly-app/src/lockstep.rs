@@ -103,8 +103,11 @@ pub(crate) fn run(
     replay: Option<&std::path::Path>,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
-    let script = match replay {
-        Some(path) => sly_common::replay::Script::of(&sly_common::replay::Replay::load(path)?)?,
+    let loaded = replay
+        .map(|path| sly_common::replay::Replay::load(path).map(|r| (r, path)))
+        .transpose()?;
+    let script = match &loaded {
+        Some((replay, _)) => sly_common::replay::Script::of(replay)?,
         None => sly_common::replay::Script::default(),
     };
     let recompiled = recompiled
@@ -112,6 +115,20 @@ pub(crate) fn run(
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
     let (mut compiled, _) = crate::boot(game, Some(recompiled))?;
     let (mut interpreted, _) = crate::boot(game, None)?;
+    // Both machines get the replay's memory card and movies.
+    if let Some((replay, path)) = &loaded {
+        for machine in [&mut compiled, &mut interpreted] {
+            if let Some(spec) = &replay.card {
+                let base = path.parent().unwrap_or(std::path::Path::new("."));
+                machine
+                    .iop
+                    .insert_card(Some(sly_common::card::load(spec, base)?));
+            }
+            if replay.movies {
+                sly_common::hooks::play_movies(machine, game);
+            }
+        }
+    }
     let mut out = io::stdout().lock();
     let (mut time_c, mut time_i) = (Duration::ZERO, Duration::ZERO);
     for field in 1..=fields {

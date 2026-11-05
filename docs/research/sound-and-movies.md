@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T06:20:37Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:21:43Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -31,6 +31,12 @@ sources:
   - id: pcsx2-sound
     resource: tools/pcsx2-frames.sh with AUDIO (PCSX2's audio capture) against sly-rs replay --wav, the save dialog (blank card, Left at 300, Cross at 340) and the opening scene (card with a save), compared with numpy, 2026-11-05
     title: sly-rs's sound against PCSX2's
+  - id: movies
+    resource: sly-rs replay with card = card3.ps2 (a save present) and movies = true, --frames and --wav, against tools/pcsx2-frames.sh (frames 550-1150, AUDIO) with the same card; a 3-field GS dump of a movie field drawn by PCSX2; 2026-11-05
+    title: Sly 1's logo movies against PCSX2
+  - id: listened
+    resource: human:august, 2026-11-05
+    title: The user listened to the new-game replay's sound
   - id: pcsx2-spu2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/SPU2), GPL-3.0-or-later, read from a sparse clone, 2026-11-05
     title: PCSX2's SPU2
@@ -192,6 +198,10 @@ an option.
     at field 2600 is the same as before the SPU2.
   - `play` applies the same DC filter; `replay --wav` writes the chip's
     own output.
+  - **By ear** (the user, 2026-11-05):[^listened] the new-game replay's
+    sound (`replay --wav`, 43 seconds: the attract, the title, the
+    binocucom dialogue) sounds correct, with no distortion or dialogue off
+    its timing.
 - **Cost**: on the user's prologue recording (PGO, GPU drawing) the IOP,
   with the SPU2 in it, takes 7.0% of the machine thread's host time,
   against about 1% before: the chip costs about 6%.
@@ -203,7 +213,45 @@ an option.
   recording again. The new-game replay reaches its places; its hashes are
   recorded again. No SPU2 interrupt is raised over the prologue: Sly's
   voice lines do not wait on one.
-- Not checked yet: AutoDMA from the IOP's DMA side (movie sound).
+- **M4, 2026-11-05: movies play, through the emulated IPU.** `ps2-ipu`
+  ports PCSX2's IPU (its command engine, the MPEG-2 tables, IDCT,
+  colour conversion and dithering; 28 unit tests). The EE's hardware
+  model gives it its registers, its FIFOs and its DMA channels (toIPU
+  fed as the IPU asks, fromIPU drained as it produces, as PCSX2
+  interleaves them), and its interrupt (INTC 8). With the movie hooks
+  taken away (`run --movies`, `movies = true` in a replay, `movies` under
+  `[play]`, true by default), Sly's own player and Sony's libmpeg decode
+  the Sony and Sucker Punch logo movies at boot.[^movies]
+  - **Pictures**: the movie runs in step with PCSX2's (every one of our
+    fields has its match 222 frames later in PCSX2); 96 to 98% of pixels
+    identical, all within 8 levels (the largest 7 on a run of 30 fields).
+    PCSX2 drawing our GS traffic for movie fields gives our pictures (two
+    fields identical, a third within 4), and the differences in the real
+    game sit on the picture's edge rows and on a few rows in every 16:
+    *interpretation*, the filtered sprite that puts the decoded picture on
+    screen, not the decoding.
+  - **Sound**: 989snd plays movie sound through a core's auto-DMA input.
+    sly-rs first completed those transfers at once (70,491 of them in 420
+    fields); now an auto-DMA transfer feeds the core a kilobyte at a time,
+    read from IOP memory when the core asks for it, and completes when it
+    asks after the last: with PCSX2's DC filter on ours, the movie's sound
+    is **the same as PCSX2's, every sample within 1, for its 8 seconds**.
+    Reading the whole block at the start had got about 900 samples in
+    every 3,072 wrong: the player refills that IOP memory just behind the
+    sound being played.
+- **The Rust decoder (the default the user chose) does not fit Sly's
+  player as hoped.** libmpeg is not a decoder the game calls: it drives
+  the game's own callbacks from inside (`FMpegDecodeVideo` feeds the IPU
+  through its DMA channel, `CbDemuxed` pulls the stream from the disc,
+  `CMpegAudio` sends the sound to the IOP). Replacing `sceMpegGetPicture`
+  stops those callbacks, and with them the stream; a Rust path would have
+  to replace Sly's whole movie player natively (its disc streaming, its
+  sound queue, its GS packets). The IPU path is what plays movies now.
+- `lockstep` (recompiled against interpreted, now with a replay's card and
+  movies) is equal at every field through the logo movies (900 fields).
+- Not checked yet: audio-to-picture sync measured within one run (against
+  PCSX2 the sound lines up 246 ms from the pictures, most likely when
+  PCSX2's capture started), and the movies later in the game.
 
 ## Milestones and checks
 
@@ -231,3 +279,5 @@ recorded again where the machine's state changes.
 [^decisions]: The user's decisions: emulation behind a classic setting, not the default; otherwise the Rust rewrites; cpal; silence on a slow host
 [^pcsx2-spu2]: PCSX2's SPU2
 [^pcsx2-sound]: sly-rs's sound against PCSX2's
+[^listened]: The user listened to the new-game replay's sound
+[^movies]: Sly 1's logo movies against PCSX2

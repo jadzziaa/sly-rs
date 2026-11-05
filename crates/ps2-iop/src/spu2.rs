@@ -12,8 +12,14 @@
 //! A DMA transfer starts when its channel's CHCR gets the start bit and
 //! takes one IOP cycle per word; then its data moves between IOP RAM and
 //! the SPU2, the start bit clears and the channel's interrupt line is
-//! raised (0x24 or 0x28), as `libsd` expects. Other registers read back
-//! what was last written.
+//! raised (0x24 or 0x28), as `libsd` expects. A transfer to a core in
+//! auto-DMA (its `ADMAS` bit set, as 989snd sets it for movie sound) feeds
+//! the core's input buffer instead, a kilobyte (a half-buffer of each
+//! channel) at a time, read from IOP memory when the core asks for it, as
+//! PCSX2 reads it: the movie player refills that memory just behind the
+//! sound being played. It completes when the core asks after the last
+//! piece; until then it is checked at every sample. Other registers read
+//! back what was last written.
 
 use std::collections::BTreeMap;
 
@@ -29,6 +35,13 @@ const SPU2: std::ops::Range<u32> = 0x1F90_0000..0x1F90_0800;
 
 /// The cores' ATTR registers: bit 6 enables the core's interrupt.
 const ATTR: [u32; 2] = [0x1F90_019A, 0x1F90_059A];
+
+/// Bytes an auto-DMA transfer hands its core at a time: a half-buffer of
+/// each channel (256 halfwords left, then 256 right).
+const ADMA_PIECE: u32 = 1024;
+
+/// The cores' auto-DMA status registers.
+const ADMAS: [u32; 2] = [0x1F90_01B0, 0x1F90_05B0];
 
 /// The IOP interrupt line of the SPU2.
 pub const SPU2_LINE: u32 = 9;
@@ -48,6 +61,9 @@ pub struct Transfer {
     pub bytes: u32,
     /// From IOP RAM to the SPU2 (or back).
     pub to_spu: bool,
+    /// Into the core's auto-DMA input, and how many bytes were handed over.
+    pub adma: bool,
+    handed: u32,
     /// IOP cycle at which it completes.
     pub due: u64,
 }
@@ -65,6 +81,8 @@ pub struct IopHardware {
     irq_pending: bool,
     /// The samples made, when they are wanted.
     samples: Option<Vec<[i16; 2]>>,
+    /// Each core's `ADMAS`, as last written.
+    admas: [u16; 2],
     /// The IOP clock, set by the processor before each instruction.
     pub now: u64,
     /// Transfers under way.
@@ -80,6 +98,7 @@ impl Default for IopHardware {
             irq_enabled: [false; 2],
             irq_pending: false,
             samples: None,
+            admas: [0; 2],
             now: 0,
             transfers: Vec::new(),
         }
@@ -128,22 +147,51 @@ impl IopHardware {
         self.transfers.iter().map(|t| t.due).chain(sample).min()
     }
 
-    /// Takes the transfers due by `now` (the processor moves their data).
-    pub fn take_due(&mut self, now: u64) -> Vec<Transfer> {
-        let (due, rest) = self.transfers.iter().partition(|t| t.due <= now);
-        self.transfers = rest;
-        for t in &due {
+    /// Completes the transfers due by now: their data moves (an auto-DMA
+    /// transfer's once, when it is first due; it then waits for the core
+    /// to ask for more). Returns the interrupt lines to raise.
+    pub fn finish_due(&mut self, ram: &mut [u8]) -> Vec<u32> {
+        self.catch_up(self.now);
+        let mut lines = Vec::new();
+        let mut waiting = Vec::new();
+        for mut t in std::mem::take(&mut self.transfers) {
+            if t.due > self.now {
+                waiting.push(t);
+                continue;
+            }
+            if t.adma {
+                if !self.spu.adma_wants_data(t.core) || t.handed < t.bytes {
+                    if self.spu.adma_wants_data(t.core) {
+                        let n = (t.bytes - t.handed).min(ADMA_PIECE);
+                        self.move_data(&t, t.handed, n, ram);
+                        t.handed += n;
+                    }
+                    t.due = self.next_sample;
+                    waiting.push(t);
+                    continue;
+                }
+            } else {
+                self.move_data(&t, 0, t.bytes, ram);
+            }
             let chcr = self.values.get(&t.chcr).copied().unwrap_or(0);
             self.values.insert(t.chcr, chcr & !0x0100_0000);
+            if !t.adma {
+                self.spu.set_dma_busy(t.core, false);
+            }
+            if self.spu.take_irq().contains(&true) {
+                self.irq_pending = true;
+            }
+            lines.push(t.line);
         }
-        due
+        self.transfers = waiting;
+        lines
     }
 
-    /// Moves a finished transfer's data between IOP RAM and the SPU2.
-    pub fn complete(&mut self, t: &Transfer, ram: &mut [u8]) {
-        self.catch_up(self.now);
-        let madr = t.madr as usize & 0x1F_FFFF;
-        let n = (t.bytes as usize).min(ram.len().saturating_sub(madr)) & !1;
+    /// Moves `bytes` of a transfer's data, from `offset` on, between IOP RAM
+    /// and the SPU2.
+    fn move_data(&mut self, t: &Transfer, offset: u32, bytes: u32, ram: &mut [u8]) {
+        let madr = (t.madr + offset) as usize & 0x1F_FFFF;
+        let n = (bytes as usize).min(ram.len().saturating_sub(madr)) & !1;
         if t.to_spu {
             let halfwords: Vec<u16> = ram[madr..madr + n]
                 .as_chunks::<2>()
@@ -157,10 +205,6 @@ impl IopHardware {
             for (k, h) in halfwords.iter().enumerate() {
                 ram[madr + 2 * k..madr + 2 * k + 2].copy_from_slice(&h.to_le_bytes());
             }
-        }
-        self.spu.set_dma_busy(t.core, false);
-        if self.spu.take_irq().contains(&true) {
-            self.irq_pending = true;
         }
     }
 
@@ -176,14 +220,20 @@ impl IopHardware {
         let words = size * count;
         tracing::debug!(target: "iop::spu2", "cycle {}: DMA {}: {} bytes {} the SPU2, IOP RAM {madr:#x}", self.now, CHANNELS[channel].0, words * 4, if chcr & 1 != 0 { "to" } else { "from" });
         self.catch_up(self.now);
-        self.spu.set_dma_busy(core, true);
+        let to_spu = chcr & 1 != 0;
+        let adma = to_spu && self.admas[core] & (1 << core) != 0;
+        if !adma {
+            self.spu.set_dma_busy(core, true);
+        }
         self.transfers.push(Transfer {
             line,
             core,
             chcr: base + 8,
             madr,
             bytes: words * 4,
-            to_spu: chcr & 1 != 0,
+            to_spu,
+            adma,
+            handed: 0,
             due: self.now + u64::from(words).max(1),
         });
     }
@@ -220,6 +270,9 @@ impl IopMmio for IopHardware {
                 self.spu.write16(at, half as u16);
                 if let Some(core) = ATTR.iter().position(|&a| a == at) {
                     self.irq_enabled[core] = half & 0x40 != 0;
+                }
+                if let Some(core) = ADMAS.iter().position(|&a| a == at) {
+                    self.admas[core] = half as u16;
                 }
             }
             if self.spu.take_irq().contains(&true) {

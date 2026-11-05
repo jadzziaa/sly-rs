@@ -1,0 +1,13 @@
+[package]
+name = "ps2-ipu"
+description = "The PlayStation 2's image processing unit (IPU): MPEG-2 macroblock decoding, colour conversion and its FIFOs, ported from PCSX2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

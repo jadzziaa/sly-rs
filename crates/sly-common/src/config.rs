@@ -95,6 +95,8 @@ pub struct Play {
     pub scale: u32,
     /// Sound volume, in percent (0 is silent: no sound device is opened).
     pub volume: u32,
+    /// Play the game's movies (false skips them).
+    pub movies: bool,
 }
 
 impl Default for Play {
@@ -107,6 +109,7 @@ impl Default for Play {
             gpu: false,
             scale: 1,
             volume: 100,
+            movies: true,
         }
     }
 }

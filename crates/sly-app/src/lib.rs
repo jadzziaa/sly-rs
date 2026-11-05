@@ -215,6 +215,10 @@ enum Command {
         gs_dump_fields: u64,
         #[command(flatten)]
         card: CardArgs,
+        /// Play the game's movies (decoded by the emulated IPU) instead of
+        /// skipping them.
+        #[arg(long)]
+        movies: bool,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -224,7 +228,8 @@ enum Command {
         /// Fields (1/59.94 s) to run.
         #[arg(long, default_value_t = 300)]
         fields: u64,
-        /// Drive both machines with a replay's presses.
+        /// Drive both machines with a replay: its presses, memory card and
+        /// movies.
         #[arg(long)]
         replay: Option<PathBuf>,
     },
@@ -455,6 +460,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             gs_dump,
             gs_dump_fields,
             card,
+            movies,
         } => run::run(
             &game,
             fields,
@@ -463,6 +469,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             &run::Pictures {
                 screenshot: screenshot.as_deref(),
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
+                movies,
             },
             &card,
             recompiled.filter(|_| !interpret),

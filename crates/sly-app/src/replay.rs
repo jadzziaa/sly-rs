@@ -152,6 +152,9 @@ pub(crate) fn run(
         replay.card.as_deref(),
         path.parent().unwrap_or(Path::new(".")),
     )?;
+    if replay.movies {
+        sly_common::hooks::play_movies(&mut machine, game);
+    }
     if let Some(scale) = frames.gpu {
         let name = crate::use_gpu(&machine, scale, None)?;
         println!("drawing on the GPU: {name}");

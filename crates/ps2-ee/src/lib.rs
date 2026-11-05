@@ -235,6 +235,18 @@ impl Machine {
         self.hook_filter[(bit >> 6) as usize] |= 1 << (bit & 63);
     }
 
+    /// Takes the hook at `address` away: the game's own function runs
+    /// there again (in the interpreter, as generated code leaves hooked
+    /// functions out).
+    pub fn unhook(&mut self, address: u32) {
+        self.hooks.remove(&address);
+        self.hook_filter = [0; 64];
+        for &address in self.hooks.keys() {
+            let bit = (address >> 2) & 4095;
+            self.hook_filter[(bit >> 6) as usize] |= 1 << (bit & 63);
+        }
+    }
+
     /// Runs `table`'s generated code wherever it has some, the interpreter
     /// elsewhere. Execution is the same either way, to the cycle.
     pub fn attach(&mut self, table: Table) {
