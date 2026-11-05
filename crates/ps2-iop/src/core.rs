@@ -163,7 +163,16 @@ pub struct IopCore {
     pub(crate) sound: Option<Box<ps2_snd989::Driver>>,
     /// When the Rust driver's next tick is due.
     pub(crate) sound_due: u64,
+    /// The Rust driver's replies, waiting as long as the disc's driver
+    /// would take.
+    pub(crate) sound_replies: VecDeque<SoundReply>,
+    /// Its replies whose time has come, for the SIF to send.
+    pub(crate) sound_ready: VecDeque<SoundReply>,
 }
+
+/// A reply of the Rust 989snd: when it is due, the `RPC_END` packet and
+/// the data for the EE.
+pub(crate) type SoundReply = (u64, Vec<u32>, Option<(u32, Vec<u8>)>);
 
 impl Default for IopCore {
     fn default() -> Self {
@@ -203,6 +212,8 @@ impl IopCore {
             sectors_read: 0,
             sound: None,
             sound_due: 0,
+            sound_replies: VecDeque::new(),
+            sound_ready: VecDeque::new(),
         }
     }
 
@@ -370,6 +381,7 @@ impl IopCore {
             timer,
             self.hw.next_due(),
             self.sound_alarm(),
+            self.sound_replies.front().map(|r| r.0),
         ]
         .into_iter()
         .flatten()
@@ -515,6 +527,15 @@ impl IopCore {
             }
             self.fire_timers();
             self.run_sound();
+            while self
+                .sound_replies
+                .front()
+                .is_some_and(|r| r.0 <= self.cpu.cycles)
+            {
+                if let Some(reply) = self.sound_replies.pop_front() {
+                    self.sound_ready.push_back(reply);
+                }
+            }
             self.finish_transfers(&mut regions.iop_ram);
             if self.interrupted.is_none() && self.kernel.interrupts && !self.callbacks.is_empty() {
                 self.start_callback(&mut regions.iop_ram);

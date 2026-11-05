@@ -1,0 +1,24 @@
+# new-game.toml's presses with sound by the Rust 989snd (classic = false):
+# the same places, the Rust driver's own hashes.
+game = "sly1"
+fields = 2600
+presses = ["start@300", "start@500", "cross@700", "start@1600", "start@2000"]
+classic = false
+
+[[checkpoint]]
+field = 600
+world = 0
+level = 2
+hash = "cba6f94b4b617af9"
+
+[[checkpoint]]
+field = 1500
+world = 0
+level = 3
+hash = "0f0981c7b7de4fca"
+
+[[checkpoint]]
+field = 2600
+world = 0
+level = 3
+hash = "7a1e9ca3b86b1965"

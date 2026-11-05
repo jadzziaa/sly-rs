@@ -45,6 +45,13 @@ const RUST_MODULES: &[&str] = &["sio2man", "padman", "mcman", "mcserv"];
 /// 989snd itself.
 const SOUND_MODULES: &[&str] = &["Sound_Device_Library", "989snd_Library"];
 
+/// IOP cycles the disc's 989snd takes to answer a call (its RPC thread
+/// runs at the IOP's next slice: 2,343 cycles in Sly 1's traces).
+const CALL_LATENCY: u64 = 2343;
+/// IOP cycles it takes to load a bank (the disc read: 222,573 to 276,460
+/// in Sly 1's traces).
+const BANK_LATENCY: u64 = 250_000;
+
 /// Whether `sid` is one of 989snd's servers.
 fn is_989snd(sid: u32) -> bool {
     sid == ps2_snd989::SERVER || sid == ps2_snd989::LOADER
@@ -362,6 +369,9 @@ impl Iop {
     /// Something the IOP emulation does not support yet.
     pub fn run(&mut self, mem: &mut Memory, until: u64) -> Result<(), String> {
         self.core.run_until(&mut mem.regions, until)?;
+        while let Some((_, packet, extra)) = self.core.sound_ready.pop_front() {
+            self.send(packet, extra);
+        }
         while let Some(done) = self.core.started.pop_front() {
             if let Some(load) = self.loads.remove(&done.token) {
                 self.answer_load(&load, done.id.cast_signed(), done.result);
@@ -659,7 +669,8 @@ impl Iop {
         if server == loadfile::LOADFILE && function == 0 && self.load_module(words, &data, mem) {
             return;
         }
-        let reply = if self.rust_sound && is_989snd(server) {
+        let rust_sound = self.rust_sound && is_989snd(server);
+        let reply = if rust_sound {
             // The driver's state is brought to the EE's time first: its
             // ticks due by then run, at their own cycles.
             let now = self.now.max(self.core.cpu.cycles);
@@ -683,23 +694,34 @@ impl Iop {
             bytes.resize(recv_size as usize, 0);
             (recv_buf, bytes)
         });
-        self.send(
-            vec![
-                0,
-                0,
-                cid::RPC_END,
-                0,
-                words[4],
-                words[5],
-                words[6],
-                client,
-                cid::RPC_CALL,
-                server,
-                0,
-                0,
-            ],
-            extra,
-        );
+        let packet = vec![
+            0,
+            0,
+            cid::RPC_END,
+            0,
+            words[4],
+            words[5],
+            words[6],
+            client,
+            cid::RPC_CALL,
+            server,
+            0,
+            0,
+        ];
+        if rust_sound {
+            // The disc's driver answers after its RPC thread has run (a
+            // bank after its disc read): the reply waits as long.
+            let latency = if server == ps2_snd989::LOADER {
+                BANK_LATENCY
+            } else {
+                CALL_LATENCY
+            };
+            self.core
+                .sound_replies
+                .push_back((self.core.cpu.cycles + latency, packet, extra));
+        } else {
+            self.send(packet, extra);
+        }
     }
 
     fn send(&mut self, mut packet: Vec<u32>, extra: Option<(u32, Vec<u8>)>) {

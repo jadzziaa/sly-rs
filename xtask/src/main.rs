@@ -132,7 +132,9 @@ fn test_full(root: &Path) -> Result<()> {
     // The recompiled build must give the interpreter's results: the disc
     // tests above run the interpreter alone.
     recomp::run(root, &["sly1".to_owned(), "--check".to_owned()])?;
-    recomp::replay(root, sly_common::Game::Sly1, "new-game")
+    recomp::replay(root, sly_common::Game::Sly1, "new-game")?;
+    // The same presses with sound by the Rust 989snd.
+    recomp::replay(root, sly_common::Game::Sly1, "new-game-rust")
 }
 
 /// Fails if any `ps2-*` package depends on a `sly-*` package.

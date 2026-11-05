@@ -146,10 +146,14 @@ impl Streams {
         }
     }
 
-    /// Whether the stream has its first data in sound memory (it does as
-    /// soon as it starts: the disc is read at once).
+    /// Whether the stream's first data is in sound memory. The driver
+    /// reads the disc in the background, so right after the stream starts
+    /// it is not yet (Sly 1 asks once, at once, and the disc's driver
+    /// answers 0); a tick later it is.
     pub(crate) fn buffered(&self, handle: u32) -> u32 {
-        u32::from(self.find(handle).is_some())
+        self.find(handle)
+            .and_then(|slot| self.slots[slot].as_ref())
+            .map_or(0, |s| u32::from(s.age >= 1))
     }
 
     /// Reads `bytes` of the file from `at` into the ring at `to`, the last

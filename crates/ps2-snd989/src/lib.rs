@@ -166,7 +166,11 @@ impl Driver {
     /// (`989SND.IRX` as loaded, at address 0), if given.
     #[must_use]
     pub fn new(module: Option<&[u8]>) -> Self {
-        let (table, index) = module.and_then(r250_of).unwrap_or_else(|| {
+        let found = module.and_then(r250_of);
+        if let Some(([first, ..], index)) = &found {
+            tracing::debug!(target: "snd989", "random numbers from the module: index {index}, first {first:#x}");
+        }
+        let (table, index) = found.unwrap_or_else(|| {
             tracing::warn!(target: "snd989", "no 989snd module image: the driver's random numbers start from zeros");
             ([0; R250_LEN], 0)
         });

@@ -140,7 +140,8 @@ pub(crate) struct Effect {
     pub(crate) volume: i8,
     pub(crate) group: u8,
     pub(crate) pan: u16,
-    /// Bit 1: one instance at a time; bit 2: pan scaled by the volume.
+    /// Bit 0: it loops; bit 1: one instance at a time; bit 2: pan scaled
+    /// by the volume.
     pub(crate) flags: u16,
     pub(crate) grains: Vec<Grain>,
 }
@@ -357,12 +358,12 @@ impl Bank {
     }
 
     /// Whether sound `index` loops (`snd_IsSoundALooper`): a sound effect
-    /// with a loop end in its program, or a song that repeats for ever.
+    /// with flag bit 0 (the answers of Sly 1's driver for all 234 sounds of
+    /// its two effect banks; a loop in the grains does not count), or a
+    /// song that repeats for ever.
     pub(crate) fn looper(&self, index: usize) -> bool {
         match &self.content {
-            Content::Effects(sounds) => sounds
-                .get(index)
-                .is_some_and(|s| s.grains.iter().any(|g| g.kind == 22)),
+            Content::Effects(sounds) => sounds.get(index).is_some_and(|s| s.flags & 1 != 0),
             Content::Music { songs, .. } => songs.get(index).is_some_and(|s| s.repeats == 0),
         }
     }
@@ -433,8 +434,9 @@ pub(crate) mod tests {
         meta[0x18] = 3;
         meta[0x1C] = 0x40;
         meta[0x20] = 0x4C;
-        // The sound: volume 100, group 0, pan 0, three grains from 0.
-        meta.extend_from_slice(&[100, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0]);
+        // The sound: volume 100, group 0, pan 0, three grains, flags 1 (it
+        // loops), its grains from 0.
+        meta.extend_from_slice(&[100, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0]);
         let mut start = vec![0u8; GRAIN_BYTES];
         start[0] = 21;
         meta.extend_from_slice(&start);

@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-05
+* **Update**: [Sound and movies](research/sound-and-movies.md), M3: a Rust 989snd (`ps2-snd989`: sound effects, AME and MIDI music, mono VAG streams, movie sound) behind the classic setting, which stays the default; Sly 1's call set, what the Rust driver covers, and how it compares with the disc's driver (music and stream key-ons register for register, movie sound sample for sample). A second replay, new-game-rust.toml, runs the Rust driver.
 * **Update**: PS3 movies (the Vita mod's source) moved to phase 12, after parity: adapting the Vita mod to the PS2 player would cap them at the originals' size and 640×480 ([sound-and-movies.md](research/sound-and-movies.md)).
 * **Update**: [Sound and movies](research/sound-and-movies.md): movies through the IPU only until after parity (the user's decision); what PS3-movie mods found so far are, and what a PS2 movie mod can do with sly-rs.
 * **Update**: [Sound and movies](research/sound-and-movies.md): the user found the sound right by ear; movies play through `ps2-ipu` (PCSX2's IPU, ported) under Sly's own player, pictures within 8 levels of PCSX2's and sound sample for sample its; auto-DMA fed as the core asks. The Rust movie decoder does not fit Sly's player as hoped.

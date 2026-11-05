@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:40:34Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T08:58:09Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -49,6 +49,15 @@ sources:
   - id: pcsx2-spu2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/SPU2), GPL-3.0-or-later, read from a sparse clone, 2026-11-05
     title: PCSX2's SPU2
+  - id: m3-trace
+    resource: sly-rs replay games/sly1/replays/new-game.toml (classic) with SLY_RS_LOG=iop::snd989=debug,iop::hw=trace, the 989snd calls and SPU2 register accesses logged; Sly 1's EE snd_* wrappers disassembled (sly-rs disasm sly1 11d140), 2026-11-05
+    title: Sly 1's 989snd call set and register traffic
+  - id: m3-compare
+    resource: replay games/sly1/replays/new-game.toml against new-game-rust.toml (the same presses, classic = false), --wav and SLY_RS_LOG=iop::hw=trace, compared with numpy (per-second correlation at the best lag, peaks, RMS) and by key-on events; the logo movies (card with a save, movies = true) the same way, 2026-11-05
+    title: The Rust 989snd against the disc's driver
+  - id: opengoal
+    resource: https://github.com/open-goal/jak-project (game/sound/989snd), ISC, read from a sparse clone, 2026-11-05
+    title: OpenGOAL's 989snd (MIDI, AME, banks)
 ---
 
 # Sound and movies (phase 8)
@@ -145,8 +154,8 @@ answering the EE's `snd_*` calls at the RPC level and driving
 exact port of R&C 1's build is the guide (its handlers, grains, banks and
 pitch tables; GPL-3.0), but not a drop-in: Sly 1's build differs, and
 rac-rs leaves out what Sly needs, streamed VAG (voice lines), movie sound
-and MIDI sequences.[^rac-rs] Until it exists, the classic path is the only
-one that sounds.
+and MIDI sequences.[^rac-rs] Built in M3 (below), behind the classic
+setting until it covers Sly 1's sound.
 
 ### Movies
 
@@ -179,8 +188,6 @@ an option.
   buffer (checked headless at 1% volume: the stream opens, at 44.1 kHz
   here, and the game runs; not yet listened to). `volume` under `[play]`,
   0 for none.
-- Until the Rust 989snd exists, the disc's driver is the only one, so
-  there is no classic setting yet: it comes with the choice.
 - **Against PCSX2, 2026-11-05.**[^pcsx2-sound] PCSX2's release builds
   record sound only through their video capture; `tools/pcsx2-frames.sh`
   now takes `AUDIO=FILE` (audio only, WAV; a `capture` press starts and
@@ -280,6 +287,66 @@ an option.
   **Decided (2026-11-05):**[^ps3-movies] extracting and upscaling the PS3
   movies waits until after parity, where a player on the host side can
   show them at their own resolution (with the Rust player).
+- **M3, 2026-11-05: a Rust 989snd (`ps2-snd989`), behind the classic
+  setting.** It answers 989snd's two RPC servers in place of the disc's
+  module (the IOP loads neither `LIBSD.IRX` nor `989SND.IRX`); its 240 Hz
+  timer is an IOP event, so its register writes reach the SPU2 at the
+  cycle they are made, and its replies wait as long as the disc driver's
+  (2,343 IOP cycles, a bank 250,000).
+  - **Sly 1's call set**[^m3-trace] over the new-game replay: 8,086
+    commands, mostly in batches (function 0x4D: a count, then `{id,
+    bytes, data}`); by id: 27 `SetSoundVolPan` 4,453, 25
+    `SoundIsStillPlaying` 2,817, 9 `SetMasterVolume` 295, 26
+    `IsSoundALooper` 234, 21 `StopSound` 167, 17 `PlaySoundVolPanPMPB`
+    78, a few of 0, 3 (bank load), 8, 11, 13, 14, 15, 39, 42, 44, 46, 52,
+    54, 78, 79, 81; the logo movies add 59-64 (movie sound) and 10. The
+    reply buffer keeps old results: commands that return nothing leave
+    them. Three banks: two of sound effects (`SBlk`) and the title music
+    (`SBv2`, an `MMID` of eight AME segments, 17 programs). Music is AME,
+    not a plain MIDI file; voice lines are mono VAG streams; there is no
+    reverb (type 0 on core 1).
+  - **What it covers**: banks into sound memory at the disc driver's
+    addresses (its allocator: from 0x5040, 0x40 rounding); sound effects
+    by the grain interpreter, LFOs and voice layer of rac-rs's exact port
+    of the R&C driver, whose register order Sly's shares, plus child
+    sounds (grain 5, which Sly's banks use and R&C's do not); AME and MIDI
+    music ported from OpenGOAL[^opengoal] on the same voices; mono VAG
+    streams through a two-half ring with the loop address flipped at each
+    half, as the disc's driver does it; movie sound through core 0's
+    auto-DMA input, refilled from the DMA interrupt; the libsd and driver
+    start-up writes. `IsSoundALooper` is the sound's flag bit 0 (all 234
+    answers of the disc's driver), not a loop in its grains.
+  - **Not yet**: stereo streams, reverb types other than off, `AutoVol`,
+    the driver's own disc reads for the game (`StreamSafeCdRead`), and
+    disc timing (a bank and a stream's data arrive at once; the reply
+    waits, the data does not).
+  - **Against the disc's driver**[^m3-compare] (the new-game presses,
+    each run with its own sound; the game's timing differs a little, so
+    sound effects that follow game events and random choices drift):
+    - Key-ons: 675 classic, 670 Rust. Music 498 of 501 matched with the
+      same sample, pitch, envelope and volume (497), 8 ms later; streams 3
+      of 3 identical; sound effects 115 of 123 matched by sample, pitch
+      equal in 104, envelope in all, volume in 83 (the game's own
+      volume and pan calls differ with its timing).
+    - Register writes by register, classic / Rust: KON 864 / 856, SSA
+      1,350 / 1,346, PITCH 693 / 691, ADSR 675 / 673, VOLL 2,024 / 2,004,
+      LSAX 240 / 240, the reverb's 237 / 237. The Rust driver puts sample
+      data straight into sound memory, so the DMA registers and the ATTR
+      and TSA writes around each transfer are not there.
+    - The sound (`--wav`, 43 s): RMS 1,012 / 1,022, peaks 17,459 /
+      15,989; per second, correlation 0.60 to 1.00 at a lag under 17 ms
+      (seconds 20 to 33, where sound effects follow the game, 0.60 to
+      0.97; the rest 0.84 to 1.00).
+    - The logo movies (20 s): movie sound **correlation 1.000, the same
+      peaks**, 16 ms later; the title music after them 0.67 to 1.00.
+  - Every replay stays exact: `new-game.toml` (now `classic = true`)
+    keeps its hashes; `new-game-rust.toml` (the same presses, `classic =
+    false`) has its own, the same interpreted and recompiled, and
+    `lockstep` is equal for its 2,600 fields. `test-full` runs both.
+  - **Classic stays the default** (`classic = true` under `[play]`): the
+    Rust driver is chosen with `classic = false`, `play --classic=false`,
+    `run --classic=false`, `lockstep --classic=false`, or `classic = false`
+    in a replay (a replay without the key is classic, as recorded before).
 - Not checked yet: audio-to-picture sync measured within one run (against
   PCSX2 the sound lines up 246 ms from the pictures, most likely when
   PCSX2's capture started), and the movies later in the game.
@@ -291,7 +358,7 @@ an option.
    Checks: unit tests; the new-game replay's sound against a PCSX2
    recording of the same presses, by ear and by waveform.
 2. **M2 Play**: `cpal` output with the resampling buffer; the classic
-   setting in `[play]`, `play --classic`, and in replays.
+   setting in `[play]`, `play --classic`, and in replays (done with M3).
 3. **M3 The Rust 989snd**: banks, sounds and their grains, voice
    allocation, MIDI, streams, movie sound, against the classic path's
    register writes and output.
@@ -315,3 +382,6 @@ recorded again where the machine's state changes.
 [^mods]: Movie and texture mods for Sly found on the web
 [^ps3-movies]: The user's decision: the PS3 movies (the Vita mod's source) after parity
 [^movies]: Sly 1's logo movies against PCSX2
+[^m3-trace]: Sly 1's 989snd call set and register traffic
+[^m3-compare]: The Rust 989snd against the disc's driver
+[^opengoal]: OpenGOAL's 989snd (MIDI, AME, banks)
