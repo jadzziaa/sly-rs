@@ -94,9 +94,9 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     let started = Instant::now();
     let (image, _) = sly_common::machine::executable(game)?;
     let mut found = discover(&image, &[])?;
-    // Hooked functions stay out of generated code: calls to them reach the
-    // machine, which runs the hook.
-    let hooked: Vec<u32> = sly_common::hooks::hooks(game).iter().map(|h| h.0).collect();
+    // Hooked and patched functions stay out of generated code: calls to them
+    // reach the machine, which runs the hook or interprets the patched code.
+    let hooked = sly_common::hooks::left_out(game);
     found.functions.retain(|f| !hooked.contains(&f.start));
     let chunks = chunks(&found.functions);
     let dir = root.join("generated").join(game.key());

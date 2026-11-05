@@ -72,6 +72,10 @@ pub struct Config {
 /// How `play` behaves.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent switches in a settings file"
+)]
 pub struct Play {
     /// Pause the game while the window is not focused.
     pub pause_on_focus_loss: bool,
@@ -97,6 +101,8 @@ pub struct Play {
     pub volume: u32,
     /// Play the game's movies (false skips them).
     pub movies: bool,
+    /// Draw widescreen (16:9), where the game can.
+    pub widescreen: bool,
 }
 
 impl Default for Play {
@@ -110,6 +116,7 @@ impl Default for Play {
             scale: 1,
             volume: 100,
             movies: true,
+            widescreen: false,
         }
     }
 }

@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:40:34Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:56:37Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -869,6 +869,20 @@ given: the gates are the schedule.
 - Windows build.
 - **Gate**: Sly 1 completed on replay; the §9 budget met; options off leave
   RAM hashes unchanged.
+
+- **Status, 2026-11-05: under way.** The GPU GS is done (M0-M5,
+  [research/gpu-gs.md](research/gpu-gs.md)), with super-sampling as the
+  internal-resolution option; PGO is in `cargo xtask recomp --pgo`.
+  - Widescreen (2026-11-05, [research/widescreen.md](research/widescreen.md)):
+    `widescreen` under `[play]`, `--widescreen`, a replay key. The camera's
+    aspect ratio widened by an instruction patch the interpreter runs
+    (memory keeps the game's bytes; the function stays out of generated
+    code); the window shows 16:9. Off, replays keep their hashes; on,
+    `lockstep` is equal. The 2D interface stretches, as with PCSX2's patch.
+  - Windows: the workspace and the recompiled game type-check for
+    `x86_64-pc-windows-msvc` with no changes (2026-11-05); not yet linked
+    or run, which needs a Windows machine or hosted CI.
+  - Whole-game replays wait for the user's playthrough.
 
 ### Phase 10 - Sly 2
 

@@ -1,5 +1,5 @@
 //! The window's pixels, drawn with wgpu: the latest picture uploaded as a
-//! texture and shown at 4:3, centred, black around it. A shader maps
+//! texture and shown at 4:3 (16:9 for widescreen), centred, black around it. A shader maps
 //! window pixels to picture pixels with the same integer arithmetic the
 //! CPU painter used (nearest, a field's lines doubled), so the window
 //! shows exactly the picture's pixels, scaled; a picture drawn at a
@@ -247,6 +247,11 @@ impl Screen {
         &self.window
     }
 
+    /// Shows pictures at 16:9 (`wide`) or 4:3.
+    pub(crate) const fn set_wide(&mut self, wide: bool) {
+        self.painter.wide = wide;
+    }
+
     /// Keeps a field's picture (`odd`: the odd field) for the pictures
     /// drawn from now on.
     pub(crate) fn add_field(&mut self, frame: &Frame, odd: bool) {
@@ -322,6 +327,8 @@ struct Painter {
     fields: std::collections::VecDeque<Slot>,
     /// A field's picture as RGBA, a buffer kept between uploads.
     rgba: Vec<u8>,
+    /// Pictures are shown at 16:9 (the game draws widescreen).
+    wide: bool,
 }
 
 impl Painter {
@@ -401,6 +408,7 @@ impl Painter {
             place,
             fields: std::collections::VecDeque::new(),
             rgba: Vec::new(),
+            wide: false,
         }
     }
 
@@ -491,7 +499,7 @@ impl Painter {
             },
             scale,
         );
-        let mut words = place(size, picture);
+        let mut words = place(size, picture, self.wide);
         words[8] = u32::from(whole);
         words[9] = u32::from(latest.odd);
         words[10] = scale;
@@ -611,10 +619,14 @@ struct Shown {
 const PLACE_WORDS: usize = 16;
 
 /// Where a picture of `width` × `height` drawn at internal resolution
-/// `scale` goes in a window of `size`: at 4:3, centred, as the first words
-/// of the shader's `Place`.
-fn place(size: (u32, u32), (width, height, scale): (u32, u32, u32)) -> [u32; PLACE_WORDS] {
-    let (tw, th) = fit(size);
+/// `scale` goes in a window of `size`: at 4:3 (16:9 if `wide`), centred, as
+/// the first words of the shader's `Place`.
+fn place(
+    size: (u32, u32),
+    (width, height, scale): (u32, u32, u32),
+    wide: bool,
+) -> [u32; PLACE_WORDS] {
+    let (tw, th) = fit(size, wide);
     // A small picture (a field's worth) has its lines doubled.
     let lines = if height / scale <= 256 {
         height * 2
@@ -635,12 +647,14 @@ fn place(size: (u32, u32), (width, height, scale): (u32, u32, u32)) -> [u32; PLA
     words
 }
 
-/// The largest 4:3 rectangle in a window of `width` × `height`.
-fn fit((width, height): (u32, u32)) -> (u32, u32) {
-    if u64::from(width) * 3 >= u64::from(height) * 4 {
-        (height * 4 / 3, height)
+/// The largest 4:3 rectangle (16:9 if `wide`) in a window of `width` ×
+/// `height`.
+fn fit((width, height): (u32, u32), wide: bool) -> (u32, u32) {
+    let (w, h): (u32, u32) = if wide { (16, 9) } else { (4, 3) };
+    if u64::from(width) * u64::from(h) >= u64::from(height) * u64::from(w) {
+        (height * w / h, height)
     } else {
-        (width, width * 3 / 4)
+        (width, width * h / w)
     }
 }
 
@@ -786,7 +800,7 @@ mod tests {
         reason = "the shader's arithmetic"
     )]
     fn paint_filtered(buffer: &mut [u32], (width, height): (u32, u32), frame: &Frame) {
-        let (tw, th) = fit((width, height));
+        let (tw, th) = fit((width, height), false);
         let (ox, oy) = ((width - tw) / 2, (height - th) / 2);
         let (fw, fh) = (frame.width as f32, frame.height as f32);
         let at = |x: i64, y: i64, k: usize| -> f32 {
@@ -974,6 +988,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn pictures_fit_at_four_by_three_or_sixteen_by_nine() {
+        assert_eq!(fit((1280, 896), false), (1194, 896));
+        assert_eq!(fit((1280, 896), true), (1280, 720));
+        assert_eq!(fit((1920, 1080), true), (1920, 1080));
+        assert_eq!(fit((1920, 1080), false), (1440, 1080));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 # Memory card images: the user's saves (play's default folder, recordings' copies).
 /cards/
 *.ps2
-# Caches of local tools.
+# Caches of local tools, and agents' worktrees.
 /graft/
+/.claude/worktrees/
 __pycache__/

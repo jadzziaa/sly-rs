@@ -67,6 +67,8 @@ struct Shared {
     quit: AtomicBool,
     /// The window draws with the GS's GPU: pictures stay there.
     presenting: AtomicBool,
+    /// The game draws widescreen: the window shows it at 16:9.
+    wide: AtomicBool,
 }
 
 /// The GPU the GS draws on and the window shows from, opened before
@@ -177,10 +179,10 @@ fn emulate(
         card,
         mut saving,
         movies,
+        widescreen,
     } = start(options)?;
-    if movies {
-        sly_common::hooks::play_movies(&mut machine, options.game);
-    }
+    let widescreen = features(&mut machine, options.game, movies, widescreen);
+    shared.wide.store(widescreen, Ordering::Relaxed);
     machine.iop.insert_card(card.clone());
     let speaker = speaker(options.settings.volume);
     machine.iop.keep_samples(speaker.is_some());
@@ -188,9 +190,7 @@ fn emulate(
     let mut gamepads = gilrs::Gilrs::new()
         .map_err(|e| tracing::warn!("no gamepads: {e}"))
         .ok();
-    for (_, pad) in gamepads.iter().flat_map(gilrs::Gilrs::gamepads) {
-        report(&pad);
-    }
+    (gamepads.iter().flat_map(gilrs::Gilrs::gamepads)).for_each(|(_, pad)| report(&pad));
     let mut recorder = Recorder::default();
     let mut next = Instant::now();
     while !shared.quit.load(Ordering::Relaxed) {
@@ -271,9 +271,19 @@ fn emulate(
             &recorder,
             card.as_ref(),
             movies,
+            widescreen,
         )?;
     }
     Ok(())
+}
+
+/// Lets the game play its movies and draw widescreen, as asked; returns
+/// whether it draws widescreen.
+fn features(machine: &mut ps2_ee::Machine, game: Game, movies: bool, widescreen: bool) -> bool {
+    if movies {
+        sly_common::hooks::play_movies(machine, game);
+    }
+    widescreen && sly_common::hooks::use_widescreen(machine, game)
 }
 
 /// What the session starts from.
@@ -286,6 +296,8 @@ struct Start {
     saving: Option<CardSaver>,
     /// Whether movies play: as the replay played them, or as `[play]` says.
     movies: bool,
+    /// Whether the game draws widescreen: likewise.
+    widescreen: bool,
 }
 
 /// What the session starts from: a replay's input, card and movies, or the
@@ -308,6 +320,7 @@ fn start(options: &Options) -> Result<Start> {
                 card,
                 saving: None,
                 movies: replay.movies,
+                widescreen: replay.widescreen,
             }
         }
         None => Start {
@@ -316,6 +329,7 @@ fn start(options: &Options) -> Result<Start> {
             card: options.card.as_deref().map(open_card).transpose()?,
             saving: options.card.clone().map(CardSaver::new),
             movies: options.settings.movies,
+            widescreen: options.settings.widescreen,
         },
     })
 }
@@ -404,6 +418,7 @@ fn save(
     recorder: &Recorder,
     card: Option<&ps2_memcard::Card>,
     movies: bool,
+    widescreen: bool,
 ) -> Result<()> {
     let fields = machine.cpu.cycles / FIELD_CYCLES;
     let state = Sly1State::read(&mut machine.mem);
@@ -426,6 +441,7 @@ fn save(
         presses: Vec::new(),
         card,
         movies,
+        widescreen,
         inputs: recorder.inputs().to_vec(),
         checkpoints: vec![Checkpoint {
             field: fields,
@@ -823,10 +839,14 @@ impl App {
         }
     }
 
-    /// Shows the latest picture at 4:3 in the window, black around it.
+    /// Shows the latest picture at 4:3 (16:9 for widescreen) in the
+    /// window, black around it.
     fn draw(&mut self) -> Result<(), String> {
         match &mut self.screen {
-            Some(screen) => screen.draw(),
+            Some(screen) => {
+                screen.set_wide(self.shared.wide.load(Ordering::Relaxed));
+                screen.draw()
+            }
             None => Ok(()),
         }
     }

@@ -219,6 +219,9 @@ enum Command {
         /// skipping them.
         #[arg(long)]
         movies: bool,
+        /// Draw widescreen (16:9; the screenshot keeps the GS's pixels).
+        #[arg(long)]
+        widescreen: bool,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -228,8 +231,8 @@ enum Command {
         /// Fields (1/59.94 s) to run.
         #[arg(long, default_value_t = 300)]
         fields: u64,
-        /// Drive both machines with a replay: its presses, memory card and
-        /// movies.
+        /// Drive both machines with a replay: its presses, memory card,
+        /// movies and widescreen.
         #[arg(long)]
         replay: Option<PathBuf>,
     },
@@ -308,6 +311,9 @@ enum Command {
         /// Play without a memory card.
         #[arg(long)]
         no_card: bool,
+        /// Draw widescreen, 16:9 (as `widescreen = true` under `[play]`).
+        #[arg(long)]
+        widescreen: bool,
     },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
@@ -461,6 +467,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             gs_dump_fields,
             card,
             movies,
+            widescreen,
         } => run::run(
             &game,
             fields,
@@ -470,6 +477,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 screenshot: screenshot.as_deref(),
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
                 movies,
+                widescreen,
             },
             &card,
             recompiled.filter(|_| !interpret),
@@ -545,6 +553,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             scale,
             card,
             no_card,
+            widescreen,
         } => sly_common::Game::from_key(&game)
             .ok_or_else(|| anyhow::anyhow!("unknown game {game:?}"))
             .and_then(|game| {
@@ -552,6 +561,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 let mut settings = config.play().clone();
                 let card = (!no_card).then(|| card.unwrap_or_else(|| config.card(game)));
                 settings.gpu |= gpu;
+                settings.widescreen |= widescreen;
                 if let Some(scale) = scale {
                     settings.scale = scale;
                 }

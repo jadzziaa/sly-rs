@@ -8,6 +8,14 @@
 //! "intro seen" flag); only the decoding is replaced: `CMpeg::Start` sets up
 //! nothing, `sceMpegIsEnd` reports the end at once, `CMpeg::Finish` has
 //! nothing to tear down.
+//!
+//! Patches change instructions for an option, in the interpreter only:
+//! their functions stay out of generated code, so both builds run them the
+//! same way, and memory keeps the original bytes (Sly 1 checksums its own
+//! code). Widescreen in Sly 1 widens the camera's aspect ratio, which only
+//! `InitCm` sets (`CM::rAspect`, 1.298701, read by `RecalcCmFrustrum` and
+//! the look-at code), by 4/3: 1.731601. The community's patch (`pcsx2_patches`,
+//! SCUS-97198) changes the same instruction's upper half only, to 1.728389.
 
 use ps2_core::{Cpu, Memory};
 use ps2_ee::Hook;
@@ -26,6 +34,65 @@ pub fn play_movies(machine: &mut ps2_ee::Machine, game: Game) {
     for &(address, _, _) in hooks(game) {
         machine.unhook(address);
     }
+}
+
+/// A patch: the function it is in, then each instruction's address, the
+/// word the game has there and the word run instead.
+pub struct Patch {
+    /// The function's address (left out of generated code).
+    pub function: u32,
+    /// Address, original word, replacement.
+    pub words: &'static [(u32, u32, u32)],
+}
+
+/// A game's widescreen patch (16:9), if it has one.
+#[must_use]
+pub fn widescreen(game: Game) -> Option<&'static Patch> {
+    match game {
+        // InitCm: `lui $at, 0x3FA6; ori $at, $at, 0x3BD8` (1.298701), then
+        // stored at CM + 0x1E0.
+        Game::Sly1 => Some(&Patch {
+            function: 0x0014_3648,
+            words: &[
+                (0x0014_36B0, 0x3C01_3FA6, 0x3C01_3FDD),
+                (0x0014_36B4, 0x3421_3BD8, 0x3421_A520),
+            ],
+        }),
+        Game::Sly2 | Game::Sly3 => None,
+    }
+}
+
+/// Functions generated code leaves out: the hooked ones, and those a patch
+/// changes.
+#[must_use]
+pub fn left_out(game: Game) -> Vec<u32> {
+    hooks(game)
+        .iter()
+        .map(|h| h.0)
+        .chain(widescreen(game).map(|p| p.function))
+        .collect()
+}
+
+/// Applies a patch, if the game has the words it expects there (as it
+/// does on the supported build); returns whether it did.
+pub fn apply(machine: &mut ps2_ee::Machine, patch: &Patch) -> bool {
+    if patch
+        .words
+        .iter()
+        .any(|&(address, original, _)| machine.mem.read32(address) != original)
+    {
+        return false;
+    }
+    for &(address, _, word) in patch.words {
+        machine.patch(address, word);
+    }
+    true
+}
+
+/// Makes the game draw widescreen (16:9), if it can; returns whether it
+/// does.
+pub fn use_widescreen(machine: &mut ps2_ee::Machine, game: Game) -> bool {
+    widescreen(game).is_some_and(|patch| apply(machine, patch))
 }
 
 /// A game's hooks: address, name, replacement.

@@ -8,6 +8,7 @@
 //! card = "formatted"   # a memory card: a blank one, or an image's path
 //!                      #   (relative to the replay); none if left out
 //! movies = true        # the game's movies play (skipped if left out)
+//! widescreen = true    # the game draws at 16:9 (4:3 if left out)
 //! presses = ["cross@700", "start@900"]   # BUTTON@FIELD, held six fields
 //! inputs = ["1200:0040", "1206:0000:80807f00"]
 //!
@@ -271,6 +272,9 @@ pub struct Replay {
     /// if left out, as replays recorded before movies played them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub movies: bool,
+    /// Whether the game draws widescreen (16:9); 4:3 if left out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub widescreen: bool,
     /// The pad's state as it changes, `FIELD:BUTTONS[:STICKS]` (hex).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
@@ -337,13 +341,14 @@ mod tests {
             presses: vec!["cross@200".to_owned()],
             card: Some(crate::card::FORMATTED.to_owned()),
             movies: true,
+            widescreen: true,
             inputs: recorder.inputs().to_vec(),
             checkpoints: Vec::new(),
         };
         let text = toml::to_string(&replay).unwrap();
         let back: Replay = toml::from_str(&text).unwrap();
         assert_eq!(back.card.as_deref(), Some("formatted"));
-        assert!(back.movies);
+        assert!(back.movies && back.widescreen);
         let script = Script::of(&back).unwrap();
         for f in 0..400 {
             let mut expected = live(f);

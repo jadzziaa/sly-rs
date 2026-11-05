@@ -126,6 +126,9 @@ pub struct Machine {
     /// A bit per word address modulo 4096, set where a hook may be: the
     /// map is looked up only there.
     hook_filter: [u64; 64],
+    /// Patched instructions, by address: the word the processor runs
+    /// there instead of the one in memory (memory keeps the original).
+    patches: BTreeMap<u32, u32>,
     /// Decoded instructions, by address modulo [`DECODED`] words; an
     /// entry is used only while memory holds the same word.
     decoded: Box<[Insn]>,
@@ -196,6 +199,7 @@ impl Machine {
             table: Table::empty(),
             hooks: BTreeMap::new(),
             hook_filter: [0; 64],
+            patches: BTreeMap::new(),
             decoded: vec![Insn::decode(0); DECODED].into_boxed_slice(),
             syscalled: false,
             attention: false,
@@ -212,6 +216,11 @@ impl Machine {
                 u32::from_le_bytes([b[0], b[1], b[2], b[3]])
             }
             _ => self.mem.read32(pc),
+        };
+        let word = if self.patches.is_empty() {
+            word
+        } else {
+            self.patches.get(&pc).copied().unwrap_or(word)
         };
         let slot = &mut self.decoded[(pc as usize >> 2) & (DECODED - 1)];
         if slot.word() != word {
@@ -245,6 +254,13 @@ impl Machine {
             let bit = (address >> 2) & 4095;
             self.hook_filter[(bit >> 6) as usize] |= 1 << (bit & 63);
         }
+    }
+
+    /// Runs `word` in place of the instruction at `address`, leaving memory
+    /// as it is (Sly 1 checksums its own code). Generated code must not
+    /// contain the function (it then runs in the interpreter, here).
+    pub fn patch(&mut self, address: u32, word: u32) {
+        self.patches.insert(address, word);
     }
 
     /// Runs `table`'s generated code wherever it has some, the interpreter

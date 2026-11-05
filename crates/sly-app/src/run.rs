@@ -18,6 +18,8 @@ pub(crate) struct Pictures<'a> {
     pub(crate) gs_dump: Option<(&'a std::path::Path, u64)>,
     /// Play the game's movies instead of skipping them.
     pub(crate) movies: bool,
+    /// Draw widescreen (16:9).
+    pub(crate) widescreen: bool,
 }
 
 #[allow(
@@ -41,6 +43,9 @@ pub(crate) fn run(
     card.insert(&machine, None, std::path::Path::new("."))?;
     if pictures.movies {
         sly_common::hooks::play_movies(&mut machine, game);
+    }
+    if pictures.widescreen && !sly_common::hooks::use_widescreen(&mut machine, game) {
+        anyhow::bail!("{} has no widescreen patch", game.key());
     }
     if recompiled.is_none() {
         machine.samples = Some(std::collections::BTreeMap::new());

@@ -27,6 +27,9 @@ scale = 1
 volume = 100
 # Play the game's movies (decoded by the emulated IPU); false skips them.
 movies = true
+# Draw widescreen (16:9): the game's camera is widened and the window shows
+# it at 16:9. Off, the game is exactly as on a console.
+widescreen = false
 
 # Key bindings replace the defaults one by one: a DualShock button (as in a
 # replay's presses) or a stick direction (left-up, right-down, ...) = a key

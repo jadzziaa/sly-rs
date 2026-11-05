@@ -115,7 +115,7 @@ pub(crate) fn run(
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
     let (mut compiled, _) = crate::boot(game, Some(recompiled))?;
     let (mut interpreted, _) = crate::boot(game, None)?;
-    // Both machines get the replay's memory card and movies.
+    // Both machines get the replay's memory card, movies and widescreen.
     if let Some((replay, path)) = &loaded {
         for machine in [&mut compiled, &mut interpreted] {
             if let Some(spec) = &replay.card {
@@ -126,6 +126,9 @@ pub(crate) fn run(
             }
             if replay.movies {
                 sly_common::hooks::play_movies(machine, game);
+            }
+            if replay.widescreen && !sly_common::hooks::use_widescreen(machine, game) {
+                anyhow::bail!("{} has no widescreen patch", game.key());
             }
         }
     }
