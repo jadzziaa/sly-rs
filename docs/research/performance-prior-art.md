@@ -3,7 +3,7 @@ type: Research Note
 title: Performance techniques in rac-rs and paraLLEl-GS
 description: Which performance techniques rac-rs (Ratchet & Clank recompiled) and paraLLEl-GS (a Vulkan compute GS) use that sly-rs does not yet, what each would buy here, and whether it could keep replays bit-exact.
 tags: [research, prior-art, performance, rac-rs, parallel-gs, gpu, gs, ee, phase-9]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T02:59:19Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T03:02:27Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: rac-rs
@@ -21,6 +21,9 @@ sources:
   - id: weak
     resource: sly-rs gs-replay play60.gs --gpu-only with WGPU_POWER_PREF=low (integrated Radeon, RADV RAPHAEL_MENDOCINO) and draw.wgsl variants, 2026-11-04
     title: The play dump on the integrated Radeon, shader variants
+  - id: ee-samples
+    resource: sly1 run sly1 --interpret --fields 3000 --press start@300,start@500,cross@700,start@1600,start@2000 (PC sampled every 4,096 instructions), 2026-11-04
+    title: The EE's instructions by function, interpreted
   - id: options
     resource: performance-options.md
     title: Performance after the GPU GS
@@ -62,7 +65,7 @@ Neither project has anything for VU1's thread, sly-rs's limit today.
 | Deinterlacing and scan-out in shaders, no read back (`weave.frag`) | paraLLEl-GS | The window thread's deinterlacing and the per-field read back | Good, pictures only (option 5) |
 | Fine binning with subgroup ballots, shading only the primitives that cover a tile (`ubershader.comp`) | paraLLEl-GS | GPU time on weak GPUs | **Measured, skipped** (2026-11-04): on the integrated Radeon the play dump takes 3.2 s for 60 fields, and finding which pixels a primitive covers is only about 0.3 s of it; shading the covered pixels with the exact 64-bit interpolation is about 2.2 s.[^weak] |
 | Lazy shading: an opaque pixel replaces the pending one, early depth tests turned late when needed | paraLLEl-GS | GPU fill | Medium: must leave the same words; gain on Sly unmeasured |
-| Skipping iterations of loops that busy-poll a hardware register, counting the same instructions | rac-rs | EE time spent polling | Deterministic; sly-rs only skips kernel waits. Whether Sly polls anything needs a profile |
+| Skipping iterations of loops that busy-poll a hardware register, counting the same instructions | rac-rs | EE time spent polling | **Measured, not worth it** (2026-11-04): sampling the interpreted EE every 4,096 instructions over 3,000 fields of the new-game sequence, the top 40 functions are the game's own work; the likeliest pollers, `sceSifCheckStatRpc` and `snd_GotReturns`, are 0.6% and 0.7%, and `sceDmaSync` is not among them.[^ee-samples] |
 | Hand-written fast paths for hot functions (registers in locals, back to the compiled code on anything unusual) | rac-rs | About 9% less CPU time for rac-rs's game logic | Low until the EE is the limit again; generated from the disc, they would keep retail code out of the repository |
 | Memory accesses to known ranges without the range check, cold paths outlined | rac-rs | EE speed, compile time | Small, no effect on determinism |
 | Busy threads at high priority, Windows power throttling off | rac-rs | Hybrid CPUs and laptops | Cheap, for a Windows build |
@@ -94,7 +97,7 @@ own work. Of the two projects' techniques:
 2. Presenting on the GPU (option 5): done.
 3. Fine binning and lazy shading for weak GPUs (option 6): measured and
    skipped, see the table and below.
-4. Polling-loop skipping on the EE, once a profile shows a loop worth it.
+4. Polling-loop skipping on the EE: measured, no loop worth it.
 5. Triangle setup on the GPU, only if the drawer thread becomes a limit.
 
 **Weak GPUs, measured** (2026-11-04).[^weak] Turning parts of `draw.wgsl`
@@ -112,6 +115,7 @@ user's choice; an optional approximate mode for weak GPUs (plane 0 in
 floats, depth exact, replays unaffected as Sly never reads GS memory
 back) is what would pay.
 
+[^ee-samples]: The EE's instructions by function, interpreted, 2026-11-04
 [^weak]: The play dump on the integrated Radeon, shader variants, 2026-11-04
 [^rac-rs]: AsobiCodes/rac-rs v0.4.3 (commit 5b14154, 2026-10-31), read from a shallow clone, not built
 [^pgs]: Arntzen-Software/parallel-gs (commit cc6184a), read from a shallow clone, not built
