@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-05
+* **Update**: Plan phase 9: GitHub's CI runs `cargo xtask ci` on Windows too, the same 179 tests passing; CI had failed since phase 7 on missing libudev and ALSA, fixed.
 * **Creation**: [Widescreen in Sly 1](research/widescreen.md): the camera's aspect ratio widened by 4/3 through an instruction patch the interpreter runs, memory untouched; off leaves replays exact, on stays equal in lockstep. Plan phase 9 status: widescreen, and Windows type-checks.
 * **Update**: PS3 movies (the Vita mod's source) moved to phase 12, after parity: adapting the Vita mod to the PS2 player would cap them at the originals' size and 640×480 ([sound-and-movies.md](research/sound-and-movies.md)).
 * **Update**: [Sound and movies](research/sound-and-movies.md): movies through the IPU only until after parity (the user's decision); what PS3-movie mods found so far are, and what a PS2 movie mod can do with sly-rs.
