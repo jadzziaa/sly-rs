@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: [Performance techniques](research/performance-prior-art.md): weak GPUs measured on the integrated Radeon (exact shading is most of its 53 ms a field, finding covered pixels about a tenth); shading only covered pixels skipped.
 * **Update**: [GPU GS](research/gpu-gs.md): a beige line at a baseboard's edge in the corridor at 2× and above, noted as a known artifact (the baseboard's texels in extra samples, carried by the game's frame blend); three remedies tried and not kept.
 * **Update**: [Graphics](research/sly1-graphics.md): fromSPR's chain mode is a destination chain, its tags in the scratchpad; walked as a source chain, Sly's particles were never written back after their dead were dropped, so groups of sparkles vanished mid-animation. New-game replay hashes re-recorded; the user's prologue recording no longer reaches its last level.
 * **Update**: Option 5 done: the window deinterlaces in its shader, and with the GPU drawing the GS and the window share one GPU and fields are presented into textures instead of read back; asking for a picture every field cost the drawer 3.7 ms at 3×, now nothing measurable ([performance-options.md](research/performance-options.md)).
