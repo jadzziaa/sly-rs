@@ -26,7 +26,7 @@ sources:
   - id: user-sparkles
     resource: human:august, 2026-11-04
     title: The user's report (particles end their animation earlier than on the hardware)
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T00:57:47Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:41:12Z }
 verified:
   - { by: claude-code/claude-opus-5-5, at: 2026-11-05T00:57:47Z }
 ---
@@ -146,6 +146,17 @@ field).
   **The gate's tolerance:** in every scene at least 99.9% of pixels within
   8 levels (of 255, on any channel) of PCSX2's software renderer, the rest
   at texel boundaries of scaled sprites or in perspective rounding.
+- **Sly's shadow in the opening cutscene** (checked 2026-11-04, from the
+  user's first hands-on test, where it did not look right to their
+  recollection). PCSX2 running the real game with the same memory card
+  reaches the scene of Sly running across the roof about 910 fields after
+  sly-rs (it plays the logo movie): the frames match shot for shot, with
+  the same backlit silhouette and shadow, a few frames apart in the
+  animation. Three fields of our GS traffic there (`run`/`replay
+  --gs-dump`, ending at field 692), drawn by PCSX2: the first two
+  identical, the third 99.91% within 8 levels, the rest along the
+  antialiased outline of Sly's silhouette (largest difference 36). Nothing
+  to fix.
 - **The real game, in PCSX2.** With a formatted memory card
   (`sly-rs format-card`) and Cross pressed through XTEST
   (`tools/pcsx2-frames.sh` with `CARD`, `PRESS`), headless PCSX2 gets past

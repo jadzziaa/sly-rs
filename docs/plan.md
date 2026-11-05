@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:04:40Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:41:12Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -807,9 +807,16 @@ given: the gates are the schedule.
     on every recorded program; the prologue runs at 76.5%
     ([research/vu-translation.md](research/vu-translation.md)). VU1 no
     longer sets the pace alone; what does is to be measured.
-  - Open from that test: Sly's shadow in the opening cutscene (to compare
-    with PCSX2), pressure mode (the real game reaches mode 0x79, Shock2;
-    ours stays at 0x73, Shock).
+  - Open from that test, both settled (2026-11-04): pressure mode (the
+    real game reaches mode 0x79, Shock2; ours stayed at 0x73, Shock): the
+    pad record now carries the button mask the disc's libpad reads, and
+    Sly 1 asks for pressure mode as on a console
+    ([research/sly1-boot.md](research/sly1-boot.md), step 13). Sly's
+    shadow in the opening cutscene matches PCSX2: the real game's frames
+    show the same shadow, and PCSX2 drawing our GS dump of it gives the
+    same picture within the phase 6 tolerance (99.91% of pixels within 8
+    levels; the rest on antialiased outline edges)
+    ([research/sly1-graphics.md](research/sly1-graphics.md)).
   - Memory card saves (2026-11-04,
     [research/memory-card.md](research/memory-card.md)): the card
     manager's file system over a `.ps2` image and the card server's calls

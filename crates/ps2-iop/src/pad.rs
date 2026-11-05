@@ -44,6 +44,9 @@ const STATE_STABLE: u8 = 6;
 /// Request state: complete.
 const REQUEST_COMPLETE: u8 = 0;
 
+/// The buttons whose pressure a DualShock 2 reports: all eighteen bits.
+const BUTTON_MASK: u32 = 0x3_FFFF;
+
 /// Mode ids: digital, analog, analog with pressure.
 const DIGITAL: u8 = 0x41;
 const ANALOG: u8 = 0x73;
@@ -158,6 +161,12 @@ impl Padman {
         r[112] = STATE_STABLE;
         r[113] = REQUEST_COMPLETE;
         r[114] = 1; // currentTask
+        // The buttons that report pressure: all of a DualShock 2's. The
+        // disc's libpad reads this mask from the record
+        // (`scePadInfoPressMode` is 1 only for 0x3FFFF), where ps2sdk's
+        // layout has padding; without it Sly 1 never asks for pressure
+        // mode and takes the pad for a Shock, not a Shock2.
+        r[121..125].copy_from_slice(&BUTTON_MASK.to_le_bytes());
         r
     }
 }
@@ -222,7 +231,7 @@ impl Server for Padman {
                 }
                 set(4, 1);
             }
-            cmd::GET_BUTTON_MASK => set(3, 0x3_FFFF),
+            cmd::GET_BUTTON_MASK => set(3, BUTTON_MASK),
             cmd::SET_ACT_DIRECT | cmd::SET_ACT_ALIGN | cmd::SET_VREF => set(5, 1),
             cmd::GET_PORT_MAX => set(3, 2),
             cmd::GET_SLOT_MAX | cmd::END => set(3, 1),
@@ -300,5 +309,15 @@ mod tests {
         let port = pad.ports[0].unwrap_or_else(|| panic!("port 0 open"));
         let r = pad.record(&port);
         assert_eq!((r[1], r[101], r[109], r[110]), (ANALOG, ANALOG, 1, 3));
+        // Every button reports pressure, as libpad reads it from the
+        // record; SET_BUTTON_INFO then switches to pressure mode.
+        assert_eq!(
+            u32::from_le_bytes([r[121], r[122], r[123], r[124]]),
+            0x3_FFFF
+        );
+        call(&mut pad, &mut mem, &[cmd::SET_BUTTON_INFO, 0, 0, 0xFFF]);
+        let port = pad.ports[0].unwrap_or_else(|| panic!("port 0 open"));
+        let r = pad.record(&port);
+        assert_eq!((r[1], r[96]), (PRESSURE, 20));
     }
 }

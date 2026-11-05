@@ -3,7 +3,7 @@ type: Finding
 title: How Sly 1 boots in the interpreter
 description: The start-up sequence of Sly 1 (SCUS-97198) as sly-rs runs it - kernel patches, threads, the SIF handshake, the IOP reboot, CD/DVD and module-loader RPC, the sound driver on the emulated IOP, DMA and GS events, the pad, the memory card check, the title and a new game - up to its first level.
 tags: [finding, boot, sly1, kernel, sif, rpc, iop, sound, phase-3, phase-5]
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:04:40Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T04:41:12Z }
 sources:
   - id: run
     resource: sly-rs run sly1 --fields 600, with SLY_RS_LOG=iop=debug and --watch 1e1db8, 2026-11-02
@@ -103,7 +103,14 @@ instructions per second, about 0.6 times real time.
     the pad for a digital one (`g_joy.joyk` Digital), never asks for analog
     mode, and ignores the left stick in play until a button is pressed.
     With 2 it sends `SET_MAIN_MODE` (analog, locked) and `SET_ACT_ALIGN`,
-    and the pad is a Shock.
+    and the pad is a Shock. Then `UpdateJoy` asks `scePadInfoPressMode`,
+    which the disc's libpad answers from the record, not by a call: 1
+    only when the button mask in bytes 121-124 (padding in ps2sdk's
+    layout) is 0x3FFFF, every button reporting pressure, as a DualShock 2
+    does. With that mask Sly sends `SET_BUTTON_INFO` (0xFFF), the pad goes
+    to mode 0x79 and the joypad is a Shock2, as on a console (PCSX2's
+    savestate shows 0x79). The new-game replay's hashes were re-recorded
+    (2026-11-04).
 14. **Memory card check**: the splash screen waits for the save system
     (`g_save`, `0x264A40`). `sceMcInit` needs mcserv ≥ 0x20A and mcman ≥
     0x20E, or every later call fails with -100. With no card in the slot
