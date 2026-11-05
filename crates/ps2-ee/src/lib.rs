@@ -129,6 +129,9 @@ pub struct Machine {
     /// Patched instructions, by address: the word the processor runs
     /// there instead of the one in memory (memory keeps the original).
     patches: BTreeMap<u32, u32>,
+    /// The GS narrows flat 2D for a widescreen picture, and is told at
+    /// each V-blank which frames the display shows.
+    widescreen: bool,
     /// Decoded instructions, by address modulo [`DECODED`] words; an
     /// entry is used only while memory holds the same word.
     decoded: Box<[Insn]>,
@@ -200,6 +203,7 @@ impl Machine {
             hooks: BTreeMap::new(),
             hook_filter: [0; 64],
             patches: BTreeMap::new(),
+            widescreen: false,
             decoded: vec![Insn::decode(0); DECODED].into_boxed_slice(),
             syscalled: false,
             attention: false,
@@ -261,6 +265,13 @@ impl Machine {
     /// contain the function (it then runs in the interpreter, here).
     pub fn patch(&mut self, address: u32, word: u32) {
         self.patches.insert(address, word);
+    }
+
+    /// Has the GS narrow the 2D a game lays out for 4:3 while it draws
+    /// widescreen (`ps2_gs::Gs::set_widescreen`).
+    pub fn narrow_2d(&mut self) {
+        self.widescreen = true;
+        self.hw.borrow_mut().gs.post(|gs| gs.set_widescreen(true));
     }
 
     /// Runs `table`'s generated code wherever it has some, the interpreter
@@ -363,6 +374,10 @@ impl Machine {
                 hw.vblank_start(now);
                 hw.gs_csr ^= 1 << 13;
                 hw.gs_event(3);
+                if self.widescreen {
+                    let regs = hw.gs_display();
+                    hw.gs.post(move |gs| gs.displayed(&regs));
+                }
                 if hw.gs.dumping() {
                     let field = ((hw.gs_csr >> 13) & 1) as u8;
                     let block = hw.gs_privileged();

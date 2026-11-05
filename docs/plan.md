@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T10:10:24Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T10:42:30Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -887,7 +887,9 @@ given: the gates are the schedule.
     aspect ratio widened by an instruction patch the interpreter runs
     (memory keeps the game's bytes; the function stays out of generated
     code); the window shows 16:9. Off, replays keep their hashes; on,
-    `lockstep` is equal. The 2D interface stretches, as with PCSX2's patch.
+    `lockstep` is equal. The 2D interface keeps 4:3: its GIF packets are
+    narrowed before the GS takes them (flat tags and sub-views, such as
+    the portraits).
   - Windows: the workspace and the recompiled game type-check for
     `x86_64-pc-windows-msvc` with no changes (2026-11-05). GitHub's CI now
     runs `cargo xtask ci` on Windows as on Linux: it builds, links and

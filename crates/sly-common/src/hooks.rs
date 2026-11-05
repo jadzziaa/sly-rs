@@ -92,7 +92,11 @@ pub fn apply(machine: &mut ps2_ee::Machine, patch: &Patch) -> bool {
 /// Makes the game draw widescreen (16:9), if it can; returns whether it
 /// does.
 pub fn use_widescreen(machine: &mut ps2_ee::Machine, game: Game) -> bool {
-    widescreen(game).is_some_and(|patch| apply(machine, patch))
+    let wide = widescreen(game).is_some_and(|patch| apply(machine, patch));
+    if wide {
+        machine.narrow_2d();
+    }
+    wide
 }
 
 /// A game's hooks: address, name, replacement.

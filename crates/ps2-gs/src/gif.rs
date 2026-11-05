@@ -19,6 +19,16 @@ pub struct Path {
     tag: Option<Tag>,
 }
 
+impl Path {
+    /// Quadwords the tag under way still takes (none between tags).
+    pub(crate) fn remaining(&self) -> usize {
+        self.tag.map_or(0, |t| {
+            let left = ((t.nloop - 1) * t.nreg + (t.nreg - t.reg)) as usize;
+            if t.flg == 1 { left.div_ceil(2) } else { left }
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Tag {
     /// Loops left.
@@ -36,7 +46,14 @@ impl Gs {
     /// Feeds quadwords of GIF packets on `path` (1 to 3).
     pub fn gif(&mut self, path: usize, data: impl IntoIterator<Item = u128>) {
         let path = path.min(3);
-        if self.dumping() {
+        if self.narrow.is_some() {
+            let mut data: Vec<u128> = data.into_iter().collect();
+            self.narrow(path, &mut data);
+            if self.dumping() {
+                self.dump_transfer(path, &data);
+            }
+            self.feed(path, data);
+        } else if self.dumping() {
             let data: Vec<u128> = data.into_iter().collect();
             self.dump_transfer(path, &data);
             self.feed(path, data);

@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-05
+* **Update**: [Widescreen in Sly 1](research/widescreen.md): the 2D interface keeps 4:3 - flat GIF tags and sub-views (the portraits' scissors) narrowed before the GS takes them; full-width 2D and the depth-tested world stay at 16:9.
 * **Verification**: [Sound and movies](research/sound-and-movies.md): the user found the Rust 989snd the same as the disc's driver by ear on the prologue's gameplay and the reverb types too.
 * **Update**: [Sound and movies](research/sound-and-movies.md), M3 second step: the Rust 989snd now covers the rest of Sly 1's calls (reverb, all ten types, register for register against the disc's driver; stereo streams; SetSoundPitch, AutoVol, GetSoundOriginalPitch) and is the default sound driver; the disc's driver is the classic setting, and replays without the key stay classic.
 * **Verification**: [Sound and movies](research/sound-and-movies.md): the user found the Rust 989snd's sound the same as the disc's driver's by ear over the new-game replay.

@@ -10,7 +10,7 @@
 * [How Sly 1's graphics reach the GS in sly-rs](sly1-graphics.md) - The path Sly 1's frames take through DMA, the scratchpad, VIF0/VIF1, VU0/VU1 and the GS as sly-rs models it, and the four missing pieces that each stopped the first level from drawing. (draft)
 * [VU microcode translated ahead of time](vu-translation.md) - How sly-rs translates the VU microcode overlays into Rust at recompile time, each pair as its own statements with the VU's registers, pipeline and flags in locals, how the translations are matched against what the game uploads and checked against the interpreter bit for bit, and what they gain on Sly 1.
 * [VIF1 and VU1 on a thread of their own](vu1-thread.md) - How sly-rs runs VIF1, VU1 and the GS's feed on their own thread while keeping replays exact - a shadow VIF1 on the EE's side, every GS-bound packet through one ordered queue, the few points where the EE waits - with the rule it changes (PATH1's GS events raised at the next V-blank), the checks and the measured gain.
-* [Widescreen in Sly 1](widescreen.md) - How sly-rs makes Sly 1 draw at 16:9 behind an option - the camera's aspect ratio set in one place, changed by an instruction patch the interpreter runs while memory keeps the game's bytes - and the checks: off leaves replays exact, on stays equal in lockstep and widens the 3D view while the 2D interface stretches.
+* [Widescreen in Sly 1](widescreen.md) - How sly-rs makes Sly 1 draw at 16:9 behind an option - the camera's aspect ratio set in one place, changed by an instruction patch the interpreter runs while memory keeps the game's bytes - and the checks: off leaves replays exact, on stays equal in lockstep, widens the 3D view, and keeps the 2D interface at 4:3 by narrowing its GIF packets.
 
 # Proposal
 

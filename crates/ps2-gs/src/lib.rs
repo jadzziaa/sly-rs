@@ -31,6 +31,7 @@ pub mod regs;
 mod tables;
 pub mod thread;
 mod transfer;
+mod widescreen;
 
 pub use display::{Frame, Privileged};
 pub use mem::{Layout, Memory, Psm};
@@ -115,6 +116,8 @@ pub struct Gs {
     events: Events,
     /// The PCSX2 dump being written, if any.
     dump: Option<dump::Dump>,
+    /// Flat 2D narrowed for a widescreen game, when it is on.
+    narrow: Option<widescreen::Narrow>,
     /// Primitives drawn (for reports).
     pub drawn: u64,
     /// Transfers started by direction (TRXDIR: host to local, local to
@@ -184,6 +187,7 @@ impl Default for Gs {
             paths: Default::default(),
             events: Events::default(),
             dump: None,
+            narrow: None,
             drawn: 0,
             transfers: [0; 4],
             specialise: true,
@@ -201,6 +205,19 @@ impl Default for Gs {
 }
 
 impl Gs {
+    /// Narrows flat 2D drawn for 4:3 when the game draws widescreen
+    /// (see `widescreen.rs`), or stops.
+    pub fn set_widescreen(&mut self, on: bool) {
+        self.narrow = on.then(widescreen::Narrow::default);
+    }
+
+    /// Notes the frames the display shows, which widescreen narrows 2D in.
+    pub fn displayed(&mut self, regs: &Privileged) {
+        if let Some(narrow) = &mut self.narrow {
+            narrow.displayed(regs);
+        }
+    }
+
     /// Writes general-purpose register `address` (as A+D does).
     pub fn write(&mut self, address: u8, value: u64) {
         // Every register but a vertex's may change how primitives draw;
