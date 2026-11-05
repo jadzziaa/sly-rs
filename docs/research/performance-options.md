@@ -4,7 +4,7 @@ title: Performance after the GPU GS
 description: Where host time goes now that the GS draws on the GPU (the machine thread, the GS thread, the drawer thread, the GPU, the window), measured on the user's prologue and GS dumps, and the options for weaker machines ranked by payoff, cost and risk to determinism.
 tags: [proposal, performance, threads, gpu, vu1, gs, phase-9]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T23:44:56Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T03:12:16Z }
 stale_after: 2027-02-01T00:00:00Z
 sources:
   - id: prologue
@@ -280,8 +280,17 @@ replay and the full tests unchanged; the prologue's final hash the same.
 | Slowest and median stretch, PGO | 187%, 307% of NTSC | 195%, 323% |
 
 VU1's thread spends about 90% of its time in the translated programs
-now; one program's body is a third of it, and the exponent-255 checks on
-operands the translator cannot prove clean (loaded from memory) about 7%.
+now; one program's body is a third of it. Callgrind put the exponent-255
+checks on operands the translator cannot prove clean (loaded from memory)
+at about 7% of the thread's instructions, but that was an AVX2 build
+counted by instructions: in the native build the check (a compare and a
+select per lane) is already vectorised, and an integer clamp of the
+magnitude in its place (and, unsigned min, or: the same bits) was slightly
+slower, 2.63-2.65 ns a pair against 2.57-2.58 in turn on the recorded
+gameplay (2026-11-04). With every check removed the bench gave 1.97 ns
+against 2.13 earlier, so at most about 7% is left there, and taking it
+needs registers known clean across blocks, measured before as not worth
+its risk. Left as it is.
 
 **5, presenting on the GPU** (2026-11-04), in two steps.
 

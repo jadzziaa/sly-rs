@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-04
+* **Update**: [Performance after the GPU GS](research/performance-options.md): VU1's operand checks are already vectorised in the native build; an integer clamp was slower, and at most about 7% is left there. Left as is.
 * **Update**: [Performance techniques](research/performance-prior-art.md): EE polling loops measured (sampled over 3,000 fields): none worth skipping; the list from rac-rs and paraLLEl-GS is done.
 * **Update**: [Performance techniques](research/performance-prior-art.md): weak GPUs measured on the integrated Radeon (exact shading is most of its 53 ms a field, finding covered pixels about a tenth); shading only covered pixels skipped.
 * **Update**: [GPU GS](research/gpu-gs.md): a beige line at a baseboard's edge in the corridor at 2× and above, noted as a known artifact (the baseboard's texels in extra samples, carried by the game's frame blend); three remedies tried and not kept.
