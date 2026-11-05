@@ -17,9 +17,18 @@ sources:
   - id: pcsx2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/Vif_Codes.cpp, Vif_Unpack.cpp)
     title: PCSX2's VIF, read for facts
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-04T02:30:27Z }
+  - id: sparkles
+    resource: the user's screen capture of play (2026-11-04); the prologue replay cut at field 5,600 with --gs-dump; the dump played in PCSX2 (tools/pcsx2-frames.sh); blip lists logged in the interpreter at CblipeProjectBlipTransformAccel and at VU1's blip program
+    title: The sparkles that ended early
+  - id: pcsx2-spr
+    resource: https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPR.cpp (_SPR0chain), read for facts
+    title: PCSX2's fromSPR chain mode
+  - id: user-sparkles
+    resource: human:august, 2026-11-04
+    title: The user's report (particles end their animation earlier than on the hardware)
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T00:57:47Z }
 verified:
-  - { by: claude-code/claude-opus-5-5, at: 2026-11-03T23:10:25Z }
+  - { by: claude-code/claude-opus-5-5, at: 2026-11-05T00:57:47Z }
 ---
 
 # How Sly 1's graphics reach the GS in sly-rs
@@ -680,6 +689,40 @@ Where the time is now, and how much is left to win:
 - **Drawing in order**: the 5,818 primitives above, and small batches,
   about 3 s of the drawer, mostly unavoidable.
 
+## Scratchpad to memory in chain mode (2026-11-04)
+
+The user saw particles end their animation earlier than on the hardware
+(the purple sparkles along the water tower's ring, after the title).[^user-sparkles]
+The GS was not at fault: PCSX2 draws our GS dump of those fields
+identically, and the interpreted build writes the same dump as the
+recompiled one.[^sparkles] Sly's particles are blips: each frame
+`ProjectBlipgTransformAccel` loads a group's blips into the scratchpad
+(`LoadSprBuf`), `CblipeProjectBlipTransformAccel` moves each with a VU0
+program and drops those whose `tDestroy` has passed, compacting the rest
+in place, and `SaveSprBuf` copies them back to memory with fromSPR
+(channel 8) in chain mode; the group's count goes down by the blips
+dropped. VU1 draws a blip at a size that is a polynomial of its age: for
+the sparkles `114.29·a − 163.27·a²`, zero at 0.7 s, their lifetime.
+
+fromSPR's chain mode is a destination chain: the DMAC reads each tag from
+the scratchpad (at SADR), and the quadwords after it go to the tag's
+address; `cnt` and `cnts` go on, `end` stops.[^pcsx2-spr] sly-rs walked it
+as a source chain, its tags read from whatever TADR pointed at, so the
+compacted blips never reached memory, and garbage tags sent scratchpad
+quadwords to stray addresses. Next frame the group started from its old
+list with its count lowered: the dead blips stayed (drawn mirrored, at
+negative sizes) and the youngest were cut off, so a group of sparkles
+vanished at once mid-animation. Now `dma::from_spr_chain` walks the
+destination chain (leftover QWC to MADR first, as PCSX2 does), and no
+sparkle outlives 0.7 s.
+
+The game's state now differs from field 1,500 of the new-game replay on;
+its checkpoints are reached as before and its hashes are re-recorded. The
+user's prologue recording, made before, no longer reaches its last level
+(its inputs were played against the old behaviour), so the timings above
+and in [performance-options.md](performance-options.md) were measured on
+a game that differs slightly from the real one.
+
 ## Open
 
 - A pixel-level comparison of the intro and the title with PCSX2 at the
@@ -690,6 +733,9 @@ Where the time is now, and how much is left to win:
   interlace handling in the display are checked only for this game's
   mode (NTSC, field mode).
 
+[^sparkles]: The sparkles that ended early
+[^pcsx2-spr]: PCSX2's fromSPR chain mode
+[^user-sparkles]: The user's report (particles end their animation earlier than on the hardware)
 [^paris]: PCSX2 GS dump of the intro's "Paris, France" shot, and ours of the same shot, 2026-11-03
 [^runs]: Runs of Sly 1 with the GS, VIFs and VUs modelled
 [^symbols]: Sly 1 function and variable names (TheOnlyZac/sly1, CC0)

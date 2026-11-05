@@ -244,13 +244,20 @@ impl Hardware {
         let reg =
             |hw: &Self, offset: u32| hw.regs.get(&(base + offset)).copied().unwrap_or(0) as u32;
         let (madr, qwc, tadr) = (reg(self, 0x10), reg(self, 0x20), reg(self, 0x30));
-        let moves = crate::dma::moves(regions, chcr, madr, qwc, tadr);
+        // fromSPR's chain mode is a destination chain, its tags in the
+        // scratchpad: copied as it is walked.
+        let from_spr_chain = channel == 8 && (chcr >> 2) & 3 == 1;
+        let moves = if from_spr_chain {
+            crate::dma::from_spr_chain(regions, chcr, madr, qwc, reg(self, 0x80))
+        } else {
+            crate::dma::moves(regions, chcr, madr, qwc, tadr)
+        };
         crate::dma::dump(regions, channel, self.clock.get(), &moves);
         let count = self.dma_kicks[name];
         if count.is_power_of_two() {
             tracing::debug!(target: "ee::dma", "{name} kick #{count} (CHCR {chcr:#x}): {} quadwords, {} tags", moves.qwords(), moves.tags);
         }
-        if matches!(channel, 8 | 9) {
+        if matches!(channel, 8 | 9) && !from_spr_chain {
             crate::dma::scratchpad(regions, channel == 9, &moves, reg(self, 0x80));
         }
         if channel == 1 {

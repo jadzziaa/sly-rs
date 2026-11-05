@@ -267,6 +267,62 @@ pub fn scratchpad(regions: &mut Regions, to_spr: bool, moves: &Moves, sadr: u32)
     }
 }
 
+/// Copies `n` quadwords from the scratchpad at `at` (moving it on) to
+/// memory at `to`, and counts the block in `moves`.
+fn spr_to_memory(regions: &mut Regions, at: &mut u32, to: u32, n: u32, moves: &mut Moves) {
+    for i in 0..n {
+        let from = *at as usize;
+        let mut raw = [0; 16];
+        raw.copy_from_slice(&regions.scratchpad[from..from + 16]);
+        let dest = (to.wrapping_add(16 * i) & 0x01FF_FFF0) as usize;
+        if let Some(d) = regions.ram.get_mut(dest..dest + 16) {
+            d.copy_from_slice(&raw);
+        }
+        *at = (*at + 16) & 0x3FF0;
+    }
+    moves.blocks.push((None, to, n));
+}
+
+/// fromSPR (channel 8) in chain mode, done when kicked: a destination
+/// chain. What QWC still holds goes to MADR first; then each tag is read
+/// from the scratchpad at `sadr` (ID in bits 28-30, QWC in 0-15, the
+/// address in 32-62) and the quadwords after it go to the tag's address,
+/// until an end tag (ID 7), or with TIE a tag asking for an interrupt;
+/// `cnts` (0), `cnt` (1) and the IDs a destination chain does not define
+/// go on (as PCSX2's `_SPR0chain`).
+pub fn from_spr_chain(regions: &mut Regions, chcr: u32, madr: u32, qwc: u32, sadr: u32) -> Moves {
+    let mut at = sadr & 0x3FF0;
+    let mut moves = Moves::default();
+    let qwc = qwc & 0xFFFF;
+    if qwc != 0 {
+        spr_to_memory(regions, &mut at, madr, qwc, &mut moves);
+    }
+    let tie = chcr & 0x80 != 0;
+    while moves.tags < MAX_TAGS {
+        let mut raw = [0; 8];
+        raw.copy_from_slice(&regions.scratchpad[at as usize..at as usize + 8]);
+        let tag = u64::from_le_bytes(raw);
+        at = (at + 16) & 0x3FF0;
+        moves.tags += 1;
+        let (n, id, irq) = (
+            (tag & 0xFFFF) as u32,
+            (tag >> 28) & 7,
+            tag & 0x8000_0000 != 0,
+        );
+        spr_to_memory(
+            regions,
+            &mut at,
+            (tag >> 32) as u32 & 0x7FFF_FFFF,
+            n,
+            &mut moves,
+        );
+        if id == 7 || (irq && tie) {
+            break;
+        }
+    }
+    moves
+}
+
 /// The time a transfer takes.
 #[must_use]
 pub fn duration(moves: &Moves) -> u64 {
@@ -305,5 +361,35 @@ pub fn dump(regions: &Regions, channel: usize, cycle: u64, moves: &Moves) {
     }
     if let Ok(mut file) = file.lock() {
         let _ = file.write_all(&record);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_spr_chains_take_their_tags_from_the_scratchpad() {
+        let mut regions = Regions::default();
+        let put = |regions: &mut Regions, at: usize, q: u128| {
+            regions.scratchpad[at..at + 16].copy_from_slice(&q.to_le_bytes());
+        };
+        let tag = |id: u128, qwc: u128, addr: u128| qwc | id << 28 | addr << 32;
+        // At 0x100: cnt, two quadwords to 0x2000; then end, one to 0x3000.
+        put(&mut regions, 0x100, tag(1, 2, 0x2000));
+        put(&mut regions, 0x110, 0xA);
+        put(&mut regions, 0x120, 0xB);
+        put(&mut regions, 0x130, tag(7, 1, 0x3000));
+        put(&mut regions, 0x140, 0xC);
+        // Past the end tag: never read.
+        put(&mut regions, 0x150, tag(1, 1, 0x4000));
+        put(&mut regions, 0x160, 0xD);
+        let moves = from_spr_chain(&mut regions, 0x0104, 0, 0, 0x8000_0100);
+        let at = |regions: &Regions, a: u32| qword(regions, a);
+        assert_eq!(
+            [0x2000, 0x2010, 0x3000, 0x4000].map(|a| at(&regions, a)),
+            [0xA, 0xB, 0xC, 0]
+        );
+        assert_eq!((moves.tags, moves.qwords()), (2, 3));
     }
 }
