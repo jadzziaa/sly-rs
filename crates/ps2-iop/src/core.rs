@@ -159,6 +159,10 @@ pub struct IopCore {
     pub(crate) cd_callback: (u32, u32),
     /// Sectors `cdvdman` read for modules.
     pub sectors_read: u64,
+    /// The Rust 989snd, when it plays sound in place of the disc's driver.
+    pub(crate) sound: Option<Box<ps2_snd989::Driver>>,
+    /// When the Rust driver's next tick is due.
+    pub(crate) sound_due: u64,
 }
 
 impl Default for IopCore {
@@ -197,6 +201,8 @@ impl IopCore {
             disc: None,
             cd_callback: (0, 0),
             sectors_read: 0,
+            sound: None,
+            sound_due: 0,
         }
     }
 
@@ -359,10 +365,15 @@ impl IopCore {
     #[must_use]
     pub fn next_alarm(&self) -> Option<u64> {
         let timer = self.timers.iter().flatten().filter_map(|t| t.due).min();
-        [self.kernel.next_alarm(), timer, self.hw.next_due()]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.kernel.next_alarm(),
+            timer,
+            self.hw.next_due(),
+            self.sound_alarm(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Runs the SPU2 up to now and completes the DMA transfers due: their
@@ -373,6 +384,7 @@ impl IopCore {
         for line in self.hw.finish_due(ram) {
             tracing::debug!(target: "iop::spu2", "cycle {}: DMA done, line {line:#x}", self.cpu.cycles);
             self.raise(line);
+            self.sound_dma_done(line);
         }
         if self.hw.take_irq() {
             tracing::debug!(target: "iop::spu2", "cycle {}: SPU2 interrupt", self.cpu.cycles);
@@ -502,6 +514,7 @@ impl IopCore {
                 self.kernel.schedule(&mut self.cpu);
             }
             self.fire_timers();
+            self.run_sound();
             self.finish_transfers(&mut regions.iop_ram);
             if self.interrupted.is_none() && self.kernel.interrupts && !self.callbacks.is_empty() {
                 self.start_callback(&mut regions.iop_ram);

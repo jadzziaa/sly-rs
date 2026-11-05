@@ -27,6 +27,9 @@ scale = 1
 volume = 100
 # Play the game's movies (decoded by the emulated IPU); false skips them.
 movies = true
+# Sound by the disc's own driver (989snd on the emulated IOP) when true; by
+# the Rust driver when false. A replay records which it was made with.
+classic = true
 
 # Key bindings replace the defaults one by one: a DualShock button (as in a
 # replay's presses) or a stick direction (left-up, right-down, ...) = a key

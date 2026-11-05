@@ -219,6 +219,11 @@ enum Command {
         /// skipping them.
         #[arg(long)]
         movies: bool,
+        /// Sound by the disc's own driver on the emulated IOP (true) or by
+        /// the Rust one (false). Default: classic, until the Rust driver
+        /// covers Sly 1's sound.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        classic: Option<bool>,
     },
     /// Run the recompiled game and the interpreter side by side and compare
     /// them at every field: registers, RAM and the scratchpad must be equal.
@@ -228,10 +233,14 @@ enum Command {
         /// Fields (1/59.94 s) to run.
         #[arg(long, default_value_t = 300)]
         fields: u64,
-        /// Drive both machines with a replay: its presses, memory card and
-        /// movies.
+        /// Drive both machines with a replay: its presses, memory card,
+        /// movies and sound driver.
         #[arg(long)]
         replay: Option<PathBuf>,
+        /// Sound by the disc's own driver (true) or the Rust one (false),
+        /// for both machines. Default: the replay's, else classic.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        classic: Option<bool>,
     },
     /// Run VU1 programs recorded with `$SLY_RS_VU_RECORD=PATH,SKIP,COUNT`
     /// through the interpreter and the translated microcode: time both and
@@ -308,6 +317,11 @@ enum Command {
         /// Play without a memory card.
         #[arg(long)]
         no_card: bool,
+        /// Sound by the disc's own driver on the emulated IOP (true) or by
+        /// the Rust one (false), as `classic` under `[play]`. A replay
+        /// played first keeps its own.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        classic: Option<bool>,
     },
     /// Play a GS dump (`run --gs-dump`) through sly-rs's GS alone: time it
     /// (a benchmark of drawing) and write what the display shows at its
@@ -461,6 +475,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             gs_dump_fields,
             card,
             movies,
+            classic,
         } => run::run(
             &game,
             fields,
@@ -470,6 +485,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 screenshot: screenshot.as_deref(),
                 gs_dump: gs_dump.as_deref().map(|p| (p, gs_dump_fields)),
                 movies,
+                classic: classic.unwrap_or(sly_common::config::CLASSIC),
             },
             &card,
             recompiled.filter(|_| !interpret),
@@ -478,7 +494,8 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             game,
             fields,
             replay,
-        } => lockstep::run(&game, fields, replay.as_deref(), recompiled),
+            classic,
+        } => lockstep::run(&game, fields, replay.as_deref(), classic, recompiled),
         Command::Replay {
             path,
             record,
@@ -545,6 +562,7 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
             scale,
             card,
             no_card,
+            classic,
         } => sly_common::Game::from_key(&game)
             .ok_or_else(|| anyhow::anyhow!("unknown game {game:?}"))
             .and_then(|game| {
@@ -552,6 +570,9 @@ pub fn main(recompiled: Option<&'static Recompiled>) -> ExitCode {
                 let mut settings = config.play().clone();
                 let card = (!no_card).then(|| card.unwrap_or_else(|| config.card(game)));
                 settings.gpu |= gpu;
+                if let Some(classic) = classic {
+                    settings.classic = classic;
+                }
                 if let Some(scale) = scale {
                     settings.scale = scale;
                 }

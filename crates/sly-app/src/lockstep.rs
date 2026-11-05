@@ -101,6 +101,7 @@ pub(crate) fn run(
     game: &str,
     fields: u64,
     replay: Option<&std::path::Path>,
+    classic: Option<bool>,
     recompiled: Option<&Recompiled>,
 ) -> Result<()> {
     let loaded = replay
@@ -115,6 +116,13 @@ pub(crate) fn run(
     let game = Game::from_key(game).with_context(|| format!("unknown game {game:?}"))?;
     let (mut compiled, _) = crate::boot(game, Some(recompiled))?;
     let (mut interpreted, _) = crate::boot(game, None)?;
+    // Both machines get the same sound driver: the replay's, unless the
+    // command line says.
+    let classic = classic
+        .or_else(|| loaded.as_ref().map(|(r, _)| r.classic))
+        .unwrap_or(sly_common::config::CLASSIC);
+    sly_common::machine::use_sound(&mut compiled, classic);
+    sly_common::machine::use_sound(&mut interpreted, classic);
     // Both machines get the replay's memory card and movies.
     if let Some((replay, path)) = &loaded {
         for machine in [&mut compiled, &mut interpreted] {
@@ -149,7 +157,13 @@ pub(crate) fn run(
         if let Some(what) = differs {
             writeln!(out, "field {field}: the machines differ: {what}")?;
             if script == sly_common::replay::Script::default() {
-                narrow(game, recompiled, (field - 1) * FIELD_CYCLES, &mut out)?;
+                narrow(
+                    game,
+                    recompiled,
+                    classic,
+                    (field - 1) * FIELD_CYCLES,
+                    &mut out,
+                )?;
             }
             bail!("lockstep failed at field {field}");
         }
@@ -183,12 +197,20 @@ pub(crate) fn run(
 /// difference still shows. Generated code runs only whole blocks that fit in
 /// a chunk, so stepping one cycle at a time would hide a bug inside a block;
 /// the smallest chunk that still shows the difference brackets it.
-fn narrow(game: Game, recompiled: &Recompiled, from: u64, out: &mut impl Write) -> Result<()> {
+fn narrow(
+    game: Game,
+    recompiled: &Recompiled,
+    classic: bool,
+    from: u64,
+    out: &mut impl Write,
+) -> Result<()> {
     let (mut start, mut size) = (from, FIELD_CYCLES / 8);
     let mut window = None;
     while size >= 16 {
         let (mut compiled, _) = crate::boot(game, Some(recompiled))?;
         let (mut interpreted, _) = crate::boot(game, None)?;
+        sly_common::machine::use_sound(&mut compiled, classic);
+        sly_common::machine::use_sound(&mut interpreted, classic);
         compiled.run(start);
         interpreted.run(start);
         let mut found = None;

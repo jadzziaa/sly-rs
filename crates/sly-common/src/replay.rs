@@ -8,6 +8,9 @@
 //! card = "formatted"   # a memory card: a blank one, or an image's path
 //!                      #   (relative to the replay); none if left out
 //! movies = true        # the game's movies play (skipped if left out)
+//! classic = true       # sound by the disc's driver on the emulated IOP
+//!                      #   (left out: classic, as replays recorded before
+//!                      #   the Rust driver had it)
 //! presses = ["cross@700", "start@900"]   # BUTTON@FIELD, held six fields
 //! inputs = ["1200:0040", "1206:0000:80807f00"]
 //!
@@ -254,7 +257,7 @@ pub struct Checkpoint {
 }
 
 /// A replay.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Replay {
     /// The game's key.
     pub game: String,
@@ -271,12 +274,36 @@ pub struct Replay {
     /// if left out, as replays recorded before movies played them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub movies: bool,
+    /// Whether sound is classic (the disc's 989snd on the emulated IOP) or
+    /// the Rust driver's: the two leave different machine states. Classic
+    /// if left out, as replays recorded before the Rust driver.
+    #[serde(default = "classic_if_left_out")]
+    pub classic: bool,
     /// The pad's state as it changes, `FIELD:BUTTONS[:STICKS]` (hex).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
     /// Checkpoints, in field order.
     #[serde(default, rename = "checkpoint")]
     pub checkpoints: Vec<Checkpoint>,
+}
+
+fn classic_if_left_out() -> bool {
+    true
+}
+
+impl Default for Replay {
+    fn default() -> Self {
+        Self {
+            game: String::new(),
+            fields: 0,
+            presses: Vec::new(),
+            card: None,
+            movies: false,
+            classic: classic_if_left_out(),
+            inputs: Vec::new(),
+            checkpoints: Vec::new(),
+        }
+    }
 }
 
 impl Replay {
@@ -337,6 +364,7 @@ mod tests {
             presses: vec!["cross@200".to_owned()],
             card: Some(crate::card::FORMATTED.to_owned()),
             movies: true,
+            classic: false,
             inputs: recorder.inputs().to_vec(),
             checkpoints: Vec::new(),
         };
@@ -344,6 +372,11 @@ mod tests {
         let back: Replay = toml::from_str(&text).unwrap();
         assert_eq!(back.card.as_deref(), Some("formatted"));
         assert!(back.movies);
+        assert!(!back.classic);
+        assert!(
+            toml::from_str::<Replay>("game = \"sly1\"\nfields = 1\n").is_ok_and(|r| r.classic),
+            "a replay without the key is classic"
+        );
         let script = Script::of(&back).unwrap();
         for f in 0..400 {
             let mut expected = live(f);

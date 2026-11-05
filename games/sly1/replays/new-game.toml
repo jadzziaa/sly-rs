@@ -6,6 +6,7 @@
 # (decompilation: include/game.h) and sly-rs's state hash.
 game = "sly1"
 fields = 2600
+classic = true
 presses = ["start@300", "start@500", "cross@700", "start@1600", "start@2000"]
 
 [[checkpoint]]

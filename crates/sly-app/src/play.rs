@@ -177,10 +177,9 @@ fn emulate(
         card,
         mut saving,
         movies,
+        classic,
     } = start(options)?;
-    if movies {
-        sly_common::hooks::play_movies(&mut machine, options.game);
-    }
+    prepare(&mut machine, options.game, movies, classic);
     machine.iop.insert_card(card.clone());
     let speaker = speaker(options.settings.volume);
     machine.iop.keep_samples(speaker.is_some());
@@ -270,10 +269,18 @@ fn emulate(
             &mut machine,
             &recorder,
             card.as_ref(),
-            movies,
+            (movies, classic),
         )?;
     }
     Ok(())
+}
+
+/// Movies on or off, and the sound driver, before the game starts.
+fn prepare(machine: &mut ps2_ee::Machine, game: Game, movies: bool, classic: bool) {
+    if movies {
+        sly_common::hooks::play_movies(machine, game);
+    }
+    sly_common::machine::use_sound(machine, classic);
 }
 
 /// What the session starts from.
@@ -286,9 +293,13 @@ struct Start {
     saving: Option<CardSaver>,
     /// Whether movies play: as the replay played them, or as `[play]` says.
     movies: bool,
+    /// Whether sound is classic: as the replay had it, or as `[play]`
+    /// says.
+    classic: bool,
 }
 
-/// What the session starts from: a replay's input, card and movies, or the
+/// What the session starts from: a replay's input, card, movies and sound,
+/// or the
 /// configured card and settings.
 fn start(options: &Options) -> Result<Start> {
     Ok(match &options.replay {
@@ -308,6 +319,7 @@ fn start(options: &Options) -> Result<Start> {
                 card,
                 saving: None,
                 movies: replay.movies,
+                classic: replay.classic,
             }
         }
         None => Start {
@@ -316,6 +328,7 @@ fn start(options: &Options) -> Result<Start> {
             card: options.card.as_deref().map(open_card).transpose()?,
             saving: options.card.clone().map(CardSaver::new),
             movies: options.settings.movies,
+            classic: options.settings.classic,
         },
     })
 }
@@ -403,7 +416,7 @@ fn save(
     machine: &mut ps2_ee::Machine,
     recorder: &Recorder,
     card: Option<&ps2_memcard::Card>,
-    movies: bool,
+    (movies, classic): (bool, bool),
 ) -> Result<()> {
     let fields = machine.cpu.cycles / FIELD_CYCLES;
     let state = Sly1State::read(&mut machine.mem);
@@ -426,6 +439,7 @@ fn save(
         presses: Vec::new(),
         card,
         movies,
+        classic,
         inputs: recorder.inputs().to_vec(),
         checkpoints: vec![Checkpoint {
             field: fields,

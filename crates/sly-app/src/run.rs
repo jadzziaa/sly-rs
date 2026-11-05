@@ -18,6 +18,8 @@ pub(crate) struct Pictures<'a> {
     pub(crate) gs_dump: Option<(&'a std::path::Path, u64)>,
     /// Play the game's movies instead of skipping them.
     pub(crate) movies: bool,
+    /// Sound by the disc's driver (classic) or the Rust one.
+    pub(crate) classic: bool,
 }
 
 #[allow(
@@ -42,6 +44,7 @@ pub(crate) fn run(
     if pictures.movies {
         sly_common::hooks::play_movies(&mut machine, game);
     }
+    sly_common::machine::use_sound(&mut machine, pictures.classic);
     if recompiled.is_none() {
         machine.samples = Some(std::collections::BTreeMap::new());
     }

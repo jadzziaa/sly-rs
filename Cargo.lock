@@ -1900,6 +1900,7 @@ version = "0.1.0"
 dependencies = [
  "ps2-core",
  "ps2-memcard",
+ "ps2-snd989",
  "ps2-spu2",
  "tracing",
 ]
@@ -1919,6 +1920,13 @@ dependencies = [
 [[package]]
 name = "ps2-memcard"
 version = "0.1.0"
+
+[[package]]
+name = "ps2-snd989"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
 
 [[package]]
 name = "ps2-spu2"

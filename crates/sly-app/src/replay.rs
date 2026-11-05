@@ -155,6 +155,7 @@ pub(crate) fn run(
     if replay.movies {
         sly_common::hooks::play_movies(&mut machine, game);
     }
+    sly_common::machine::use_sound(&mut machine, replay.classic);
     if let Some(scale) = frames.gpu {
         let name = crate::use_gpu(&machine, scale, None)?;
         println!("drawing on the GPU: {name}");
