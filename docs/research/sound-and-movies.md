@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T09:50:53Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T10:10:24Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -47,7 +47,7 @@ sources:
     resource: human:august, 2026-11-05
     title: The user listened to the new-game replay's sound
   - id: listened-rust
-    resource: human:august, 2026-11-05 (the new-game replay's 43 s, classic and Rust, as Opus clips)
+    resource: human:august, 2026-11-05 (as Opus clips, classic and Rust - the new-game replay's 43 s; then the first 90 s of their prologue recording and the injected reverb types)
     title: The user compared the Rust 989snd with the disc's driver by ear
   - id: pcsx2-spu2
     resource: https://github.com/PCSX2/pcsx2 (pcsx2/SPU2), GPL-3.0-or-later, read from a sparse clone, 2026-11-05
@@ -355,7 +355,9 @@ an option.
     `lockstep` is equal for its 2,600 fields. `test-full` runs both.
   - **By ear** (the user, 2026-11-05):[^listened-rust] the two drivers'
     sound over the new-game replay, listened to back to back many times,
-    sounds the same.
+    sounds the same. So do, after the second step, the first 90 s of the
+    user's prologue recording and the injected reverb types. The stereo
+    stream (Rust only) has no reference to compare with.
   - Classic stayed the default after this first step.
 - **M3, second step, 2026-11-05: the rest of Sly 1's calls; the Rust
   driver is the default.**

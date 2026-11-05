@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-05
+* **Verification**: [Sound and movies](research/sound-and-movies.md): the user found the Rust 989snd the same as the disc's driver by ear on the prologue's gameplay and the reverb types too.
 * **Update**: [Sound and movies](research/sound-and-movies.md), M3 second step: the Rust 989snd now covers the rest of Sly 1's calls (reverb, all ten types, register for register against the disc's driver; stereo streams; SetSoundPitch, AutoVol, GetSoundOriginalPitch) and is the default sound driver; the disc's driver is the classic setting, and replays without the key stay classic.
 * **Verification**: [Sound and movies](research/sound-and-movies.md): the user found the Rust 989snd's sound the same as the disc's driver's by ear over the new-game replay.
 * **Update**: Plan phase 9: GitHub's CI runs `cargo xtask ci` on Windows too, the same 179 tests passing; CI had failed since phase 7 on missing libudev and ALSA, fixed.
