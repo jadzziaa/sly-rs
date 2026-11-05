@@ -316,6 +316,9 @@ impl Iop {
                 tracing::warn!(target: "iop::snd989", "{error}");
             }
             self.core.sound_call(ps2_snd989::SERVER, function, &data, 0);
+            if let Some(driver) = self.core.sound.as_mut() {
+                driver.take_ee_writes();
+            }
             return true;
         }
         let server = ps2_snd989::SERVER;
@@ -409,7 +412,12 @@ impl Iop {
     /// Something the IOP emulation does not support yet.
     pub fn run(&mut self, mem: &mut Memory, until: u64) -> Result<(), String> {
         self.core.run_until(&mut mem.regions, until)?;
-        while let Some((_, packet, extra)) = self.core.sound_ready.pop_front() {
+        while let Some((_, packet, extra, writes)) = self.core.sound_ready.pop_front() {
+            for (dest, bytes) in writes {
+                for (i, &b) in bytes.iter().enumerate() {
+                    mem.write8(dest.wrapping_add(i as u32), b);
+                }
+            }
             self.send(packet, extra);
         }
         while let Some(done) = self.core.started.pop_front() {
@@ -764,9 +772,18 @@ impl Iop {
             } else {
                 CALL_LATENCY
             };
-            self.core
-                .sound_replies
-                .push_back((self.core.cpu.cycles + latency, packet, extra));
+            let writes = self
+                .core
+                .sound
+                .as_mut()
+                .map(|driver| driver.take_ee_writes())
+                .unwrap_or_default();
+            self.core.sound_replies.push_back((
+                self.core.cpu.cycles + latency,
+                packet,
+                extra,
+                writes,
+            ));
         } else {
             self.send(packet, extra);
         }

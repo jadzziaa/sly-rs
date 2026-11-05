@@ -19,9 +19,8 @@
 //! port of the driver in Ratchet & Clank, whose build is close to Sly's);
 //! the music sequencers follow OpenGOAL's 989snd (ISC).
 //!
-//! Not covered: the driver's own disc reads for the game
-//! (`snd_StreamSafeCdRead`, which Sly 1 does not use), and the time the
-//! disc takes (a bank's or a stream's data arrive at once). `snd_AutoVol`
+//! Not covered: the time the disc takes (a bank's or a stream's data, and
+//! the game's own reads through `snd_StreamSafeCdRead`, arrive at once). `snd_AutoVol`
 //! is checked against the one call Sly 1 makes; stereo streams only
 //! against the disc driver's refusal (Sly 1 sets up one stream ring).
 
@@ -124,6 +123,12 @@ pub struct Driver {
     reverb: reverb::Reverb,
     movie: Option<Movie>,
     ticks: u64,
+    /// The EE's status block, given at `snd_Init`: the driver clears its
+    /// first word when a disc read for the game is done.
+    status: u32,
+    /// Data for EE memory, as the module sends it by SIF DMA: the IOP
+    /// writes it when the call's reply is due.
+    to_ee: Vec<(u32, Vec<u8>)>,
 }
 
 impl Default for Driver {
@@ -203,7 +208,15 @@ impl Driver {
             reverb: reverb::Reverb::new(presets),
             movie: None,
             ticks: 0,
+            status: 0,
+            to_ee: Vec::new(),
         }
+    }
+
+    /// The data the last call sends to EE memory, each block with its
+    /// address, in order.
+    pub fn take_ee_writes(&mut self) -> Vec<(u32, Vec<u8>)> {
+        std::mem::take(&mut self.to_ee)
     }
 
     /// Ticks run so far.
@@ -364,6 +377,7 @@ impl Driver {
         tracing::debug!(target: "snd989", "command {id} {:x?}", &d[..4]);
         match id {
             0 => {
+                self.status = d[0];
                 self.init(bus);
                 None
             }
@@ -507,6 +521,10 @@ impl Driver {
                 None
             }
             54 => Some(1),
+            56 => {
+                self.cd_read(bus, d[0], d[1], d[2]);
+                None
+            }
             59 => Some(self.movie_init(bus, d)),
             60 | 61 => {
                 self.movie_stop(bus, id == 61);
@@ -544,7 +562,9 @@ impl Driver {
                 self.apply_reverb(bus, ops);
                 None
             }
-            8 => None,
+            // 55, StreamSafeCdBreak: reads finish at once, so none is under
+            // way to break.
+            8 | 55 => None,
             _ => {
                 tracing::warn!(target: "snd989", "command {id} not supported ({:x?})", &d[..4]);
                 None
@@ -632,6 +652,23 @@ impl Driver {
         self.banks.insert(handle, Rc::new(bank));
         tracing::debug!(target: "snd989", "bank at lba {lba:#x}: handle {handle:#x}, samples at {base:#x} ({size:#x} bytes)");
         handle
+    }
+
+    /// `snd_StreamSafeCdRead(lba, sectors, buffer)`: the game's own read
+    /// through the driver (Sly 1 reads its save's icon this way when it
+    /// creates a save). The sectors go to the EE's buffer, then the status
+    /// block's first word is cleared, which the game waits for.
+    fn cd_read(&mut self, bus: &mut dyn Bus, lba: u32, sectors: u32, buffer: u32) {
+        let data = bus.sectors(lba, sectors).unwrap_or_else(|| {
+            tracing::warn!(target: "snd989", "StreamSafeCdRead of {sectors} sectors at lba {lba:#x}: disc read failed");
+            Vec::new()
+        });
+        if !data.is_empty() {
+            self.to_ee.push((buffer, data));
+        }
+        if self.status != 0 {
+            self.to_ee.push((self.status, vec![0; 16]));
+        }
     }
 
     fn unload_bank(&mut self, handle: u32) {
@@ -995,6 +1032,35 @@ mod tests {
 
     fn words(w: &[u32]) -> Vec<u8> {
         w.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// The game's own disc read (Sly 1's save icon, as it creates a save):
+    /// the sectors go to its buffer, then the status block given at
+    /// `snd_Init` is cleared, which the game waits for.
+    #[test]
+    fn reads_the_disc_for_the_game() {
+        let mut disc = vec![0u8; 4 * 0x800];
+        disc[0x1800] = 0x5A;
+        let mut bus = TestBus {
+            disc,
+            ..TestBus::default()
+        };
+        let mut driver = Driver::new(None, None);
+        driver.call(SERVER, 0, &0x26_0DC0u32.to_le_bytes(), 12, &mut bus);
+        driver.call(
+            SERVER,
+            BATCH,
+            &batch(&[(56, &[3, 1, 0x1FF_7FC0])]),
+            16,
+            &mut bus,
+        );
+        let writes = driver.take_ee_writes();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].0, 0x1FF_7FC0);
+        assert_eq!(writes[0].1.len(), 0x800);
+        assert_eq!(writes[0].1[0], 0x5A);
+        assert_eq!(writes[1], (0x26_0DC0, vec![0; 16]));
+        assert_eq!(driver.take_ee_writes(), []);
     }
 
     /// A disc with a VAG file of 0x3000 data bytes at 44.1 kHz at sectors

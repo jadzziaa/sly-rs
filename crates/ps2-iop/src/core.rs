@@ -172,7 +172,10 @@ pub struct IopCore {
 
 /// A reply of the Rust 989snd: when it is due, the `RPC_END` packet and
 /// the data for the EE.
-pub(crate) type SoundReply = (u64, Vec<u32>, Option<(u32, Vec<u8>)>);
+/// A reply of the Rust driver: when it is due, the packet, the reply's
+/// data for the EE's receive buffer, and the blocks the driver sends to EE
+/// memory with it (written first).
+pub(crate) type SoundReply = (u64, Vec<u32>, Option<(u32, Vec<u8>)>, Vec<(u32, Vec<u8>)>);
 
 impl Default for IopCore {
     fn default() -> Self {

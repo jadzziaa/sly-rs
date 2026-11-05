@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T10:10:24Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T13:37:03Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -61,6 +61,9 @@ sources:
   - id: m3-prologue
     resource: the user's prologue.toml (19,180 fields into the first levels; read from the main checkout, never copied) replayed classic with SLY_RS_LOG=iop::snd989=debug,iop::hw=trace, then with classic = false, --wav both, compared as m3-compare; libsd's preset table read from the disc's LIBSD.IRX, 2026-11-05
     title: Sly 1's sound calls into its first levels, on both drivers
+  - id: m3-cdread
+    resource: sly-rs run sly1 --card formatted --press left@400,cross@420 (Yes to creating a save), classic with SLY_RS_LOG=iop::sif=debug,iop::snd989=debug for the driver's transfers to the EE, then Rust; --card-out of both compared; the EE's snd_StreamSafeCdRead and snd_StreamSafeCdSync disassembled (0x11E138, 0x11E1F8), 2026-11-05
+    title: The game's disc reads through the sound driver
   - id: m3-inject
     resource: SLY_RS_SND_INJECT (sly-rs replay) sending snd_SetReverbType for all ten types on both cores, snd_SetReverbDepth, a stereo and a mono snd_PlayVAGStreamByLoc into both drivers over the new-game replay, register writes and --wav compared, 2026-11-05
     title: Calls the game does not make, injected into both drivers
@@ -408,6 +411,15 @@ an option.
     --classic`, `lockstep --classic`, or `classic = true` in a replay; a
     replay without the key is still classic, as recorded, so old replays
     keep their hashes.
+- **The game's own disc reads, 2026-11-05.** Sly 1 does use
+  `snd_StreamSafeCdRead` (command 56): creating a save, it reads its icon
+  from the disc through the driver (8 sectors at 0x14CE77, then 3 at
+  0x14CE7F) and waits for the first word of the status block it gave at
+  `snd_Init` (0x260DC0) to clear. The disc's driver sends the sectors to
+  the game's buffer and then 16 zero bytes to the status block, by SIF
+  DMA. The Rust driver had no answer and the game hung at "Yes"; it now
+  does the same, the data and status written when its reply is due.
+  Created with each driver, the card is byte for byte the same.[^m3-cdread]
 - Not checked yet: audio-to-picture sync measured within one run (against
   PCSX2 the sound lines up 246 ms from the pictures, most likely when
   PCSX2's capture started), and the movies later in the game.
@@ -448,4 +460,5 @@ recorded again where the machine's state changes.
 [^m3-compare]: The Rust 989snd against the disc's driver
 [^opengoal]: OpenGOAL's 989snd (MIDI, AME, banks)
 [^m3-prologue]: Sly 1's sound calls into its first levels, on both drivers
+[^m3-cdread]: The game's disc reads through the sound driver
 [^m3-inject]: Calls the game does not make, injected into both drivers

@@ -671,6 +671,7 @@ pub(crate) fn call(
                 let mut mem = core.memory(ram);
                 let (src, dest, size) = (mem.read32(at), mem.read32(at + 4), mem.read32(at + 8));
                 let bytes: Vec<u8> = (0..size).map(|k| mem.read8(src.wrapping_add(k))).collect();
+                tracing::debug!(target: "iop::sif", "dma to EE {dest:#x}, {size} bytes: {:x?}", &bytes[..bytes.len().min(32)]);
                 copy_to_ee(ee, dest, &bytes);
                 core.cpu.cycles += u64::from(size / 16);
             }
