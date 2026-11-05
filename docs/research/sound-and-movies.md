@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:21:43Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:37:33Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -34,6 +34,12 @@ sources:
   - id: movies
     resource: sly-rs replay with card = card3.ps2 (a save present) and movies = true, --frames and --wav, against tools/pcsx2-frames.sh (frames 550-1150, AUDIO) with the same card; a 3-field GS dump of a movie field drawn by PCSX2; 2026-11-05
     title: Sly 1's logo movies against PCSX2
+  - id: ipu-only
+    resource: human:august, 2026-11-05
+    title: 'The user''s decision: movies through the IPU; a Rust player after parity'
+  - id: mods
+    resource: https://slymods.info/wiki/Mod:HQ_Cutscenes and https://gbatemp.net/threads/sly-cooper-and-the-thievius-raccoonus-usa-uhd-remaster-definitive.638803/ (search results; the GBAtemp page itself refused the fetch), 2026-11-05
+    title: Movie and texture mods for Sly found on the web
   - id: listened
     resource: human:august, 2026-11-05
     title: The user listened to the new-game replay's sound
@@ -249,6 +255,19 @@ an option.
   sound queue, its GS packets). The IPU path is what plays movies now.
 - `lockstep` (recompiled against interpreted, now with a replay's card and
   movies) is equal at every field through the logo movies (900 fields).
+- **Decided (2026-11-05):**[^ipu-only] movies go through the emulated IPU
+  only for now; a Rust player waits until after parity.
+- **Movie mods.** The user knows of mods that bring the PS3 release's
+  better movies to the game. Found so far:[^mods] SlyMods' "HQ Cutscenes"
+  is for the PS Vita's Sly Trilogy (rePatch, the Vita's own video files),
+  not the PS2 disc; GBAtemp's "UHD Remaster Definitive" for Sly 1 is a
+  PCSX2 texture pack, not movies. What a PS2 movie mod could do with
+  sly-rs: the disc is identified by its executable alone (its SHA-1), so
+  an image whose movie data is replaced but whose executable is the
+  original boots as is; but Sly's player decodes into a buffer of exactly
+  1,200 macroblocks (`sceMpegGetPicture(..., 1200)`, 0x12C000 bytes), so
+  movies larger than 640×480 need a changed executable, which sly-rs
+  refuses as an unknown build.
 - Not checked yet: audio-to-picture sync measured within one run (against
   PCSX2 the sound lines up 246 ms from the pictures, most likely when
   PCSX2's capture started), and the movies later in the game.
@@ -280,4 +299,6 @@ recorded again where the machine's state changes.
 [^pcsx2-spu2]: PCSX2's SPU2
 [^pcsx2-sound]: sly-rs's sound against PCSX2's
 [^listened]: The user listened to the new-game replay's sound
+[^ipu-only]: The user's decision: movies through the IPU; a Rust player after parity
+[^mods]: Movie and texture mods for Sly found on the web
 [^movies]: Sly 1's logo movies against PCSX2
