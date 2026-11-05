@@ -4,7 +4,7 @@ title: 'sly-rs: plan for a Rust static recompilation of the Sly Cooper trilogy'
 description: How to build a native PC port of the PS2 Sly Cooper trilogy from the user's own discs by static recompilation in Rust, bottom-up - goals, ground rules, approach, architecture, phases with exit gates, engineering practice, verification, performance budget, risks and open decisions.
 tags: [plan, static-recompilation, rust, ps2, r5900, architecture, phases]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:09:08Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:40:34Z }
 stale_after: 2027-05-01T00:00:00Z
 sources:
   - id: request
@@ -891,6 +891,10 @@ given: the gates are the schedule.
 
 ### Phase 12 - Enhancements
 
+- The PS3 release's movies (as the Vita's HQ Cutscenes mod uses them),
+  shown at their own resolution by a host-side movie player, with a Rust
+  replacement for each game's movie player (2026-11-05, after parity;
+  [research/sound-and-movies.md](research/sound-and-movies.md)).
 - Frame-rate options (interpolation or native, decided per game from how its
   logic is tied to the field rate), texture-pack loading compatible with
   PCSX2's naming, optional native renderers for specific VU1 programs where

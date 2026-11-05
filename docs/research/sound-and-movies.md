@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:37:33Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T07:40:34Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -40,6 +40,9 @@ sources:
   - id: mods
     resource: https://slymods.info/wiki/Mod:HQ_Cutscenes and https://gbatemp.net/threads/sly-cooper-and-the-thievius-raccoonus-usa-uhd-remaster-definitive.638803/ (search results; the GBAtemp page itself refused the fetch), 2026-11-05
     title: Movie and texture mods for Sly found on the web
+  - id: ps3-movies
+    resource: human:august, 2026-11-05
+    title: 'The user''s decision: the PS3 movies (the Vita mod''s source) after parity'
   - id: listened
     resource: human:august, 2026-11-05
     title: The user listened to the new-game replay's sound
@@ -268,6 +271,15 @@ an option.
   1,200 macroblocks (`sceMpegGetPicture(..., 1200)`, 0x12C000 bytes), so
   movies larger than 640×480 need a changed executable, which sly-rs
   refuses as an unknown build.
+  The user meant the Vita mod (listed on SlyMods beside PS2 mods).
+  Adapting it is the same work as extracting the PS3 movies: its videos
+  would have to be re-encoded as PS2 movie streams (MPEG-2 video,
+  SPU-ADPCM sound in Sony's stream format), each within the original's
+  sectors (the executable's tables fix every movie's place and size) and
+  at 640×480 at most, so the gain is a cleaner master, not resolution.
+  **Decided (2026-11-05):**[^ps3-movies] extracting and upscaling the PS3
+  movies waits until after parity, where a player on the host side can
+  show them at their own resolution (with the Rust player).
 - Not checked yet: audio-to-picture sync measured within one run (against
   PCSX2 the sound lines up 246 ms from the pictures, most likely when
   PCSX2's capture started), and the movies later in the game.
@@ -301,4 +313,5 @@ recorded again where the machine's state changes.
 [^listened]: The user listened to the new-game replay's sound
 [^ipu-only]: The user's decision: movies through the IPU; a Rust player after parity
 [^mods]: Movie and texture mods for Sly found on the web
+[^ps3-movies]: The user's decision: the PS3 movies (the Vita mod's source) after parity
 [^movies]: Sly 1's logo movies against PCSX2

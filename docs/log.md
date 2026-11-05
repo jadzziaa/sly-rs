@@ -1,6 +1,7 @@
 # Update log
 
 ## 2026-11-05
+* **Update**: PS3 movies (the Vita mod's source) moved to phase 12, after parity: adapting the Vita mod to the PS2 player would cap them at the originals' size and 640×480 ([sound-and-movies.md](research/sound-and-movies.md)).
 * **Update**: [Sound and movies](research/sound-and-movies.md): movies through the IPU only until after parity (the user's decision); what PS3-movie mods found so far are, and what a PS2 movie mod can do with sly-rs.
 * **Update**: [Sound and movies](research/sound-and-movies.md): the user found the sound right by ear; movies play through `ps2-ipu` (PCSX2's IPU, ported) under Sly's own player, pictures within 8 levels of PCSX2's and sound sample for sample its; auto-DMA fed as the core asks. The Rust movie decoder does not fit Sly's player as hoped.
 * **Update**: [Sound and movies](research/sound-and-movies.md): the user's decisions recorded (Rust rewrites by default, emulation behind a classic setting); M1 and M2: `ps2-spu2` (PCSX2's SPU2, ported) under the disc's 989snd, `replay --wav`, sound in `play` through cpal. New-game replay hashes re-recorded.
