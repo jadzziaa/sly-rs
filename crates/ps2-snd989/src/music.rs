@@ -30,6 +30,9 @@ const MICROS_PER_TICK: i64 = 1_000_000 / 240;
 #[derive(Clone, Copy, Debug)]
 struct Note {
     voice: usize,
+    /// The voice's claim serial when the note took it: once the voice is
+    /// claimed again (stolen, or freed and reused) the note is gone.
+    serial: u32,
     key: u8,
     channel: u8,
     velocity: u8,
@@ -79,6 +82,13 @@ impl Track {
             mute: [false; 16],
             notes: Vec::new(),
         }
+    }
+
+    /// Forgets the notes whose voices have since gone to someone else. A
+    /// note keyed off by its note-off stays (its release still follows the
+    /// song's volume) until its voice is taken again.
+    fn prune(&mut self, voices: &Voices) {
+        self.notes.retain(|n| voices.serial(n.voice) == n.serial);
     }
 }
 
@@ -307,7 +317,11 @@ impl Music {
         if let Some(p) = self.slots[s].take() {
             let mut mask = [0; 2];
             for t in p.tracks.values() {
-                for n in &t.notes {
+                for n in t
+                    .notes
+                    .iter()
+                    .filter(|n| voices.serial(n.voice) == n.serial)
+                {
                     mask_set(&mut mask, n.voice);
                 }
             }
@@ -355,7 +369,11 @@ impl Music {
         } else {
             let mut mask = [0; 2];
             for t in p.tracks.values() {
-                for n in &t.notes {
+                for n in t
+                    .notes
+                    .iter()
+                    .filter(|n| voices.serial(n.voice) == n.serial)
+                {
                     mask_set(&mut mask, n.voice);
                 }
             }
@@ -398,8 +416,11 @@ impl Music {
         for id in ids {
             let notes = p
                 .tracks
-                .get(&id)
-                .map(|t| t.notes.clone())
+                .get_mut(&id)
+                .map(|t| {
+                    t.prune(voices);
+                    t.notes.clone()
+                })
                 .unwrap_or_default();
             for n in notes {
                 let lr = p.note_lr(voices, id, &n);
@@ -582,6 +603,7 @@ impl Player {
                     let raw = i32::from(b0 & 0x7F) | (i32::from(b1 & 0x7F) << 7);
                     let bend = (0xFFFF * raw / 0x3FFF + 0x8000) as i16;
                     t.bend[ch] = bend;
+                    t.prune(voices);
                     let notes: Vec<Note> = t
                         .notes
                         .iter()
@@ -636,6 +658,7 @@ impl Player {
                 return;
             };
             if t.complete {
+                t.prune(voices);
                 let mut mask = [0; 2];
                 for n in &t.notes {
                     mask_set(&mut mask, n.voice);
@@ -682,6 +705,7 @@ impl Player {
             }
             let n = Note {
                 voice: granted.voice,
+                serial: voices.serial(granted.voice),
                 key: note,
                 channel: ch as u8,
                 velocity,
@@ -689,6 +713,7 @@ impl Player {
                 tone: k,
             };
             if let Some(t) = self.tracks.get_mut(&id) {
+                t.prune(voices);
                 t.notes.push(n);
             }
             let lr = {
@@ -738,6 +763,7 @@ impl Player {
         let Some(t) = self.tracks.get_mut(&id) else {
             return;
         };
+        t.prune(voices);
         let mut mask = [0; 2];
         for n in &t.notes {
             if usize::from(n.channel) == ch && n.key == note {

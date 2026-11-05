@@ -614,6 +614,7 @@ impl Iop {
     /// data is already in IOP memory). Packets to the IOP's packet buffer
     /// are commands.
     pub fn receive(&mut self, transfer: &Transfer, mem: &mut Memory) -> Option<Action> {
+        tracing::trace!(target: "iop::sif", "cycle {}: from EE to {:#x}, {} bytes", self.now.max(self.core.cpu.cycles), transfer.dest, transfer.size);
         if transfer.dest & 0x1F_FFFF != IOP_PACKET_BUFFER {
             return None;
         }

@@ -4,7 +4,7 @@ title: Sound and movies (phase 8)
 description: The design for phase 8, as the user decided it - Rust rewrites by default (a Rust 989snd driving an SPU2 voice engine, movies decoded in Rust in place of libmpeg's decoding), and the hardware emulated under Sony's own code (the disc's 989snd on the IOP, an emulated IPU) behind a classic setting - with what Sly 1 asks of the SPU2 today, how both stay exact, the milestones and their checks.
 tags: [proposal, spu2, sound, ipu, mpeg, movies, 989snd, determinism, phase-8]
 status: draft
-generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T13:37:03Z }
+generated: { by: claude-code/claude-opus-5-5, at: 2026-11-05T15:16:20Z }
 stale_after: 2027-03-01T00:00:00Z
 sources:
   - id: plan
@@ -64,6 +64,9 @@ sources:
   - id: m3-cdread
     resource: sly-rs run sly1 --card formatted --press left@400,cross@420 (Yes to creating a save), classic with SLY_RS_LOG=iop::sif=debug,iop::snd989=debug for the driver's transfers to the EE, then Rust; --card-out of both compared; the EE's snd_StreamSafeCdRead and snd_StreamSafeCdSync disassembled (0x11E138, 0x11E1F8), 2026-11-05
     title: The game's disc reads through the sound driver
+  - id: m3-game1
+    resource: the user's game1.toml (27,664 fields to the end of the prologue, Rust driver, widescreen, movies; read from the main checkout, never copied), replayed with --wav and SLY_RS_LOG=iop::hw,iop::sif,iop::spu2 traces, against a classic copy for the first 9,000 fields (voices' key-on to key-off by sample address and pitch) and against itself after each fix; CQueueOutputIop::Update disassembled (0x18E838), 2026-11-05
+    title: Cut notes and movie sound in the user's prologue recording
   - id: m3-inject
     resource: SLY_RS_SND_INJECT (sly-rs replay) sending snd_SetReverbType for all ten types on both cores, snd_SetReverbDepth, a stereo and a mono snd_PlayVAGStreamByLoc into both drivers over the new-game replay, register writes and --wav compared, 2026-11-05
     title: Calls the game does not make, injected into both drivers
@@ -420,6 +423,31 @@ an option.
   DMA. The Rust driver had no answer and the game hung at "Yes"; it now
   does the same, the data and status written when its reply is due.
   Created with each driver, the card is byte for byte the same.[^m3-cdread]
+- **Cut notes and the second movie's sound, 2026-11-05** (the user's
+  recording to the end of the prologue, game1.toml, by ear, then
+  measured):[^m3-game1]
+  - *Notes cut short (the coin pickups).* The Rust sequencer keyed off a
+    note's voice with no notice to itself, so the note never left its
+    track's list; a later note-off of that channel and key, or the song
+    stopping, also keyed off whatever sound had since been given that
+    voice. Coin chimes (samples 0xD2310, 0xCA660, 0xD2D08) stopped after
+    33 ticks (137.5 ms) instead of 271 ms; others lost more. A note now
+    keeps the voice's claim serial and counts only while the voice is
+    still that claim. Over the first 9,000 fields, voices' lengths by
+    sample are the disc driver's (the coins 518 of 518 at 271 ms), but
+    for one sample whose length follows the game's timing on both.
+  - *The second movie's sound stuttered.* Two faults of the IOP's DMA
+    model, under both drivers. Clearing CHCR's start bit did not stop a
+    transfer: the logo movie's last half-buffer stayed queued, completed
+    when the next movie began, and from then on every half was started
+    one half early. And MADR stayed at a half's start while its pieces
+    were played; the movie player (`CQueueOutputIop::Update`) writes up to
+    MADR − 1 KB, so it must move on with each 1 KB piece, as a DMA
+    channel's address does. With the early halves it overwrote sound not
+    yet played (about 1,000 clicks in 111 s, a full ring repeated at
+    times); now 17 pieces of 20,388 are played without a refill, all at
+    the movie's end where the game has stopped writing, as at the logo
+    movie's end on the disc's driver. The logo movie is unchanged.
 - Not checked yet: audio-to-picture sync measured within one run (against
   PCSX2 the sound lines up 246 ms from the pictures, most likely when
   PCSX2's capture started), and the movies later in the game.
@@ -461,4 +489,5 @@ recorded again where the machine's state changes.
 [^opengoal]: OpenGOAL's 989snd (MIDI, AME, banks)
 [^m3-prologue]: Sly 1's sound calls into its first levels, on both drivers
 [^m3-cdread]: The game's disc reads through the sound driver
+[^m3-game1]: Cut notes and movie sound in the user's prologue recording
 [^m3-inject]: Calls the game does not make, injected into both drivers

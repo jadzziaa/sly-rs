@@ -163,8 +163,11 @@ impl IopHardware {
                 if !self.spu.adma_wants_data(t.core) || t.handed < t.bytes {
                     if self.spu.adma_wants_data(t.core) {
                         let n = (t.bytes - t.handed).min(ADMA_PIECE);
+                        tracing::trace!(target: "iop::spu2", "cycle {}: auto-DMA piece from {:#x}", self.now, t.madr + t.handed);
                         self.move_data(&t, t.handed, n, ram);
                         t.handed += n;
+                        // MADR moves on with each piece, as on the IOP.
+                        self.values.insert(t.chcr - 8, t.madr + t.handed);
                     }
                     t.due = self.next_sample;
                     waiting.push(t);
@@ -212,6 +215,15 @@ impl IopHardware {
     fn start(&mut self, channel: usize, chcr: u32) {
         let (_, base, core, line) = CHANNELS[channel];
         if chcr & 0x0100_0000 == 0 {
+            // Clearing the start bit stops the channel: a transfer under
+            // way ends there, with no interrupt (989snd stops movie sound's
+            // auto-DMA this way between movies).
+            let before = self.transfers.len();
+            self.transfers.retain(|t| t.chcr != base + 8);
+            if self.transfers.len() != before {
+                tracing::debug!(target: "iop::spu2", "cycle {}: DMA {} stopped", self.now, CHANNELS[channel].0);
+                self.spu.set_dma_busy(core, false);
+            }
             return;
         }
         let madr = self.values.get(&base).copied().unwrap_or(0) & 0x00FF_FFFF;
@@ -299,5 +311,52 @@ impl IopMmio for IopHardware {
         if let Some(channel) = CHANNELS.iter().position(|c| c.1 + 8 == address) {
             self.start(channel, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Core 0's auto-DMA input fed from IOP RAM at 0x1000, three pieces.
+    fn movie_sound() -> IopHardware {
+        let mut hw = IopHardware::default();
+        hw.write(ADMAS[0], 2, 1);
+        hw.write(0x1F80_10C0, 4, 0x1000);
+        hw.write(0x1F80_10C4, 2, 0x10);
+        hw.write(0x1F80_10C6, 2, 3 * ADMA_PIECE / 64);
+        hw.write(0x1F80_10C8, 4, 0x0100_0201);
+        hw
+    }
+
+    /// MADR moves on a piece at a time as the core takes them, which is
+    /// how a movie player sees how far the sound has played.
+    #[test]
+    fn auto_dma_madr_follows_the_pieces() {
+        let mut hw = movie_sound();
+        let mut ram = vec![0u8; 0x20_0000];
+        let mut seen = Vec::new();
+        while hw.transfers.len() == 1 && hw.now < 10_000_000 {
+            hw.now = hw.next_due().unwrap_or(hw.now + 1);
+            hw.finish_due(&mut ram);
+            let madr = hw.read(0x1F80_10C0, 4);
+            if seen.last() != Some(&madr) {
+                seen.push(madr);
+            }
+        }
+        assert_eq!(seen, [0x1400, 0x1800, 0x1C00]);
+    }
+
+    /// Clearing CHCR's start bit stops the channel: the transfer is gone
+    /// and no interrupt follows.
+    #[test]
+    fn clearing_the_start_bit_stops_the_channel() {
+        let mut hw = movie_sound();
+        assert_eq!(hw.transfers.len(), 1);
+        hw.write(0x1F80_10C8, 4, 0x201);
+        assert!(hw.transfers.is_empty());
+        let mut ram = vec![0u8; 0x20_0000];
+        hw.now = 1_000_000;
+        assert_eq!(hw.finish_due(&mut ram), Vec::<u32>::new());
     }
 }

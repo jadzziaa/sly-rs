@@ -134,6 +134,8 @@ struct Record {
     group: i8,
     /// The tick of its allocation or key-on.
     stamp: u32,
+    /// Which allocation of the voice this is (one more each claim).
+    serial: u32,
     /// Left and right before the group master.
     l: i16,
     r: i16,
@@ -156,6 +158,7 @@ impl Default for Record {
             priority: 0,
             group: 0,
             stamp: 0,
+            serial: 0,
             l: 0,
             r: 0,
             bend: 0,
@@ -206,6 +209,8 @@ pub(crate) struct Voices {
     /// Keyed voices, in key-on order.
     active: Vec<usize>,
     pub(crate) tick: u32,
+    /// Claims made so far, the last claim's serial.
+    claims: u32,
     /// Register writes waiting for the chip, in order.
     pub(crate) writes: Vec<(u32, u16)>,
 }
@@ -229,6 +234,7 @@ impl Voices {
             vmix_r: [0xFF_FFFF; 2],
             active: Vec::new(),
             tick: 0,
+            claims: 0,
             writes: Vec::new(),
         }
     }
@@ -329,10 +335,18 @@ impl Voices {
 
     // ------------------------------------------------ allocation
 
+    /// Which allocation voice `v` is in: a note holds on to the voice it
+    /// was given only while this is unchanged.
+    pub(crate) fn serial(&self, v: usize) -> u32 {
+        self.rec[v].serial
+    }
+
     fn claim(&mut self, v: usize, priority: u8, group: usize) {
+        self.claims = self.claims.wrapping_add(1);
         let r = &mut self.rec[v];
         r.state = State::Claimed;
         r.stamp = self.tick;
+        r.serial = self.claims;
         r.priority = priority;
         r.group = group as i8;
         r.countdown = END_COUNTDOWN;
@@ -781,6 +795,20 @@ mod tests {
         voices.flush_key_ons();
         let kon: Vec<(u32, u16)> = voices.writes.clone();
         assert_eq!(kon[8], (0x1F90_01A0, 1));
+    }
+
+    /// Each claim of a voice has its own serial, so a song's note can tell
+    /// that its voice went to another sound (a note-off must not stop it).
+    #[test]
+    fn a_reclaimed_voice_has_a_new_serial() {
+        let mut voices = Voices::new();
+        voices.ranges = [(0, 0); 8];
+        let v = voices.alloc(0, 10).map_or(99, |g| g.voice);
+        let first = voices.serial(v);
+        assert_eq!(voices.serial(v), first);
+        let again = voices.alloc(0, 10).map_or(99, |g| g.voice);
+        assert_eq!(again, v, "the only voice is stolen");
+        assert_ne!(voices.serial(v), first);
     }
 
     /// A keyed voice ends after four silent polls, and its owner hears.
